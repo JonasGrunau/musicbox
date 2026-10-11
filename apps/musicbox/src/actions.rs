@@ -15,4 +15,7 @@ pub enum Action {
     AskCreate { parent: Option<DbId>, kind: NodeKind },
     AskRename { id: DbId, name: String },
     AskRemoveFromCollection(Vec<DbId>),
+    /// Export a local playlist to the device at this index of `Devices::list`.
+    Export { playlist: DbId, device: usize },
+    CancelExport,
 }

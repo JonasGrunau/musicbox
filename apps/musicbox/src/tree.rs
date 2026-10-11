@@ -16,8 +16,10 @@ pub fn show(
     editing: bool,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
+    let targets: Vec<(usize, String, Option<String>)> =
+        devices.list.iter().enumerate().map(|(i, d)| (i, d.name.clone(), d.write_refusal.clone())).collect();
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        let mut ctx = Ctx { library_ref: LibraryRef::Local, library, source, editing, actions: &mut actions };
+        let mut ctx = Ctx { targets: &targets, library_ref: LibraryRef::Local, library, source, editing, actions: &mut actions };
         library_lists(ui, "Collection", &mut ctx);
         if !devices.list.is_empty() {
             ui.add_space(8.0);
@@ -37,6 +39,7 @@ pub fn show(
                     }
                     DeviceState::Ready(snapshot) => {
                         let mut ctx = Ctx {
+                            targets: &[],
                             library_ref: LibraryRef::Device(i),
                             library: snapshot,
                             source: &mut *source,
@@ -52,6 +55,8 @@ pub fn show(
 }
 
 struct Ctx<'a> {
+    /// Export targets: (index, name, refusal) — offered for local playlists.
+    targets: &'a [(usize, String, Option<String>)],
     library_ref: LibraryRef,
     library: &'a LibrarySnapshot,
     source: &'a mut Source,
@@ -164,8 +169,33 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mu
                 if response.clicked() {
                     *ctx.source = this;
                 }
+                let exportable = ctx.library_ref == LibraryRef::Local && section == Section::Playlists && node.kind == PlaylistKind::Playlist;
+                if exportable {
+                    let targets = ctx.targets;
+                    response.context_menu(|ui| {
+                        ui.menu_button("Export to", |ui| {
+                            if targets.is_empty() {
+                                ui.weak("No USB/SD device connected");
+                            }
+                            for (index, name, refusal) in targets {
+                                let button = ui.add_enabled(refusal.is_none(), egui::Button::new(name));
+                                let button = match refusal {
+                                    Some(reason) => button.on_disabled_hover_text(reason),
+                                    None => button,
+                                };
+                                if button.clicked() {
+                                    ctx.actions.push(Action::Export { playlist: node.id.clone(), device: *index });
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if editable {
+                            ui.separator();
+                            node_menu(ui, node, ctx.actions);
+                        }
+                    });
+                }
                 if editable && node.kind == PlaylistKind::Playlist {
-                    response.context_menu(|ui| node_menu(ui, node, ctx.actions));
                     if response.dnd_hover_payload::<TrackDrag>().is_some() {
                         ui.painter().rect_stroke(
                             response.rect,

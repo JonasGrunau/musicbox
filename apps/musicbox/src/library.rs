@@ -11,6 +11,9 @@ pub struct Loaded {
     pub snapshot: LibrarySnapshot,
     pub db_path: PathBuf,
     pub passphrase: String,
+    pub analysis_root: PathBuf,
+    /// rekordbox's settings folder (MYSETTING*.DAT etc., copied to sticks on export).
+    pub settings_root: PathBuf,
 }
 
 pub type LoadResult = Result<Loaded, String>;
@@ -40,5 +43,11 @@ fn load(args: &Args) -> anyhow::Result<Loaded> {
     }
     let passphrase = derive_passphrase(&paths.dp)?;
     let snapshot = MasterDb::open_read_only(&paths.db_path, &passphrase)?.load_snapshot(&paths)?;
-    Ok(Loaded { snapshot, db_path: paths.db_path, passphrase })
+    Ok(Loaded {
+        snapshot,
+        db_path: paths.db_path,
+        passphrase,
+        analysis_root: paths.analysis_data_root,
+        settings_root: paths.settings_root,
+    })
 }

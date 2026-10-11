@@ -5,6 +5,7 @@ pub mod app;
 pub mod browser;
 pub mod devices;
 pub mod editor;
+pub mod export;
 pub mod library;
 pub mod protect;
 pub mod theme;

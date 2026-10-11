@@ -21,3 +21,4 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 mb-anlz = { path = "../../crates/mb-anlz" }
 mb-devlib = { path = "../../crates/mb-devlib" }
 mb-pdb = { path = "../../crates/mb-pdb" }
+mb-usb = { path = "../../crates/mb-usb" }

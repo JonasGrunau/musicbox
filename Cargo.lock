@@ -2396,6 +2396,7 @@ dependencies = [
  "mb-library",
  "mb-masterdb",
  "mb-pdb",
+ "mb-usb",
 ]
 
 [[package]]

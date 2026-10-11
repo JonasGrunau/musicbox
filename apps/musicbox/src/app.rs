@@ -1,6 +1,7 @@
 use crate::actions::Action;
 use crate::devices::{DeviceState, Devices};
 use crate::editor::{Editor, Reply, Request};
+use crate::export::{self, ExportJob};
 use crate::library::{LoadResult, spawn_load};
 use crate::{Args, browser, tree, waveform};
 use mb_library::{Command, NodeKind};
@@ -46,11 +47,15 @@ pub struct App {
     pub library: LibrarySnapshot,
     /// master.db path and passphrase of the loaded local library (for the editor).
     local_db: Option<(PathBuf, String)>,
+    /// Source-library details for USB exports.
+    export_source: Option<export::Source>,
+    export: Option<ExportJob>,
     editor: Option<Editor>,
     dialog: Option<Dialog>,
     /// Last editor message (status bar).
     edit_status: Option<String>,
     last_guard_check: Option<std::time::Instant>,
+    ctx: egui::Context,
     pub devices: Devices,
     pub source: Source,
     pub browser: browser::State,
@@ -63,16 +68,20 @@ static EMPTY: std::sync::LazyLock<LibrarySnapshot> = std::sync::LazyLock::new(Li
 impl App {
     pub fn new(ctx: egui::Context, args: Args) -> Self {
         let devices = Devices::new(args.devices.clone(), !args.no_volume_scan);
+        let ui_ctx = ctx.clone();
         Self {
             loading: Some(spawn_load(ctx, args.clone())),
             args,
             error: None,
             library: LibrarySnapshot::default(),
             local_db: None,
+            export_source: None,
+            export: None,
             editor: None,
             dialog: None,
             edit_status: None,
             last_guard_check: None,
+            ctx: ui_ctx,
             devices,
             source: Source { library: LibraryRef::Local, list: List::Collection },
             browser: browser::State::default(),
@@ -95,6 +104,12 @@ impl App {
             match result {
                 Ok(loaded) => {
                     self.library = loaded.snapshot;
+                    self.export_source = Some(export::Source {
+                        db_path: loaded.db_path.clone(),
+                        passphrase: loaded.passphrase.clone(),
+                        analysis_root: loaded.analysis_root,
+                        settings_root: loaded.settings_root,
+                    });
                     self.local_db = Some((loaded.db_path, loaded.passphrase));
                     self.browser.invalidate();
                 }
@@ -156,7 +171,24 @@ impl App {
             {
                 ui.colored_label(egui::Color32::from_rgb(0xFF, 0xB9, 0x37), e);
             }
-            if let Some(msg) = &self.edit_status {
+            if let Some(job) = &self.export {
+                ui.separator();
+                ui.spinner();
+                let text = match &job.progress {
+                    Some(p) => format!(
+                        "Exporting to {}: {}/{} {}",
+                        job.device_name,
+                        p.tracks_done,
+                        p.tracks_total,
+                        p.current.as_deref().unwrap_or("")
+                    ),
+                    None => format!("Exporting to {}…", job.device_name),
+                };
+                ui.label(text);
+                if ui.small_button("Cancel").clicked() {
+                    job.cancel();
+                }
+            } else if let Some(msg) = &self.edit_status {
                 ui.separator();
                 ui.weak(msg);
             }
@@ -236,7 +268,41 @@ impl App {
                 }
                 Action::AskRename { id, name } => self.dialog = Some(Dialog::Rename { id, name }),
                 Action::AskRemoveFromCollection(ids) => self.dialog = Some(Dialog::ConfirmRemove { ids }),
+                Action::Export { playlist, device } => self.start_export(playlist, device),
+                Action::CancelExport => {
+                    if let Some(job) = &self.export {
+                        job.cancel();
+                    }
+                }
             }
+        }
+    }
+
+    fn start_export(&mut self, playlist: DbId, device: usize) {
+        if self.export.is_some() {
+            self.edit_status = Some("An export is already running".into());
+            return;
+        }
+        let (Some(source), Some(target)) = (self.export_source.clone(), self.devices.list.get(device)) else {
+            return;
+        };
+        if let Some(reason) = &target.write_refusal {
+            self.edit_status = Some(reason.clone());
+            return;
+        }
+        self.export = Some(ExportJob::start(&self.ctx, source, playlist, target.root.clone(), target.name.clone()));
+    }
+
+    fn poll_export(&mut self) {
+        let Some(job) = &mut self.export else { return };
+        if let Some(result) = job.poll() {
+            let root = job.device_root.clone();
+            self.edit_status = Some(match result {
+                Ok(summary) => format!("{summary} to {}", job.device_name),
+                Err(e) => format!("Export failed: {e}"),
+            });
+            self.export = None;
+            self.devices.reload(&self.ctx, &root);
         }
     }
 
@@ -354,6 +420,7 @@ impl eframe::App for App {
 
         let ctx = ui.ctx().clone();
         self.poll_editor(&ctx);
+        self.poll_export();
         let mut actions = self.global_input(&ctx);
 
         egui::Panel::bottom("status").exact_size(22.0).show(ui, |ui| self.status(ui));

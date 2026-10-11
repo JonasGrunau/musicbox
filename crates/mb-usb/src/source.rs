@@ -294,6 +294,17 @@ impl LibraryDir {
             .ok_or_else(|| Error::Selection(format!("no master.db under {}", dir.display())))?;
         let paths = mb_masterdb::LibraryPaths::from_options_json(&dir.join("options.json"))?;
         let passphrase = mb_masterdb::derive_passphrase(&paths.dp)?;
+        let share = src.parent().map(|p| p.join("share"));
+        let analysis_root = share
+            .filter(|s| s.is_dir())
+            .unwrap_or(paths.analysis_data_root);
+        Self::open_paths(&src, &passphrase, analysis_root, paths.settings_root)
+    }
+
+    /// Opens a library given its parts (the live library: master.db, its passphrase, the
+    /// analysis-data root and rekordbox's settings folder). master.db is copied to a temp dir
+    /// first, so the live file is never opened by the export.
+    pub fn open_paths(src: &Path, passphrase: &str, analysis_root: PathBuf, settings_root: PathBuf) -> Result<Self> {
         let tmp = std::env::temp_dir().join(format!(
             "mb-usb-master-{}-{}",
             std::process::id(),
@@ -309,15 +320,11 @@ impl LibraryDir {
                 std::fs::copy(&from, &to).map_err(|e| Error::io(&from, e))?;
             }
         }
-        let master = mb_masterdb::MasterDb::open_read_only(&tmp.join("master.db"), &passphrase)?;
-        let share = src.parent().map(|p| p.join("share"));
-        let analysis_root = share
-            .filter(|s| s.is_dir())
-            .unwrap_or(paths.analysis_data_root);
+        let master = mb_masterdb::MasterDb::open_read_only(&tmp.join("master.db"), passphrase)?;
         Ok(Self {
             master,
             analysis_root,
-            settings_root: paths.settings_root,
+            settings_root,
             tmp,
         })
     }
