@@ -96,7 +96,7 @@ The static initialiser `__GLOBAL__sub_I_rekordboxDevSqliteDB.cpp` (0x10073E0DC) 
    - `createTable` emits `create table <name>(<col> <type>[ primary key], …)` only when `tableExists` is false.
    - With `true`, it drops and recreates every table.
    - The creation order below is also the `sqlite_master` order.
-4. `createIndexes(false)` @0x1006F6BA8 drops, then creates, 4 indexes: `index_playlist_content_playlist_id`, `index_myTag_content_myTag_id`, `index_myTag_content_content_id`, `index_hotCueBankList_cue_hotCueBankList_id`.
+4. `createIndexes(false)` @0x1006F6BA8 drops, then creates, 4 indexes: `index_playlist_content_playlist_id`, `index_myTag_content_myTag_id`, `index_myTag_content_content_id`, `index_hotCueBankList_cue_hotCueBankList_id`. ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** the traced opens only check whether the indexes exist; no DROP was observed.
 5. When the file did not exist before, it calls vtable slot +0x5B0, which is `initPropertyTable` @0x1006F26A8 (resolved from `vtable for db::DevSqliteDBController` @0x1051ADAC0). Otherwise it calls `rekordboxDBController::readMenuItemTable`. On failure it calls slot +0x5C8 (`closeDB`).
 
 ## Schema
@@ -107,7 +107,7 @@ The static initialiser `__GLOBAL__sub_I_rekordboxDevSqliteDB.cpp` (0x10073E0DC) 
 - **DDL text:** `sqlite_master` holds `CREATE TABLE content(content_id integer primary key, title varchar, …)` (no spaces after the table name) and `CREATE INDEX index_x on t(col)`. A writer that wants byte-identical DDL should emit exactly that text.
 - **IDs:**
   - Most new IDs are `max(<id>)+1` (`get_next_id` @0x100703FF4; `insertTrack` and `setHotCue` do the same inline).
-  - Sibling sequence numbers are `max(sequenceNo)+1` per parent (`get_next_seq` @0x10070E954).
+  - Sibling sequence numbers are `max(sequenceNo)+1` per parent (`get_next_seq` @0x10070E954). ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** the second export suggests new lists are placed at position 0. Open; needs a trace of a second export.
   - IDs are small integers, unlike master.db's random u32 strings. The fixture's playlists 4–7 and 16385+ (0x4001…) suggest a second ID range, perhaps for lists created on a player ("TAG LIST 00x"), with later exports continuing from max+1 (*hypothesis*).
 - **Rows:** none are ever soft-deleted; there are no `rb_*` sync columns.
 
@@ -247,10 +247,14 @@ The last three pairs are block-seek information for compressed formats, so a pla
 |---|---|
 | `deviceName` | Volume label (`updateDeviceName`). Fixture: `REKORDBOX`. |
 | `dbVersion` | String. **7.2.19 writes `"10000"`** (cstring 0x104F8E832, in both `initPropertyTable` and the insert branch of `writeMyTag`). The fixture still says `"1000"` because its row dates from 2020 (`createdDate` 2020-10-28) and nothing rewrites it later. |
+
+ ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** the fresh RBTEST stick also ends with `dbVersion "1000"` and an empty `deviceName`, because the DB is created and then rebuilt about 18 s later. Trace wins until the static path is re-checked.
 | `numberOfContents` | `count(content)`, refreshed after every insert or remove (`update_property_num_content` @0x10070669C, using an `update … set … = (select count(*) …)` template). |
 | `createdDate` | `YYYY-MM-DD`, set at creation. |
 | `backGroundColorType` | Device colour chosen in rekordbox (`selectDeviceColor` @0x1007189D8). Initially 0; the fixture has 2. |
 | `myTagMasterDBID` | DBID passed to `writeMyTag`. Initially 0; fixture 2328226058, which is `masterDbId` + 1 (source *open*). |
+
+ ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** on RBTEST `myTagMasterDBID` was the ID of the `djmdCloudProperty` row named `SyncService`, not DBID + 1. On the old stick it happens to equal DBID + 1.
 
 ### recommendedLike
 - `recommendedLike(content_id_1, content_id_2, rating, createdDate)` holds "like" relations between two tracks.

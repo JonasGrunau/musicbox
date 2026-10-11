@@ -287,7 +287,7 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
 - **`masterDbId`** = `RowDataTrack::getMasterDBID` @0x1004e0d2c: the source's `MasterDBID` column if non-zero, otherwise the source library's DBID (`djmdProperty.DBID`). It is written as an unsigned 32-bit value (fixture 2328226057). The sync files print the same value as signed i32 (−1966741239).
 - **`masterContentId`** = `getMasterContentID` @0x1004e0d44: the source's `MasterSongID` if non-zero, otherwise the source `djmdContent.ID`.
 - Tracks that came into the library from another one (for example imported from a device) therefore keep pointing at their original library.
-- **`myTagMasterDBID`** (Plus `property.myTagMasterDBID`; classic exportExt.pdb `DJDBEXDBPROPERTYOPTION.MYTAGMASTERDBID`) = **master DBID + 1**. `DatabaseMediator::syncMyTagLocal` @0x100c52988 computes `*(mediator+0x528) + 1` and passes it to `syncMyTagList` (vtable +0x510 @0x1017f273c), which writes the tree. Fixture: 2328226058 = 2328226057 + 1.
+- **`myTagMasterDBID`** (Plus `property.myTagMasterDBID`; classic exportExt.pdb `DJDBEXDBPROPERTYOPTION.MYTAGMASTERDBID`) = **master DBID + 1**. `DatabaseMediator::syncMyTagLocal` @0x100c52988 computes `*(mediator+0x528) + 1` and passes it to `syncMyTagList` (vtable +0x510 @0x1017f273c), which writes the tree. Fixture: 2328226058 = 2328226057 + 1. ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** on RBTEST the value written was the ID of the `djmdCloudProperty` row named `SyncService`. `mediator+0x528` is probably that row's ID, not the DBID. Re-check the field.
   - `syncMyTag` @0x100c51eec compares the device value: 0 → write; DBID + 1 → in sync; and it enables My Tag export (controller+0x40).
   - If the device value is the plain DBID, it asks to "resync My Tag after starting rekordbox 6".
   - Any other value ("synced with another computer") prompts to overwrite.
@@ -512,7 +512,7 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
    - backups run on quit, on eject or from the menu, and only when backups are enabled for that device.
 5. **Plus DB** (`addDeviceLibraryPlus` @0x1010dde60 → `DevSqliteDBController::startupDeviceDB` @0x1006f4a88):
    - creates `exportLibrary.db` if missing;
-   - opens it in WAL mode and runs `createTables(false)` and `createIndexes(false)`. **`createIndexes` drops and recreates 4 indexes on every open**, so every mount writes WAL frames, and the main file changes at the next checkpoint or close.
+   - opens it in WAL mode and runs `createTables(false)` and `createIndexes(false)`. **`createIndexes` drops and recreates 4 indexes on every open**, so every mount writes WAL frames, and the main file changes at the next checkpoint or close. ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** the traced opens only check whether the indexes exist; no DROP was observed. The 20:00 explanation needs a new candidate.
 6. **Browser side** (`dbMessageAddDevice` @0x100319b08 / `dbMessageUpdateDevice` @0x10031a1bc):
    - **My Tag:** `syncMyTag` (§ 2.5).
    - **Plus DB new or empty:** the Device Library Plus conversion is offered (`needDbConversion` @0x100728748 → `deviceSqliteDbConversion` @0x1010def78, § 6.4).
