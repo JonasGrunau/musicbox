@@ -2,6 +2,27 @@
 
 Newest entry first. Each entry records what changed, what is verified, and the next action.
 
+## 2026-10-11 (night) — M1 done, M2/M3 in progress
+**Milestone status**
+- **M0** done, except the analysis spikes (TF/mpg123 dlopen), which move to M6.
+- **M1** done. The read-only browser covers local, export.pdb and exportLibrary.db libraries, with playlists, histories, My Tag, waveforms and artwork.
+  - Verified against rekordbox.xml: 161/161 tracks, 0 unexplained mismatches.
+  - The XML writer is byte-exact.
+- **M2** in progress:
+  - Done: process guard, session backup, `WriteTxn` (common.md rules, tests on fixture copies).
+  - Running: `mb-library` ops (import, remove, playlists, metadata edits, masterPlaylists6.xml, undo).
+- **M3** in progress:
+  - Done: the ANLZ USB conversion is byte-exact.
+  - Running: export.pdb/exportExt.pdb writer, exportLibrary.db writer.
+
+**Repo**
+- Private GitHub repo `JonasGrunau/musicbox`.
+- For this session, commit and push straight to `main` (user's instruction).
+
+**Next**
+- Merge the three agents' results. Then add UI write actions behind a "write enabled" switch that only works on a library copy until the user check at the end of M2.
+- Then the mb-usb planner/executor, to run a real export to the spare stick for the CDJ test.
+
 ## 2026-10-11 (later) — M0 corpus ready, M1 browser started
 **Done**
 - **Corpus**
