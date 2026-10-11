@@ -10,6 +10,7 @@ Status values: **verified** (checked against real files or a trace), **hypothesi
 | [pdb.md](pdb.md) | export.pdb / exportExt.pdb (DeviceSQL) | reader verified (all tables with fixture rows); writer rules partly hypothesis |
 | [devlib.md](devlib.md) | exportLibrary.db (OneLibrary) | key verified (BlowFishHelper decode, also yields master.db key); read + schema verified; write rules hypothesis |
 | [export.md](export.md) | USB export flow, paths, IDs, artwork, sync, settings files | verified from binary + stick (writer not yet built); open questions listed |
+| [xml.md](xml.md) | rekordbox.xml import/export format, TEMPO/POSITION_MARK derivation | reader + byte-exact writer verified on oracle-a (161/161 tracks); cues/colours untested |
 | analysis.md | analysis pipeline, BALib, WaveCreator, key, phrase, loudness, vocal | open |
 | decode.md | per-format decoding and resampling | open |
 

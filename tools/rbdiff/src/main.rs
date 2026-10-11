@@ -3,8 +3,10 @@
 //! `rbdiff device <device_root>` — export.pdb and exportLibrary.db on one device must describe
 //! the same library: same track IDs, titles, artists, BPM, keys, playlists and playlist order.
 //! `rbdiff anlz-export <library_dir> <device_root>` — USB ANLZ files vs the local analysis.
+//! `rbdiff xml <library_dir> <rekordbox.xml>` — an XML collection export vs master.db + ANLZ.
 
 mod anlz_export;
+mod xml_check;
 
 use anyhow::{Context, Result, bail};
 use mb_core::{LibrarySnapshot, PlaylistKind};
@@ -27,7 +29,18 @@ fn main() -> Result<()> {
             let dev = PathBuf::from(args.next().context("usage: rbdiff anlz-export <library_dir> <device_root>")?);
             anlz_export::run(&lib, &dev)
         }
-        _ => bail!("usage: rbdiff device <device_root> | anlz-export <library_dir> <device_root>"),
+        Some("xml") => {
+            let lib = PathBuf::from(args.next().context("usage: rbdiff xml <library_dir> <rekordbox.xml>")?);
+            let xml = PathBuf::from(args.next().context("usage: rbdiff xml <library_dir> <rekordbox.xml>")?);
+            let problems = xml_check::run(&lib, &xml)?;
+            if problems > 0 {
+                bail!("{problems} unexplained mismatches");
+            }
+            Ok(())
+        }
+        _ => bail!(
+            "usage: rbdiff device <device_root> | anlz-export <library_dir> <device_root> | xml <library_dir> <rekordbox.xml>"
+        ),
     }
 }
 

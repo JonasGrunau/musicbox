@@ -12,3 +12,4 @@ mb-pdb = { path = "../../crates/mb-pdb" }
 mb-devlib = { path = "../../crates/mb-devlib" }
 mb-anlz = { path = "../../crates/mb-anlz" }
 mb-masterdb = { path = "../../crates/mb-masterdb" }
+mb-xml = { path = "../../crates/mb-xml" }
