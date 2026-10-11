@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "tools/probegen", "tools/rbdiff"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Proprietary"
+publish = false
+
+[workspace.dependencies]
+mb-core = { path = "crates/mb-core" }
+anyhow = "1"
+thiserror = "2"
+eframe = "0.36"
+egui = "0.36"
+egui_extras = "0.36"

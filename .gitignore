@@ -1,0 +1,5 @@
+/target
+/fixtures/*
+!/fixtures/manifest.toml
+.omc/
+.DS_Store

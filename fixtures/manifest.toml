@@ -1,0 +1,35 @@
+# Committed description of the gitignored fixtures. Real data never enters git.
+
+[stick]
+path = "fixtures/stick"
+source = "/Volumes/REKORDBOX (read-only mount), PIONEER/ without extracted/"
+captured = "2026-10-11"
+files = 4932
+hashes = "fixtures/stick/PIONEER.sha256"
+audio_hashes = "fixtures/stick/Contents.sha256"
+notes = "Exported by an older rekordbox library (sync DBID -1966741239); ANLZ mostly 2020-21. rekordbox 7.2.19 rewrote export.pdb/exportExt.pdb/exportLibrary.db on 2026-10-11 20:00."
+
+[sandbox-initial]
+path = "fixtures/sandbox-initial"
+source = "~/Library/Pioneer/rekordbox + rekordboxAgent options.json, rekordbox closed"
+captured = "2026-10-11"
+rekordbox = "7.2.19.0342"
+macos = "27.0"
+tracks = 14
+notes = "Fresh install: 2 demo MP3s + 12 sampler WAVs, analysed by 7.2.19 (network analysis ON, phrase/vocal OFF)."
+
+[oracle-a]
+path = "fixtures/oracle-a"
+captured = "2026-10-11"
+rekordbox = "7.2.19.0342"
+macos = "27.0"
+settings = "Normal mode, BPM range 70-180, high precision OFF, key/phrase/vocal ON, network analysis OFF"
+contents = "sandbox library (169 tracks: 14 demo/sampler + 100 real + 55 probes), rekordbox.xml, RBTEST export (157 tracks, playlists oracle-small + oracle-all), export log, SQL traces of the instrumented clone"
+notes = "corpus in ~/re-work/corpus (probes regenerable with tools/probegen; real tracks via tools/corpus/select.py). 4 probes at 22.05 kHz were not exported (reason [2])."
+
+[oracle-b]
+path = "fixtures/oracle-b"
+captured = "2026-10-11"
+settings = "HighPrecisionBeatAnalyze=1, trackAnalysisMode=0 (Dynamic intended; key reads 0 — open), key/phrase/vocal ON, network OFF; see analysis-settings.txt"
+contents = "sandbox library after re-analysis of all tracks"
+notes = "vs oracle-a: PQTZ differs on 154/169, PQT2 154, PSSI 142, PWAV 4, PWV2 1; all other tags identical."
