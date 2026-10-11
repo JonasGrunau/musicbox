@@ -2,6 +2,22 @@
 
 Newest entry first. Each entry records what changed, what is verified, and the next action.
 
+## 2026-10-12 — M2 accepted by rekordbox
+- **M2 user check passed ("all ok").** rekordbox 7.2.19 opened the sandbox library after musicbox edits (`mb-library` example `m2_check`) with no warning or repair dialog. All of these were shown correctly:
+  - new folder + playlist with 5 tracks in order
+  - playlist rename
+  - rating 3 + colour Green on 5 tracks
+  - title edit
+  - file import
+- Pre-check snapshot: `fixtures/sandbox-pre-m2`. musicbox backup: `~/Library/Application Support/musicbox/backups/20261012-010939.360`.
+- **Writers:** export.pdb/exportExt.pdb (78/78 + 18/18 pages) and exportLibrary.db (all tables) reproduce rekordbox's RBTEST export byte-exact or row-exact.
+- **UI:** the editing UI is done and tested headlessly with egui_kittest. The user asked for no OS-level input automation, so UI tests never touch the real mouse or keyboard.
+- **Running:** `mb-usb` export engine (planner + executor), verified against RBTEST.
+- **Next:**
+  - Export in the UI. Writes go only to unprotected sticks: the reference stick's volume UUID 2335E32F-… is hard-blocked.
+  - Spare-stick CDJ test (M3 user check).
+  - Then M4 sync, and M5 decode/player/cue editing.
+
 ## 2026-10-11 (night) — M1 done, M2/M3 in progress
 **Milestone status**
 - **M0** done, except the analysis spikes (TF/mpg123 dlopen), which move to M6.
