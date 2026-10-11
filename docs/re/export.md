@@ -189,6 +189,8 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
 - Each path then hashes to its own ANLZ folder (P065/00012879 and P03F/0000EFED).
 
 ### 1.5 Which databases are written, and when
+
+>  ✅ **Resolved 2026-10-12 (devlib.md § Writer, verified by rebuilding RBTEST):** A fresh stick's exportLibrary.db `property` row is copied from export.pdb by the conversion (hence `dbVersion` "1000" and an empty device name). New playlists are appended and then moved to position 0 by the export.
 - **Track rows** (verified) are written per track, inside the background thread:
   - in the primary DB first, then in every same-device DB.
   - export.pdb: `dsqlAddTrack` → `DevAddContent_`, a DeviceSQL stored procedure (`_DevAddContent` @0x1012ee110).
@@ -284,6 +286,8 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
 - One image row per exported track; there is no de-duplication. Fixture: 702 images for 704 tracks, and the same album cover is stored up to 7 times.
 
 ### 2.5 Relation to master.db (verified)
+
+>  ✅ **Resolved 2026-10-12 (devlib.md § Writer, verified by rebuilding RBTEST):** `myTagMasterDBID` = master DBID + 1, unless cloud sync is set up; then it is the cloud DBID (`djmdCloudProperty` `SyncService` row ID). Both sticks fit. The device-side track lookup order is artist, genre, album, remixer, label, original artist, key, composer, lyricist.
 - **`masterDbId`** = `RowDataTrack::getMasterDBID` @0x1004e0d2c: the source's `MasterDBID` column if non-zero, otherwise the source library's DBID (`djmdProperty.DBID`). It is written as an unsigned 32-bit value (fixture 2328226057). The sync files print the same value as signed i32 (−1966741239).
 - **`masterContentId`** = `getMasterContentID` @0x1004e0d44: the source's `MasterSongID` if non-zero, otherwise the source `djmdContent.ID`.
 - Tracks that came into the library from another one (for example imported from a device) therefore keep pointing at their original library.
@@ -494,6 +498,8 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
 - **No explicit FAT32 4 GiB file-size check was found** (open).
 
 ### 6.3 What happens when a stick is mounted (verified unless marked)
+
+>  ✅ **Resolved 2026-10-12 (devlib.md § Writer, verified by rebuilding RBTEST):** `createIndexes(false)` on open does **not** drop indexes; only `createIndexes(true)` does. The drop-and-recreate seen in the trace is `clearAllData`, run by the Device Library Plus conversion. Mounting therefore doesn't rewrite exportLibrary.db, and the 20:00 rewrite of the reference stick still needs an explanation (open).
 `createDeviceDB` @0x100ccb5a4 runs the same steps, with creation enabled, at the start of an export (§ 1.1).
 
 1. **No DB yet:** `check_exists_pioneer_folder` @0x100ccafe8 tests for `<root>/PIONEER/rekordbox` (`.PIONEER` on HFS). If it is missing, the device is listed without a DB and **nothing is written** until an export calls `createDeviceDB`.

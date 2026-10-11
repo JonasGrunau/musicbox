@@ -1,6 +1,6 @@
 # exportLibrary.db (Device Library Plus / OneLibrary)
 
-Status: key **verified**; read **verified** (`mb-devlib`, fixture tests); schema **verified**; column meanings **verified** from the writer code unless marked *hypothesis*; write rules **hypothesis** (from static RE only, no write has been tested on a player yet).
+Status: key **verified**; read **verified** (`mb-devlib`, fixture tests); schema **verified**; column meanings **verified** from the writer code unless marked *hypothesis*; write rules **verified** for everything a USB export writes (the `mb-devlib` writer rebuilds rekordbox's oracle-a export row-for-row, see § Writer), **hypothesis** for cue, hot cue bank, history and relation rows (from the code only, no fixture rows). Nothing has been tested on a player yet.
 
 All addresses are for the rekordbox 7.2.19 arm64 slice (`~/re-work/bin/rekordbox-arm64`). `__TEXT` maps 1:1, so VA = 0x100000000 + file offset. The evidence comes from llvm-objdump disassembly and string/xref scans, because the REA decompiler timed out on this binary.
 
@@ -96,7 +96,7 @@ The static initialiser `__GLOBAL__sub_I_rekordboxDevSqliteDB.cpp` (0x10073E0DC) 
    - `createTable` emits `create table <name>(<col> <type>[ primary key], …)` only when `tableExists` is false.
    - With `true`, it drops and recreates every table.
    - The creation order below is also the `sqlite_master` order.
-4. `createIndexes(false)` @0x1006F6BA8 drops, then creates, 4 indexes: `index_playlist_content_playlist_id`, `index_myTag_content_myTag_id`, `index_myTag_content_content_id`, `index_hotCueBankList_cue_hotCueBankList_id`. ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** the traced opens only check whether the indexes exist; no DROP was observed.
+4. `createIndexes(false)` @0x1006F6BA8 creates the 4 indexes `index_playlist_content_playlist_id`, `index_myTag_content_myTag_id`, `index_myTag_content_content_id` and `index_hotCueBankList_cue_hotCueBankList_id` when missing (`SQLiteDB::createIndex` checks `sqlite_master` first). It drops them only when called with `true`. **Resolved 2026-10-12** (binary + SQL trace): an earlier reading had the drop on every open. Only `clearAllData` @0x1007284B0 = `createTables(true)` + `createIndexes(true)` drops and recreates everything; the Device Library Plus conversion runs it (ops/export-devlib.md phase 2).
 5. When the file did not exist before, it calls vtable slot +0x5B0, which is `initPropertyTable` @0x1006F26A8 (resolved from `vtable for db::DevSqliteDBController` @0x1051ADAC0). Otherwise it calls `rekordboxDBController::readMenuItemTable`. On failure it calls slot +0x5C8 (`closeDB`).
 
 ## Schema
@@ -106,8 +106,11 @@ The static initialiser `__GLOBAL__sub_I_rekordboxDevSqliteDB.cpp` (0x10073E0DC) 
 - **Keys:** a single `<table>_id integer primary key` (a rowid alias) on every table except the link tables, `property` and `recommendedLike`. There are no foreign keys, NOT NULL constraints or defaults.
 - **DDL text:** `sqlite_master` holds `CREATE TABLE content(content_id integer primary key, title varchar, …)` (no spaces after the table name) and `CREATE INDEX index_x on t(col)`. A writer that wants byte-identical DDL should emit exactly that text.
 - **IDs:**
-  - Most new IDs are `max(<id>)+1` (`get_next_id` @0x100703FF4; `insertTrack` and `setHotCue` do the same inline).
-  - Sibling sequence numbers are `max(sequenceNo)+1` per parent (`get_next_seq` @0x10070E954). ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** the second export suggests new lists are placed at position 0. Open; needs a trace of a second export.
+  - Most new IDs are `max(<id>)+1`, 1 for an empty table (`get_next_id` @0x100703FF4; `insertTrack` and `setHotCue` do the same inline).
+  - **Playlists, folders, hot cue bank lists** (`rekordboxDBController::createNewList` @0x1017E6808): `sequenceNo` = 0 if the parent has no lists yet, otherwise `max(sequenceNo) + 1` among the siblings (`getListCountInFolder`, `getPlaylistFolderSeqMax` @0x100720A80). The caller then passes a target position; when it is not −1 and not past the end, the new list is moved there (`movePlaylist` @0x100721AB0 → `move_sequence` @0x100710230). The USB export passes 0 (`exportPlaylist` reads it from a per-list position array, default 0), so **every newly exported list ends up on top** and the existing siblings shift down by one. **Resolved 2026-10-12** (binary + fixture): this is what put `oracle-all` at 0 and `oracle-small` at 1.
+  - `move_sequence` runs, in one transaction (`transactionStart(2)`): when moving up, `update T set sequenceNo = sequenceNo + 1 where sequenceNo >= <new> and sequenceNo < <old> and <parent> = P`; when moving down, `… - 1 where sequenceNo > <old> and sequenceNo <= <new> …`; then `update T set sequenceNo = <new> where <id> = X and <parent> = P`.
+  - **Histories** use `get_next_seq` @0x10070E954 instead: `max(sequenceNo) + 1` among siblings, where an empty parent gives NULL → 0 → **1**. So the first history gets `sequenceNo` 1, unlike playlists (0).
+  - Link-table entries are 1-based: `playlist_content` gets `count(entries) + 1` (export), `history_content` continues after the highest `sequenceNo` of the history (`insertTrackToHistory` @0x100713578).
   - IDs are small integers, unlike master.db's random u32 strings. The fixture's playlists 4–7 and 16385+ (0x4001…) suggest a second ID range, perhaps for lists created on a player ("TAG LIST 00x"), with later exports continuing from max+1 (*hypothesis*).
 - **Rows:** none are ever soft-deleted; there are no `rb_*` sync columns.
 
@@ -116,6 +119,12 @@ The column → member mapping comes from the `DevDBTables::<Table>` constructors
 
 ### content (one row per exported track)
 The row is written by `insertTrack(RowDataTrack*)` @0x10070562C as a single INSERT. It then runs `update_property_num_content`.
+
+- **Lookups before the insert** (`rekordboxDBController::addTrack` @0x1017E1EE4), each only for a non-empty name: artist (+0xD0), genre (+0x180), album (+0x108, with the compilation flag +0x120 and album-artist name +0x148), remixer (+0x300), label (+0x1B8), original artist (+0x290), key (+0x210), composer (+0x338). The lyricist (+0x458) is looked up inside `insertTrack`, after `select max(content_id)`. (`export.md` §1.5 lists remixer, original artist and composer before label and key; the code order is the one here.)
+- **Column order of the INSERT** (the NamedValueSet insertion order, confirmed by the SQL trace): `content_id, path, fileName, title, [artist_id_artist, album_id, genre_id,] bpmx100, length, trackNo, bitrate, bitDepth, djComment, fileType, rating, releaseYear, [artist_id_remixer, label_id, artist_id_originalArtist,] key_id, dateCreated, color_id, djPlayCount, [image_id,] masterDbId, masterContentId, analysisDataFilePath, fileSize, discNo, [artist_id_composer,] subtitle, samplingRate, analysedBits, releaseDate, dateAdded, contentLink, hasModified, isHotCueAutoLoadOn, isKuvoDeliverStatusOn, kuvoDeliveryComment, artist_id_lyricist, isrc`. Bracketed columns are only present when non-zero, so they are NULL otherwise.
+- **Value widths** (from the `juce::var` constructors): `length`, `bitDepth`, `releaseYear`, `djPlayCount` and `discNo` are signed 16-bit; `fileType`, `rating`, `color_id` and `analysedBits` are signed 8-bit; `fileSize`, `samplingRate`, `masterDbId`, `masterContentId`, `contentLink` and the lookup IDs are unsigned 32-bit; `bpmx100`, `trackNo` and `bitrate` are signed 32-bit. A value outside its width wraps. For example, a track longer than 32767 s gets a negative `length`.
+- **Strings** are never NULL: an empty source field is written as `''` (`subtitle`, `djComment`, `releaseDate`, `isrc`, `kuvoDeliveryComment`). `SQLiteDB::toSqlString` @0x1010FD708 double-quotes strings with `""` escaping (`addEscapeChars` @0x1010FD648), so stored strings equal the source. A *void* `juce::var` would be written as `""`, not NULL.
+- **Name lookups inline the name as a double-quoted literal** (`where name = "<name>"`). SQLite resolves a double-quoted token as an identifier first, so a name equal to a column name of the lookup table (`name`, `genre_id`, …) matches every row. This is a rekordbox quirk; the `mb-devlib` writer binds the value instead.
 
 | Column | Meaning |
 |---|---|
@@ -151,7 +160,16 @@ The row is written by `insertTrack(RowDataTrack*)` @0x10070562C as a single INSE
 | `analysedBits` | Copy of master `Analysed`. Updated by `setAnalyzed` / `setAnalysisUpdated`. Fixture: 41 and 105. |
 | `contentLink` | Flag word copied from master `ContentLink`. **Bit 0 = beat grid modified** (`selectModifiedBeatGridTracks` @0x10070C30C selects rows with bit 0 set). insertTrack has a dead branch that would OR in 0x80. Fixture: 0xC0700 for every row. |
 | `hasModified` | 0/1 (meaning *open*; fixture all 0). |
-| `cueUpdateCount`, `analysisDataUpdateCount`, `informationUpdateCount` | Strings copied from master `CueUpdated` / `AnalysisUpdated` / `TrackInfoUpdated`. They are compared with the source on re-export to skip unchanged tracks (`compareTrackUpdated`, `compareCueUpdated`, `compareAnalysisUpdated`). INSERT does not write them; `setTrackUpdated` / `setAnalysisUpdated` / `modifyCueUpdated` do. Because they are bound as strings, an empty marker is stored as **text `''`** while numbers get integer affinity. |
+| `cueUpdateCount`, `analysisDataUpdateCount`, `informationUpdateCount` | Strings copied from master `CueUpdated` / `AnalysisUpdated` / `TrackInfoUpdated`. They are compared with the source on re-export to skip unchanged tracks (`compareTrackUpdated` @0x1006F1AF4 & co. compare `var::toString` of the column, so NULL reads as ""). INSERT does not write them; `setTrackUpdated` @0x1006F1FEC (`informationUpdateCount`) and `setAnalysisUpdated` @0x1006F21EC (`analysedBits` = the full source `Analysed` byte, `cueUpdateCount`, `analysisDataUpdateCount`) do. Because they are bound as strings, an empty marker is stored as **text `''`** while numbers get integer affinity. |
+
+**Re-export of a track that is already on the stick** (`DatabaseMediator::overwrite_export` @0x1009B8748). The writes, in order:
+1. If the info marker differs (`compareTrackUpdated`), or one other source field differs: `checkAndSetChanges` + `modifyTrack` for changed fields, then `setTrackUpdated(info)`.
+2. If the analysis or cue marker differs, or extended cues are now needed: `setAnalysisUpdated(id, Analysed, analysis, cue)` (full `Analysed`, not `& 0x3F`).
+3. Then the `contentLink` merge: the device value gains 0x100, plus the source's 0x200, 0x400, 0x40000 and 0x80000 bits. 0x10000 and 0x100000 come from the source only when the source row's kind (RowDataTrack+0x50) is 1 or 6, which is the collection (*hypothesis* for the meaning of +0x50).
+4. `modifyContentLink` @0x10071EAAC runs only when the merge changed something.
+5. The device ANLZ set is deleted and rewritten (`export.md` §4.2).
+
+Verified on oracle-a: rows 1–5 (inserted by the first export, then re-exported) end with `analysedBits` 105, `contentLink` 1902336, `cueUpdateCount` `''`, `analysisDataUpdateCount` 6 and `informationUpdateCount` 4.
 
 The fixture holds two generations of rows:
 - 1–620 come from an older rekordbox. Unknown IDs are 0, `titleForSearch` is `''` and `isKuvoDeliverStatusOn` is 0.
@@ -161,9 +179,15 @@ The fixture holds two generations of rows:
 - `artist(artist_id, name, nameForSearch)`; `genre(genre_id, name)`; `label(label_id, name)`.
   - Added on demand by `getAndAdd{Artist,Genre,Label,Key}ID`. Verified for genre (@0x100703C3C): it selects by exact `name = '<name>'`, and only when that finds nothing does it insert `get_next_id` (max+1).
   - `nameForSearch` is `''` or NULL.
-- `album(album_id, name, artist_id, image_id, isComplation, nameForSearch)`: written by `getAndAddAlbumID(String, char, String, unsigned)` @0x100704388. The parameters are probably name, compilation flag, album-artist name and image id (*hypothesis*). The spelling `isComplation` is rekordbox's.
+- `album(album_id, name, artist_id, image_id, isComplation, nameForSearch)`: written by `getAndAddAlbumID(name, compilation, albumArtist, artistId)` @0x100704388. The spelling `isComplation` is rekordbox's. The function runs these steps:
+  1. It looks up or adds the **album artist** name through `getAndAddArtistID`. An empty name gives 0 and no SQL. The 4th argument, the track artist ID, is unused.
+  2. It selects by `name = "<name>"`, adds ` and artist_id = <id>` when there is an album artist, and adds ` and isComplation = <flag>` when the flag is non-zero. So an album without an album artist matches any same-named album.
+  3. If nothing matches, it inserts `(album_id = max+1, name, [artist_id,] isComplation)`. `image_id` and `nameForSearch` stay NULL. Verified on oracle-a: 6 of 97 albums have an album artist.
 - `key(key_id, name)`: free-text key names copied from the collection. Fixture examples: `Gmin`, `Dm`, `9A`, `Unknown`, `Ebmin`.
 - `color(color_id, name)`: copied from master `djmdColor` (ID → `color_id`, `Commnt` → `name`) when the DB is created (`initPropertyTable`). Fixture: 1 Pink, 2 Red, 3 Orange, 4 Yellow, 5 Green, 6 Aqua, 7 Blue, 8 Purple.
+- **Changing a lookup column later** (`modifyGenre` @0x10071FB08 and the other `modify<Lookup>` functions) differs from the insert:
+  - It looks up or adds the name, then writes the ID with `update content set <col> = <id>`, so an empty name writes **0**, not NULL.
+  - It then runs `delete_unused_record` @0x100719890, which deletes lookup rows no longer referenced by a value > 0. For genre, label and key that is the matching `content` column. For artists it is all five `content` artist columns and `album.artist_id`.
 
 ### image
 - `image(image_id, path)`: added by `addImage` → `calc_next_device_image_path` @0x10070A018.
@@ -183,7 +207,13 @@ The fixture holds two generations of rows:
 - **Index:** `index_playlist_content_playlist_id`.
 
 ### cue (memory cues, loops, hot cues, hot-cue-bank cues)
-- **Writers:** `setHotCue` @0x10071D6C4 inserts the position columns. `setMemoryCue` @0x10071D68C is a tail call through vtable slot +0x1008, which is `setHotCue`. `addCueOption2(cueId, analyzer::Cue)` @0x100716058 then updates every column. `setHotCueBanklistCueInfoWithID` @0x1006F8120 writes all columns in one go.
+- **Writers:**
+  - `setHotCue(contentId, inMs, in150, inMpegFrame, inMpegAbs, outMs, out150, outMpegFrame, kind, outMpegAbs)` @0x10071D6C4 inserts `cue_id` (max+1), `content_id`, `kind`, `inUsec` and `outUsec`, the two `*150FramePerSec` columns, the two `*MpegFrameNumber` columns and the two `*MpegAbs` columns.
+    - `inUsec` = `inMs × 1000` as unsigned 32-bit, so it wraps after about 71.6 min.
+    - `outUsec` is −1 when `outMs` is −1.
+  - `setMemoryCue` @0x10071D68C is a tail call through vtable slot +0x1008, which is `setHotCue`.
+  - `addCueOption2(cueId, analyzer::Cue)` @0x100716058 then updates every column except `isActiveLoop`: kind, colorTableIndex, cueComment, the µs positions with the sub-ms part, the 150 fps and MPEG columns, beatLoopNumerator/Denominator, and the block seek columns. `isActiveLoop` stays NULL unless `enableActiveLoop` writes it.
+  - `setHotCueBanklistCueInfoWithID` @0x1006F8120 writes all columns in one go.
 - **Reader:** `set_cueInfo` @0x1006F8C38.
 - **The fixture has no cue rows**, so everything here comes from code.
 
@@ -207,17 +237,27 @@ The fixture holds two generations of rows:
 The last three pairs are block-seek information for compressed formats, so a player can start decoding at a cue without scanning. They are probably what master.db keeps in `InPointSeekInfo` / `OutPointSeekInfo` (*hypothesis*). For PCM files (WAV/AIFF), 0 is the natural value (*hypothesis*).
 
 ### hotCueBankList / hotCueBankList_cue
-- **`hotCueBankList`** has the same shape as `playlist`. It is written by `addHotCueBanklist(String, unsigned, char, unsigned)` @0x100721F08, which looks analogous to `insertPlaylist` (*hypothesis*).
+- **`hotCueBankList`** has the same shape as `playlist`. It is written by `addHotCueBanklist(name, parent, attribute, sequenceNo)` @0x100721F08. Note the argument order differs from `insertPlaylist(seq, name, type, parent)`.
+  - It inserts `(hotCueBankList_id = max+1, sequenceNo, name, attribute, hotCueBankList_id_parent)` with `image_id` NULL.
+  - `attribute` is the raw byte (no 8→0 / 9→1 mapping).
+  - `createNewList` gives it the same sequence and move rules as playlists (list type 4).
+  - The `DevDBTables::HotCueBankList` descriptor holds the id column name twice: a computed `hotCueBankList_id` and a literal one. That is why its member offsets are shifted by 8 against `playlist`.
 - **`hotCueBankList_cue(hotCueBankList_id, cue_id, sequenceNo)`:** `setHotCueBankCue` @0x10071DC08 inserts the cue row through `setHotCue` and then the link row, inside one transaction (`transactionStart(2)`).
 - **Index:** `index_hotCueBankList_cue_hotCueBankList_id`.
 
 ### history / history_content
 - **`history(history_id, sequenceNo, name, attribute, history_id_parent)`** and **`history_content(history_id, content_id, sequenceNo)`** hold play histories (presumably recorded by players and imported by rekordbox; *hypothesis*).
 - rekordbox writes them in `addNewHistory(name, attribute, parent, time)` @0x10071313C and `insertTrackToHistory` @0x100713578.
+  - `addNewHistory`: `history_id = max+1`; `sequenceNo` is from `get_next_seq` (siblings' max + 1, so 1 for the first); then `(history_id, sequenceNo, name, attribute, history_id_parent)`.
+  - `insertTrackToHistory(id, contentIds)`: reads the highest `sequenceNo` (`order by sequenceNo desc`), then inserts one `(history_id, content_id, sequenceNo)` row per track, numbered from that value + 1, or from 1 for an empty history.
 - The fixture has no history rows.
 
 ### myTag / myTag_content
-- **`myTag(myTag_id, sequenceNo, name, attribute, myTag_id_parent)`:** the whole tree is rewritten by `writeMyTag(masterDbId, list)` @0x1007121E4. It sets `property.myTagMasterDBID` (inserting the property row if missing), deletes every `myTag` row, then bulk-inserts.
+- **`myTag(myTag_id, sequenceNo, name, attribute, myTag_id_parent)`:** the whole tree is rewritten by `writeMyTag(masterDbId, list)` @0x1007121E4.
+  - It sets `property.myTagMasterDBID`. If there is no property row, it inserts `("", "10000", 0, today, 0, id)` instead.
+  - It deletes every `myTag` row, then bulk-inserts.
+  - Its caller `syncMyTagList` @0x1017F273C passes `sequenceNo = Seq − 1`. On a full rewrite it then clears `myTag_content` (`clearMyTagTrack`).
+  - Track links are added per track by `insertMyTagOnTrack` @0x10070EC20, a multi-row `(myTag_id, content_id)` insert.
   - `attribute` 1 = column/folder (fixture: the 4 top-level groups "Genre", "Components", "Situation", "Untitled Column", ids 1–4, parent 0).
   - `attribute` 0 = tag. Tag ids are the master.db My Tag IDs (random u32).
 - **`myTag_content(myTag_id, content_id)`** has no sequence column (the fixture has 0 rows). Indexes: `index_myTag_content_myTag_id`, `index_myTag_content_content_id`.
@@ -246,15 +286,11 @@ The last three pairs are block-seek information for compressed formats, so a pla
 | Column | Meaning |
 |---|---|
 | `deviceName` | Volume label (`updateDeviceName`). Fixture: `REKORDBOX`. |
-| `dbVersion` | String. **7.2.19 writes `"10000"`** (cstring 0x104F8E832, in both `initPropertyTable` and the insert branch of `writeMyTag`). The fixture still says `"1000"` because its row dates from 2020 (`createdDate` 2020-10-28) and nothing rewrites it later. |
-
- ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** the fresh RBTEST stick also ends with `dbVersion "1000"` and an empty `deviceName`, because the DB is created and then rebuilt about 18 s later. Trace wins until the static path is re-checked.
+| `dbVersion` | String. `initPropertyTable` and the insert branch of `writeMyTag` write `"10000"` (cstring 0x104F8E832). **A fresh 7.2.19 stick still ends with `"1000"` and `deviceName ""`** (resolved 2026-10-12, binary + trace). The Device Library Plus conversion first runs `clearAllData`, then `insertAllDevProperty` @0x100737658, which copies the row from export.pdb (`djdbProperty`: `DevName`, `DBVersion`, `SongNumber`, `DateCreated`, `ColorID`; `djdbexDBPropertyOption.MyTagMasterDBID`). The classic DB's version is "1000". The old fixture stick says "1000" for the same reason. |
 | `numberOfContents` | `count(content)`, refreshed after every insert or remove (`update_property_num_content` @0x10070669C, using an `update … set … = (select count(*) …)` template). |
 | `createdDate` | `YYYY-MM-DD`, set at creation. |
 | `backGroundColorType` | Device colour chosen in rekordbox (`selectDeviceColor` @0x1007189D8). Initially 0; the fixture has 2. |
-| `myTagMasterDBID` | DBID passed to `writeMyTag`. Initially 0; fixture 2328226058, which is `masterDbId` + 1 (source *open*). |
-
- ⚠ **Contradicted by the SQL trace (ops/export-devlib.md, 2026-10-11):** on RBTEST `myTagMasterDBID` was the ID of the `djmdCloudProperty` row named `SyncService`, not DBID + 1. On the old stick it happens to equal DBID + 1.
+| `myTagMasterDBID` | The ID passed to `writeMyTag`. Initially 0. `DatabaseMediator::syncMyTagLocal` @0x100C52988 passes **master DBID + 1**. When the library has cloud sync set up, it passes the cloud library's DBID instead (`AppSyncDBController::getCloudDBID` ≠ 0, the ID of the `djmdCloudProperty` row `Reserved1 = 'SyncService'`). **Resolved 2026-10-12:** the old stick has DBID + 1 (2328226058); RBTEST has the SyncService ID 2140940981 (its library syncs with Dropbox). |
 
 ### recommendedLike
 - `recommendedLike(content_id_1, content_id_2, rating, createdDate)` holds "like" relations between two tracks.
@@ -262,15 +298,55 @@ The last three pairs are block-seek information for compressed formats, so a pla
 - `createdDate` is `juce::Time::currentTimeMillis()` (ms since the Unix epoch). `rating` was not seen being written.
 - The fixture has 0 rows.
 
+## Writer (`mb-devlib`, verified 2026-10-12)
+`mb_devlib::DevLibWriter` (`crates/mb-devlib/src/write.rs`) reproduces `DevSqliteDBController` call by call. Every method names its rekordbox function. Values are bound as parameters instead of inlined, which stores the same values (see § content, *Strings*). The DDL text and the seed defaults are in `crates/mb-devlib/src/schema.rs`.
+
+| Rule | Writer API | Status |
+|---|---|---|
+| Open/key/`synchronous=NORMAL`/`journal_mode=WAL`, SQLCipher 4 defaults | `create`, `open` | verified (oracle-a) |
+| 22 tables + 4 indexes, byte-identical `sqlite_master.sql` | `create` (`schema::TABLES`, `INDEXES`) | verified |
+| Seed: `initPropertyTable` (`"10000"`), then conversion `clearAllData` + re-seed (color, menuItem, category, sort, property `"1000"`, `deviceName ""`) | `create` with `CreateOptions::replay_conversion` (default) | verified, including page layout |
+| Menu rows from master (`Class & 0xFF`, U+FFFA/U+FFFB names, `Disable` bits) or the built-in defaults | `MenuSeed::from_master`, `MenuSeed::defaults` | verified (from master); defaults from code |
+| `get_next_id` max+1; name lookups; album with album artist and compilation flag | `get_or_add`, `get_or_add_album` | verified |
+| `addTrack` lookup order, `insertTrack` column set, NULL/0/'' and widths | `add_track(&NewTrack)` | verified (157/157 rows) |
+| `numberOfContents` refresh | `add_track`, `update_number_of_contents` | verified |
+| Image `max+1`, path `%05d` folder `id/20+1`, owner `image_id` update | `add_image` | verified (95/95) |
+| Playlist create at end + move to position, folders attribute 1 | `create_playlist`, `move_playlist`, `find_playlist` | verified (2/2, incl. the move) |
+| `playlist_content` 1-based by count | `append_playlist_entry`, `clear_playlist` | verified (162/162) |
+| My Tag tree rewrite, `myTagMasterDBID` | `write_my_tags`, `clear_my_tag_content`, `add_my_tags_to_track` | verified (28/28 tree rows; links from code) |
+| Re-export: duplicate check, markers, full `Analysed`, `contentLink` merge | `find_exported_track`, `track_markers`, `set_track_updated`, `set_analysis_updated`, `reexport_content_link`, `set_content_link` | verified (5/5 rows) |
+| `modify*` for plain and lookup columns (0 for none, `delete_unused_record`) | `modify_column`, `modify_lookup`, `delete_unused` | hypothesis (code only) |
+| Histories (`get_next_seq` from 1), history entries | `add_history`, `add_tracks_to_history` | hypothesis (code only) |
+| Cues (`setHotCue` + `addCueOption2`), hot cue bank lists and cues | `add_cue`, `create_hot_cue_bank_list`, `add_hot_cue_bank_cue` | hypothesis (code only) |
+| `recommendedLike` | `add_recommended_like` | hypothesis (code only) |
+| Clean close: checkpoint, no `-wal`/`-shm` | `close` (errors if a side file remains) | verified |
+
+The writer does not implement:
+- track removal (`removeTrack` @0x100718AEC);
+- list deletion with renumbering (`deleteList`, `delete_and_renumber`);
+- `checkAndSetChanges` (which fields `modifyTrack` rewrites on a re-export);
+- the file side of an export: audio, ANLZ and artwork JPEGs.
+
+**Verification: rebuild of oracle-a.** `cargo run -p mb-devlib --example devlib_rebuild -- fixtures/oracle-a fixtures/oracle-a/rbtest <out.db>`, also run as the test `tests/writer.rs::oracle_a_rebuild_matches_rekordbox`.
+- **Replay.** The example replays both exports from `master.db`: `oracle-small` (5 inserts), then `oracle-all` (152 inserts, 5 updated in place, 4 refused by the format gate: WAV at 22.05 kHz).
+- **What it takes from the stick.** Only the export-layer data: the device audio and ANLZ paths per `masterContentId`, the playlist export order, and `createdDate`.
+- **Result: all 22 tables identical row by row and column by column, storage classes included:**
+  - content 157, genre 14, artist 93, album 97, label 45, key 22, color 8, playlist 2, playlist_content 162, image 95, menuItem 27, category 22, sort 17, property 1, myTag 28;
+  - the other 7 tables are empty on both sides.
+- **Schema and settings.** The 26 `sqlite_master` entries are identical, root pages included. `page_size` 4096, `journal_mode` wal, `user_version`/`application_id`/`auto_vacuum` 0, UTF-8, the cipher settings, `page_count` 41 and `freelist_count` 0 are all equal.
+- **Raw pages, decrypted (scratch tool):** 39 of 41 are byte-identical.
+  - Page 1 differs only in the header's file change counter, version-valid-for and SQLite version number (3051003 here, 3045003 in rekordbox's SQLCipher 4.6.0).
+  - Page 30, the first `content` leaf, holds the same 15 cells at other offsets: rows 1–5 were rewritten in place by rekordbox's second, untraced export, whose exact UPDATE statements are unknown.
+
 ## What a writer must reproduce
 1. **Encryption:** SQLCipher 4 defaults with `PRAGMA key = passphrase()`. There is no plaintext header and no custom KDF settings.
 2. **Pragmas:** `synchronous=NORMAL` and `journal_mode=WAL` (the header stays in WAL mode). Leave `page_size` 4096, `user_version` 0 and `auto_vacuum` none. Close cleanly so the checkpoint runs and `-wal`/`-shm` disappear before the stick is unplugged.
 3. **DDL:** create all 22 tables in rekordbox's order with its exact DDL text (`devlib/schema.sql`), plus the 4 indexes. rekordbox always creates every table, even when it stays empty; whether players need that is untested.
 4. **Initial rows:**
-   - one `property` row (`dbVersion` "10000", `createdDate` today, `numberOfContents` kept equal to `count(content)`, `deviceName` = volume label)
+   - one `property` row (`dbVersion` "1000" and `deviceName` "" on a fresh stick, see § property; `createdDate` today; `numberOfContents` kept equal to `count(content)`)
    - `color` 1…8
    - `menuItem` / `category` / `sort` (copy them from master.db like rekordbox, or use the defaults above)
-5. **IDs:** integer IDs allocated as max+1. playlist_content and history_content `sequenceNo` are 1-based; sibling `sequenceNo` is 0-based.
+5. **IDs:** integer IDs allocated as max+1. playlist_content and history_content `sequenceNo` are 1-based. Playlist and hot cue bank list siblings are 0-based (a new list goes to the end, then moves to the requested position: 0 for an export). History siblings start at 1.
 6. **Paths:** device paths start with `/` and are relative to the stick root. Artwork goes in `/PIONEER/Artwork/%05d/b<id>.jpg` (folder `id/20+1`), together with an 80×80 `b<id>.jpg` and a 240×240 `b<id>_m.jpg`. `analysisDataFilePath` must point at the copied ANLZ files.
 7. **Unknown lookups:** match 7.2.19 by writing NULL (not 0) for the optional artist/album/genre/label/image columns, and leave `titleForSearch` NULL.
 8. **Cues:**
@@ -291,10 +367,13 @@ The last three pairs are block-seek information for compressed formats, so a pla
 - [ ] `cue.kind` 17 and 101: which slots or features they are (hot cue bank? a 17th hot cue?), and the A…P slot mapping on 16-hot-cue players.
 - [ ] `colorTableIndex` vs the Cue+0x31 "colour" byte, and whether players read `colorTableIndex` against the hot-cue palette.
 - [ ] Semantics of `contentLink` bits other than bit 0, and of `hasModified`.
-- [ ] `myTagMasterDBID` = `masterDbId + 1` in the fixture: where that value comes from.
+- [x] `myTagMasterDBID`: master DBID + 1, or the cloud DBID when cloud sync is set up (`syncMyTagLocal`, resolved 2026-10-12).
 - [ ] `backGroundColorType` value range and its palette.
 - [ ] `history.attribute` values, and how players write history (no samples yet).
 - [ ] When `/.PIONEER` is used instead of `/PIONEER` for artwork.
-- [ ] Whether players care about `dbVersion` ("10000" from 7.2.19 vs "1000" in older rows).
-- [ ] Full insert order for an export, and which statements run inside transactions: needs an SQL trace (`re/hooks`, see tooling.md).
+- [ ] Whether players care about `dbVersion`. A 7.2.19 stick ends with "1000" through the conversion; "10000" only survives where no conversion runs.
+- [x] Full insert order for an export, and which statements run inside transactions: ops/export-devlib.md (autocommit everywhere except `move_sequence` and `setHotCueBankCue`).
+- [ ] What `checkAndSetChanges` / `modifyTrack` rewrites on a re-export. Untraced, and the only residual raw-page difference in the oracle-a rebuild.
+- [ ] RowDataTrack+0x50, the row kind that gates the 0x10000/0x100000 `contentLink` merge: 1 and 6 are taken to be collection rows (*hypothesis*).
+- [ ] master `djmdContent.Lyricist`: taken to be a plain name (it is a string in RowDataTrack+0x458 and in `DevAddContent_`). The corpus has no lyricists.
 - [ ] Whether `smart` playlists are exported as plain lists (`attribute` 0): the fixture has none.

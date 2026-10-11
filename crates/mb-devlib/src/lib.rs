@@ -2,20 +2,30 @@
 //! Spec: `docs/re/devlib.md`.
 //!
 //! The file is SQLCipher 4 with default parameters; the passphrase is a constant decoded from the
-//! rekordbox binary ([`passphrase`]). This crate reads it; writing is not implemented yet (the
-//! rules a writer must follow are in the spec).
+//! rekordbox binary ([`passphrase`]). [`DevLibDb`] reads it; [`DevLibWriter`] creates and writes
+//! it the way rekordbox 7.2.19 does (spec: `docs/re/devlib.md#writer`). [`diff::compare`]
+//! compares two databases table by table.
 
+pub mod diff;
 mod key;
 pub mod model;
 mod read;
+pub mod schema;
 mod snapshot;
+mod write;
 
 pub use key::{
     BLOWFISH_KEY, ENCODED_PASSPHRASE, decode_with_key, derive_passphrase, juce_base64_decode,
     passphrase,
 };
 pub use model::*;
+pub use schema::MenuSeed;
 pub use snapshot::on_stick;
+pub use write::{
+    ContentColumn, CreateOptions, DevLibWriter, ImageOwner, Lookup, LookupColumn, MyTagRow, NewCue,
+    NewTrack, device_image_path, export_analysed_bits, export_content_link, reexport_content_link,
+    today,
+};
 
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
@@ -24,8 +34,14 @@ use std::path::Path;
 pub enum Error {
     #[error("passphrase: {0}")]
     Passphrase(String),
-    #[error("path is not valid UTF-8: {0}")]
+    #[error("path: {0}")]
     Path(String),
+    #[error("{0} already exists")]
+    Exists(String),
+    #[error("{0}: {1}")]
+    Io(String, std::io::Error),
+    #[error("{0}")]
+    Invalid(String),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
@@ -60,7 +76,7 @@ impl DevLibDb {
     pub fn open_immutable(path: &Path) -> Result<Self> {
         let path = path
             .to_str()
-            .ok_or_else(|| Error::Path(path.display().to_string()))?;
+            .ok_or_else(|| Error::Path(format!("not valid UTF-8: {}", path.display())))?;
         let conn = Connection::open_with_flags(
             format!("file:{}?immutable=1", uri_escape(path)),
             OpenFlags::SQLITE_OPEN_READ_ONLY
