@@ -83,10 +83,14 @@ impl State {
         }
         let mut rows: Vec<usize> = match &source.list {
             List::Collection => (0..library.tracks.len()).collect(),
-            List::Playlist(id) => {
+            List::Playlist(id) | List::History(id) | List::MyTag(id) => {
+                let entries = match &source.list {
+                    List::Playlist(_) => &library.playlist_entries,
+                    List::History(_) => &library.history_entries,
+                    _ => &library.my_tag_entries,
+                };
                 let by_id: HashMap<_, _> = library.tracks.iter().enumerate().map(|(i, t)| (&t.id, i)).collect();
-                library
-                    .playlist_entries
+                entries
                     .get(id)
                     .map(|ids| ids.iter().filter_map(|id| by_id.get(id).copied()).collect())
                     .unwrap_or_default()

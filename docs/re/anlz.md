@@ -95,7 +95,9 @@ Writers `write_pmai_quantize` @0x100f5b0c8 and `write_pmai_quantize_data` @0x100
 | 0x14 | u32 | beat count | V |
 | 0x18 | entry × count | beats, 8 bytes each | V |
 
-Beat entry: `u16 beat_in_bar (1..4) | u16 tempo (BPM × 100) | u32 time (ms)`. Fixture checks: beat-to-beat spacing equals 60000/BPM within 2 ms in all 718 grids, and bar positions cycle 1→4. Eight stick grids have a single beat numbered 0 where a 4 is due, inside the last bar or two (meaning **O**).
+Beat entry: `u16 beat_in_bar (1..4) | u16 tempo (BPM × 100) | u32 time (ms)`.
+
+**High-precision grids** (oracle-b, `HighPrecisionBeatAnalyze=1`) are not constant. One track carries 47 different per-beat tempos (75.03–… BPM) and beat gaps of 580–860 ms. Its oracle-a grid has a single tempo of 100.00 and gaps of 600–601 ms. The per-beat tempo is **not** 60000/gap to the next beat, and how it is derived is open (madmom path, analysis.md). PQT2 checksums still match. Fixture checks: beat-to-beat spacing equals 60000/BPM within 2 ms in all 718 grids, and bar positions cycle 1→4. Eight stick grids have a single beat numbered 0 where a 4 is due, inside the last bar or two (meaning **O**).
 
 ### PWAV / PWV2: monochrome previews (.DAT)
 Writers `write_pmai_wave400pt` @0x100f5b1c8 and `write_pmai_wave100pt` @0x100f5b2b8; defaults in `initialize_pmai`. View: `tags::WavePreview`.

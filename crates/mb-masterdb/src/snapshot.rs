@@ -111,6 +111,54 @@ impl MasterDb {
             playlist_entries.entry(DbId(playlist)).or_default().push(DbId(content));
         }
 
-        Ok(LibrarySnapshot { tracks, playlists, playlist_entries })
+        let (histories, history_entries) = self.load_lists(
+            "SELECT ID, ParentID, Name, Attribute, Seq FROM djmdHistory WHERE rb_local_deleted = 0",
+            "SELECT HistoryID, ContentID FROM djmdSongHistory \
+             WHERE rb_local_deleted = 0 ORDER BY HistoryID, TrackNo",
+        )?;
+        let (my_tags, my_tag_entries) = self.load_lists(
+            "SELECT ID, ParentID, Name, Attribute, Seq FROM djmdMyTag WHERE rb_local_deleted = 0",
+            "SELECT MyTagID, ContentID FROM djmdSongMyTag \
+             WHERE rb_local_deleted = 0 ORDER BY MyTagID, TrackNo",
+        )?;
+
+        Ok(LibrarySnapshot {
+            tracks,
+            playlists,
+            playlist_entries,
+            histories,
+            history_entries,
+            my_tags,
+            my_tag_entries,
+        })
+    }
+
+    /// A tree table (ID, ParentID, Name, Attribute, Seq; Attribute 1 = folder/group) plus its
+    /// (list ID, content ID) link table.
+    fn load_lists(&self, nodes_sql: &str, links_sql: &str) -> Result<(Vec<PlaylistNode>, HashMap<DbId, Vec<DbId>>)> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(nodes_sql)?;
+        let nodes = stmt
+            .query_map([], |r| {
+                let parent: Option<String> = r.get(1)?;
+                Ok(PlaylistNode {
+                    id: DbId(r.get(0)?),
+                    parent: parent.filter(|p| p != "root" && !p.is_empty()).map(DbId),
+                    name: text(r, 2)?,
+                    kind: match r.get::<_, Option<i64>>(3)?.unwrap_or(0) {
+                        1 => PlaylistKind::Folder,
+                        _ => PlaylistKind::Playlist,
+                    },
+                    seq: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt = conn.prepare(links_sql)?;
+        let mut links: HashMap<DbId, Vec<DbId>> = HashMap::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (list, content) = row?;
+            links.entry(DbId(list)).or_default().push(DbId(content));
+        }
+        Ok((nodes, links))
     }
 }

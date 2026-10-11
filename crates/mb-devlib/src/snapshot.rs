@@ -4,6 +4,7 @@
 use crate::model::{DeviceLibrary, DeviceTrack, ListAttribute};
 use crate::{DevLibDb, Result};
 use mb_core::{DbId, FileType, LibrarySnapshot, PlaylistKind, PlaylistNode, Track};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Joins a device path (leading `/`) onto the mount point of the stick.
@@ -80,12 +81,44 @@ impl DeviceLibrary {
                 )
             })
             .collect();
+        let (histories, history_entries) = lists(&self.histories, &self.history_entries);
+        let mut tag_links: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (tag, content) in &self.my_tag_content {
+            tag_links.entry(*tag).or_default().push(*content);
+        }
+        let (my_tags, my_tag_entries) = lists(&self.my_tags, &tag_links);
         LibrarySnapshot {
             tracks,
             playlists,
             playlist_entries,
+            histories,
+            history_entries,
+            my_tags,
+            my_tag_entries,
         }
     }
+}
+
+/// Converts a device list tree and its link map to the shared model.
+fn lists(nodes: &[crate::DeviceListNode], links: &HashMap<u32, Vec<u32>>) -> (Vec<PlaylistNode>, HashMap<DbId, Vec<DbId>>) {
+    let nodes = nodes
+        .iter()
+        .map(|n| PlaylistNode {
+            id: DbId(n.id.to_string()),
+            parent: n.parent.map(|id| DbId(id.to_string())),
+            name: n.name.clone(),
+            kind: match n.attribute {
+                ListAttribute::Folder => PlaylistKind::Folder,
+                _ => PlaylistKind::Playlist,
+            },
+            seq: n.seq,
+        })
+        .collect();
+    let links = links
+        .iter()
+        .map(|(list, items)| (DbId(list.to_string()), items.iter().map(|c| DbId(c.to_string())).collect()))
+        .collect();
+    (nodes, links)
 }
 
 impl DevLibDb {

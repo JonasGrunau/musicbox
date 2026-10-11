@@ -130,6 +130,9 @@ fn fixture_values_are_consistent() {
         let dat = AnlzFile::parse(&std::fs::read(path).unwrap()).unwrap();
         headers_default += usize::from(dat.file_header() == Some(FileHeader::default()));
         let grid = dat.beat_grid().expect("every DAT has PQTZ");
+        // Constant-tempo grids (normal analysis) space beats at 60000/BPM. High-precision grids
+        // (oracle-b) carry a tempo per beat that is not the gap to the next beat (anlz.md § PQTZ).
+        let constant_tempo = grid.beats.windows(2).all(|w| w[0].tempo == w[1].tempo);
         for pair in grid.beats.windows(2) {
             // 8 stick grids have one beat numbered 0 where 4 is due, in the last bars (open).
             let prev = if pair[0].beat_in_bar == 0 {
@@ -146,7 +149,7 @@ fn fixture_values_are_consistent() {
             let expected = 60_000.0 * 100.0 / f64::from(pair[0].tempo);
             let got = f64::from(pair[1].time_ms - pair[0].time_ms);
             assert!(
-                (got - expected).abs() <= 2.0,
+                !constant_tempo || (got - expected).abs() <= 2.0,
                 "{}: beat spacing {got} vs {expected}",
                 path.display()
             );

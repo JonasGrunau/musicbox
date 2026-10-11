@@ -130,4 +130,11 @@ pub struct LibrarySnapshot {
     pub playlists: Vec<PlaylistNode>,
     /// Track IDs per playlist, in playlist order.
     pub playlist_entries: std::collections::HashMap<DbId, Vec<DbId>>,
+    /// History lists (folders and playlists), same shape as `playlists`.
+    pub histories: Vec<PlaylistNode>,
+    pub history_entries: std::collections::HashMap<DbId, Vec<DbId>>,
+    /// My Tag tree: groups are `Folder`s, tags are `Playlist`s.
+    pub my_tags: Vec<PlaylistNode>,
+    /// Track IDs per My Tag.
+    pub my_tag_entries: std::collections::HashMap<DbId, Vec<DbId>>,
 }

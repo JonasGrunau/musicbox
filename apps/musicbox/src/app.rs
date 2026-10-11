@@ -18,6 +18,8 @@ pub enum LibraryRef {
 pub enum List {
     Collection,
     Playlist(DbId),
+    History(DbId),
+    MyTag(DbId),
 }
 
 /// What the track table currently lists.

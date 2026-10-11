@@ -1,4 +1,5 @@
-//! Left-hand tree: local Collection + playlists, then each device with its own lists.
+//! Left-hand tree: per library (local, then each device) the collection, playlists, histories
+//! and My Tags.
 
 use crate::app::{LibraryRef, List, Source};
 use crate::devices::{DeviceState, Devices};
@@ -30,33 +31,79 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, devices: &Devices, sou
     });
 }
 
+/// Which list tree of a library a section shows.
+#[derive(Clone, Copy, Hash)]
+enum Section {
+    Playlists,
+    Histories,
+    MyTags,
+}
+
+impl Section {
+    fn nodes(self, library: &LibrarySnapshot) -> &[PlaylistNode] {
+        match self {
+            Self::Playlists => &library.playlists,
+            Self::Histories => &library.histories,
+            Self::MyTags => &library.my_tags,
+        }
+    }
+
+    fn list(self, id: DbId) -> List {
+        match self {
+            Self::Playlists => List::Playlist(id),
+            Self::Histories => List::History(id),
+            Self::MyTags => List::MyTag(id),
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Playlists => "Playlists",
+            Self::Histories => "Histories",
+            Self::MyTags => "My Tag",
+        }
+    }
+}
+
 fn library_lists(ui: &mut egui::Ui, library_ref: LibraryRef, label: &str, library: &LibrarySnapshot, source: &mut Source) {
     let collection = Source { library: library_ref, list: List::Collection };
     if ui.selectable_label(*source == collection, label).clicked() {
         *source = collection;
     }
-    egui::CollapsingHeader::new("Playlists")
-        .id_salt(("playlists", library_ref))
-        .default_open(true)
-        .show(ui, |ui| children(ui, library_ref, library, None, source));
+    for section in [Section::Playlists, Section::Histories, Section::MyTags] {
+        if section.nodes(library).is_empty() {
+            continue;
+        }
+        egui::CollapsingHeader::new(section.title())
+            .id_salt((section.title(), library_ref))
+            .default_open(matches!(section, Section::Playlists))
+            .show(ui, |ui| children(ui, library_ref, library, section, None, source));
+    }
 }
 
-fn sorted_children<'a>(library: &'a LibrarySnapshot, parent: Option<&DbId>) -> Vec<&'a PlaylistNode> {
-    let mut nodes: Vec<_> = library.playlists.iter().filter(|n| n.parent.as_ref() == parent).collect();
-    nodes.sort_by_key(|n| n.seq);
-    nodes
+fn sorted_children<'a>(nodes: &'a [PlaylistNode], parent: Option<&DbId>) -> Vec<&'a PlaylistNode> {
+    let mut out: Vec<_> = nodes.iter().filter(|n| n.parent.as_ref() == parent).collect();
+    out.sort_by_key(|n| n.seq);
+    out
 }
 
-fn children(ui: &mut egui::Ui, library_ref: LibraryRef, library: &LibrarySnapshot, parent: Option<&DbId>, source: &mut Source) {
-    for node in sorted_children(library, parent) {
+fn children(
+    ui: &mut egui::Ui,
+    library_ref: LibraryRef,
+    library: &LibrarySnapshot,
+    section: Section,
+    parent: Option<&DbId>,
+    source: &mut Source,
+) {
+    for node in sorted_children(section.nodes(library), parent) {
         match node.kind {
             PlaylistKind::Folder => {
                 egui::CollapsingHeader::new(&node.name)
-                    .id_salt(("folder", library_ref, &node.id.0))
-                    .show(ui, |ui| children(ui, library_ref, library, Some(&node.id), source));
+                    .id_salt((section.title(), library_ref, &node.id.0))
+                    .show(ui, |ui| children(ui, library_ref, library, section, Some(&node.id), source));
             }
             PlaylistKind::Playlist | PlaylistKind::Smart => {
-                let this = Source { library: library_ref, list: List::Playlist(node.id.clone()) };
+                let this = Source { library: library_ref, list: section.list(node.id.clone()) };
                 if ui.selectable_label(*source == this, &node.name).clicked() {
                     *source = this;
                 }

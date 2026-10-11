@@ -238,10 +238,50 @@ impl DeviceLibrary {
             })
             .collect();
 
+        let histories = self.history();
+        let history_nodes = histories
+            .iter()
+            .enumerate()
+            .map(|(i, h)| mb_core::PlaylistNode {
+                id: h.id.clone(),
+                parent: None,
+                name: h.name.clone(),
+                kind: PlaylistKind::Playlist,
+                seq: i as i64,
+            })
+            .collect();
+        let history_entries = histories.into_iter().map(|h| (h.id, h.tracks)).collect();
+
+        let (my_tags, my_tag_entries) = match &self.ext {
+            Some(ext) => {
+                let nodes = ext
+                    .tags
+                    .iter()
+                    .map(|t| mb_core::PlaylistNode {
+                        id: id(t.id),
+                        parent: (t.parent_id != 0).then(|| id(t.parent_id)),
+                        name: t.name.clone(),
+                        kind: if t.attribute == 1 { PlaylistKind::Folder } else { PlaylistKind::Playlist },
+                        seq: i64::from(t.seq),
+                    })
+                    .collect();
+                let mut entries: HashMap<DbId, Vec<DbId>> = HashMap::new();
+                for link in &ext.tag_tracks {
+                    entries.entry(id(link.tag_id)).or_default().push(id(link.track_id));
+                }
+                (nodes, entries)
+            }
+            None => Default::default(),
+        };
+
         LibrarySnapshot {
             tracks,
             playlists,
             playlist_entries,
+            histories: history_nodes,
+            history_entries,
+            my_tags,
+            my_tag_entries,
         }
     }
 
