@@ -5,7 +5,7 @@
 use egui::accesskit::Role;
 use egui::{Key, Modifiers, Vec2};
 use egui_kittest::Harness;
-use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::kittest::Queryable;
 use musicbox::{App, Args};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

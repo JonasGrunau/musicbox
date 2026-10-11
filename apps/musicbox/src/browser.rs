@@ -321,8 +321,9 @@ fn row_menu(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
     });
     if let List::Playlist(playlist) = &source.list
         && let Some(entry_ids) = library.playlist_entry_ids.get(playlist)
+        && ui.button("Remove from playlist").clicked()
     {
-        if ui.button("Remove from playlist").clicked() {
+        {
             let entries: Vec<String> = state
                 .rows
                 .iter()

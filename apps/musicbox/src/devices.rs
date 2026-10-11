@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 pub enum DeviceState {
     Loading(Receiver<Result<LibrarySnapshot, String>>),
-    Ready(LibrarySnapshot),
+    Ready(Box<LibrarySnapshot>),
     Failed(String),
 }
 
@@ -21,7 +21,7 @@ pub struct Device {
 impl Device {
     pub fn snapshot(&self) -> Option<&LibrarySnapshot> {
         match &self.state {
-            DeviceState::Ready(s) => Some(s),
+            DeviceState::Ready(s) => Some(s.as_ref()),
             _ => None,
         }
     }
@@ -104,7 +104,7 @@ impl Devices {
                 && let Ok(result) = rx.try_recv()
             {
                 device.state = match result {
-                    Ok(snapshot) => DeviceState::Ready(snapshot),
+                    Ok(snapshot) => DeviceState::Ready(Box::new(snapshot)),
                     Err(e) => DeviceState::Failed(e),
                 };
             }
