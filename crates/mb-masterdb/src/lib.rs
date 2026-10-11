@@ -1,9 +1,13 @@
 //! rekordbox `master.db` storage. Spec: `docs/re/masterdb.md`.
 
+mod backup;
+mod guard;
 mod key;
 mod paths;
 mod snapshot;
 
+pub use backup::{backup_library, default_backup_root};
+pub use guard::{REKORDBOX_PROCESSES, running_rekordbox};
 pub use key::derive_passphrase;
 pub use paths::LibraryPaths;
 
