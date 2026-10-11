@@ -1,6 +1,6 @@
 # USB export and sync (rekordbox 7.2.19)
 
-Status: **per-track pipeline, destination paths, artwork and incremental-update rules verified** (binary, and on the fixture stick where the stick can show it: 704/704 paths, 1404/1404 artwork files, 704/704 ID matches). **Settings files verified** (layout and CRC on all four fixture files). **Device detection and DB creation verified** (binary); why the fixture stick changed without an export is a **hypothesis** (§ 6.3). Player acceptance has not been tested on hardware; every rule here describes rekordbox's behaviour.
+Status: **per-track pipeline, destination paths, artwork and incremental-update rules verified** (binary, and on the fixture stick where the stick can show it: 704/704 paths, 1404/1404 artwork files, 704/704 ID matches). **Settings files verified** (layout and CRC on all four fixture files). **Device detection and DB creation verified** (binary); why the fixture stick changed without an export is a **hypothesis** (§ 6.3). **Export log verified** (binary + fixture, § 1.8). **The whole export is reproduced by `mb-usb`** (2026-10-12, § 8): replaying the oracle's two exports gives rekordbox's `/Contents`, audio, ANLZ, artwork, settings files and export log byte for byte, both `.pdb` files byte for byte and an exportLibrary.db with identical tables. Player acceptance has not been tested on hardware; every rule here describes rekordbox's behaviour.
 
 Status words: **verified** (binary and fixture agree, or binary alone when the stick cannot show it, as marked), **hypothesis** (fits the evidence, not proven), **open** (not known).
 
@@ -259,6 +259,31 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
 - **Entry order:** entries are appended one by one as each track finishes, so a list's order is the master order. Entry `sequenceNo` is 1-based (`devlib.md`, `pdb.md`).
 - **iTunes lists:** browse type 3 → `exportiTunesPlaylist`, with marker file `sync.itunes.temp`.
 
+### 1.8 Export log (verified: code + `fixtures/oracle-a/export-log.txt`, reproduced byte for byte)
+When a job finishes, `exportProcessChange` @0x1009bf758 writes the log, and the browser shows "One or more files were not exported. Check the log file saved in the "Documents" folder." (message 10).
+- **File:** `<Documents>/rekordbox/Export Log <app name> <date>.txt` (`juce::File::getSpecialLocation(userDocumentsDirectory)`), with app name `rekordbox` and `DBToolBox::getDateString` @0x1006f47c8 = `YYYY-MM-DD` (local time, zero-padded). Example: `Export Log rekordbox 2026-10-11.txt`.
+- **Existing file of the same day:** rekordbox appends `"\n"` to it (`appendText(…, asUnicode = true, writeBOM = true, "\r\n")`, so a second BOM lands mid-file) and, if that works, writes the new entries after it without a header. Only if the append fails does it try `… -1.txt`, `… -2.txt`, ….
+- **Encoding:** every write is `juce::File::appendText(text, true, bom, "\r\n")`: UTF-16LE, `\n` → CRLF. Only the first header line is written with `bom = true`, so a new file starts with `FF FE`.
+- **Header** (`DbBackGroundProcess::write_error_report` @0x1001d4d7c), written when the file does not exist yet. Each text goes through `juce::translate`; in the German UI only the two column titles are translated (`Trackname`, `Lage`):
+  ```
+  One or more files were not exported. ␠
+  Track(s) were not exported due to the following possible reasons.
+  [1] - The file doesn't exist.
+  [2] - The file is in the format that CDJ/XDJ/mobile device doesn't support.
+  [3] - The file could not be copied.
+  [4] - Track analysis data is corrupted or doesn't exist.
+  [5] - Error occurred in the USB/SD/mobile device.
+  (empty line)
+      Track Title<TAB>Location
+  ```
+  (the first line ends with a space; the column line starts with four spaces).
+- **Which jobs:** a job (`ExportDescription`) is logged when one of its track results is not 0, 1 or 15, unless every such result is 16.
+- **Lines** (`ExportDescription::getErrorInfo` @0x1001d562c → `TrackAdditionResult::getErrorInfo` @0x1001d2c1c), one per track in job order; results 0, 1 and 15 print nothing:
+  - prefix by result code: 4 → `[1] `, 5 → `[2] `, 8 → `[3] `, 9 → `[4] `, 7/11/12 → `[5] `, anything else → `[?]` (no space);
+  - then the track title (+0x08), a tab and the source location (+0x10);
+  - for code 9 only: a tab, the analysis path (+0x30), a space and one flag per file `.DAT`, `.EXT`, `.2EX`: `*` exists, `-` missing (e.g. `…/ANLZ0000.DAT *-*`).
+- **Fixture:** the 4 WAV probes at 22.05 kHz were refused by the format gate (code 5) and logged as `[2] <title>\t<FolderPath>`.
+
 ## 2. IDs on the device
 
 ### 2.1 Track IDs (verified)
@@ -274,6 +299,8 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
 - Album lookups also take the compilation flag, the album-artist name and the artist ID.
 - Colour IDs 1..8 are copied from master `djmdColor` when the DB is created.
 - The classic DB uses DeviceSQL procedures. Its IDs are contiguous in the fixture (artists 1..572, albums 1..605), which fits the same rule.
+- **export.pdb key rows:** `SEQ` = the device key ID (master `djmdKey.Seq` is NULL in the sandbox library; all oracle rows have SEQ = ID). Reproduced row for row by `mb-usb` (§ 8).
+- **Album artists in export.pdb:** the album artist is looked up or added in the artist table right before the album row, as in exportLibrary.db (`mb-usb` inserts it in that position; the oracle export has no album artist that is not also a track artist, so the position is a **hypothesis** for the classic DB).
 
 ### 2.3 Playlist IDs (verified)
 - Plus: `playlist_id` is max + 1. Fixture: 16391, 16392 and 16393 follow the player-created "TAG LIST" lists at 16385+.
@@ -344,6 +371,8 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
    3. Merge `contentLink` bits from the source: 0x100 always, then 0x200, 0x400, 0x40000, 0x80000, and 0x10000/0x100000 for some analysis types. Save with `modContentLink`.
    4. Return 0, so ANLZ is rewritten (§ 1.6).
 3. **Otherwise** it returns 1: the track is skipped and counted as a success.
+
+**The two databases diverge here (verified on the oracle stick, reproduced by `mb-usb`):** the export.pdb insert (`DevAddContent_`) stores the three markers (RESERVED5–7), the exportLibrary.db insert does not (NULL). So on the second export of a track, export.pdb compares equal and its row is left alone, while exportLibrary.db sees NULL ≠ source and runs `setTrackUpdated` / `setAnalysisUpdated` / `modifyContentLink` (and the ANLZ set is rewritten with the same bytes). That is why the oracle's export.pdb rows of the five `oracle-small` tracks still carry `ANALYSED` 41 and CONTENTLINK 0xC0700, while their exportLibrary.db rows have 105 and 0x1D0700.
 
 ### 4.3 Deleting tracks and playlists from the device (verified)
 - **Delete a device playlist** (`deleteList` / `delete_list` @0x100c4b3f4): removes the list rows and its artwork.
@@ -435,8 +464,8 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
 | File | Size | N | Header written by rekordbox |
 |---|---|---|---|
 | `MYSETTING.DAT` | 148 | 0x28 | `PIONEER` / `rekordbox` / `0.001` |
-| `MYSETTING2.DAT` | 148 | 0x28 | keeps whatever header it already has (fixture: `PIONEER DJ` / `CDJ-3000` / `0.001`) |
-| `DEVSETTING.DAT` | 140 | 0x20 | `PIONEER DJ` / `rekordbox` / app version cut to 3 parts (`getFileVersion(true)`: "7.2.19", *hypothesis* for the exact string) |
+| `MYSETTING2.DAT` | 148 | 0x28 | keeps whatever header it already has (reference stick: `PIONEER DJ` / `CDJ-3000` / `0.001`); a new file gets `PIONEER` / `rekordbox` / `0.001` (oracle stick) |
+| `DEVSETTING.DAT` | 140 | 0x20 | `PIONEER DJ` / `rekordbox` / app version cut to 3 parts (`getFileVersion(true)`): `7.2.19` (verified on the oracle stick) |
 | `DJMMYSETTING.DAT` | 160 | 0x34 | `PioneerDJ` / `rekordbox` / `1.000` |
 
 **Checksum: CRC-16/XMODEM** (poly 0x1021, init 0, no reflection, xorout 0). Implemented bit-serially in `pioneerMySetting::calcCRC` @0x10024dd34, `cdjDeviceSetting::calcCRC` @0x100c05f40 and `DJMMSContent::calcCRC` @0x1007d6004.
@@ -450,8 +479,10 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
   - Defaults (0x70..0x8F): `81 83 81 88 81 01 82 81 81 01 01 01 82 80 80 81 80 81 80 00 00 81 00 00 81 81 81 80 81 80 00 00`.
 - **MYSETTING2:** has **no magic**; the settings start at 0x68. Defaults: `81 80 83 83 81 80 80 00 00 00 80 81 85`, then zeros.
 - **DEVSETTING:** u32 0x12345678, u32 1, then plain values with range checks. Defaults: 0x70..0x78 = `01` × 9.
-- **DJMMYSETTING:** u32 0x12345678, u32 1, u32 0x20, 32 setting bytes, u32 0, then an empty BFX block (8 bytes). The file is 0x480 bytes when the BFX block is present.
+- **DJMMYSETTING:** u32 0x12345678, u32 1, u32 0x20, 32 setting bytes, then an empty BFX block (8 bytes: count 0, size 0) = 0x34 bytes. The file is 0x480 bytes when the BFX block is present.
+  - Defaults (`DJMMSData::setDefault` @0x1007d4cf8): setting `i` = `generalSettingDefine(i).default | 0x80` (@0x1007d3ce4, a table of (min, max, default) for i < 18; the others stay 0). The 18 defaults are `1 2 0 0 1 1 0 1 0 0 5 2 0 0 2 4 1 1`, i.e. `81 82 80 80 81 81 80 81 80 80 85 82 80 80 82 84 81 81` then 14 zeros (verified: the oracle stick's file is exactly this, CRC 0x07B0).
 - **Merge rule** (`saveDeviceFile` @0x10024fec4): for each byte with bit 7 set in the source, the target becomes its own bit 7 | (source & 0x7F); invalid fields are repaired; then the CRC is recomputed.
+- **Oracle stick (fresh, 2026-10-11):** all four files are the defaults above with rekordbox's headers (MYSETTING CRC 0x7A48, MYSETTING2 0x9C7A, DEVSETTING 0x98E1, DJMMYSETTING 0x07B0); `mb-usb` writes them byte for byte (§ 8). `djprofile.nxs` is a byte copy of the local file.
 
 **Other files**
 - **`djprofile.nxs`** (KUVO DJ profile, 160 bytes, contains the user name; contents not analysed):
@@ -573,42 +604,75 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
 10. Keep the content and image IDs equal in export.pdb and exportLibrary.db, and give both rows the same path, ANLZ set and artwork number (§ 2.1, § 6.4).
 11. Keep `export.pdb` writable and never leave a `brokendb` file, or rekordbox drops or flags the stick (§ 6.2–6.3).
 
+## 8. Writer: `mb-usb` (verified 2026-10-12)
+`crates/mb-usb` reproduces the flow above. Each step names the rekordbox function it follows.
+- **Snapshots:** `SourceLibrary::load` reads master.db (the rows `getRowDataTrack` provides, playlists, My Tags, menus) and checks the source audio, local ANLZ set and artwork variants; `DeviceState::load` reads both device DBs (export.pdb as bytes, exportLibrary.db with `immutable=1`) and lists `/Contents`, `USBANLZ` (with each `.DAT`'s PPTH) and `Artwork`.
+- **Planner** (`plan_export`, pure): replays § 1.1–1.7 and § 4 against an in-memory model of both DBs. Jobs are built first (list matching by parent + name; identical → skipped, different → cleared and refilled, new → created on top), then the tracks of each job: format gate (§ 6.2), duplicate check per DB (§ 4.1), new track (§ 1.3–1.6, § 2, § 3) or in-place update (§ 4.2), playlist entry. Output: per-DB operation lists (`PdbOp`, `ExtOp`, `DevlibOp`), per-track file work (`FileOp`) and the log entries.
+- **Executor** (`execute`): `PIONEER/rekordbox`, the `sync*.temp` markers (§ 4.5), `DeviceLibBackup/rbDevLibBaInfo_<DBID>.json` when missing (§ 6.3), the settings files (§ 5, `settings_dir` = the local settings folder, missing files = defaults); then per track audio (bytes only, 1 MiB chunks, cancellable; ≥ 1.5 × free space), stale ANLZ sets deleted, `mb_anlz::usb::to_usb` of the local set, artwork; then one `F_FULLFSYNC` and the databases last: exportLibrary.db (`DevLibWriter`, built next to the file and renamed into place), export.pdb (`mb_pdb::writer::Exporter`), exportExt.pdb, each `F_FULLFSYNC`ed; markers deleted; the export log (§ 1.8). Cancellation or an I/O error stops before the next track; the DBs then hold exactly the tracks whose files were written.
+- **Choices that are not rekordbox's, or not verified:**
+  - Tracks without a local `ANLZ0000.DAT` are not analysed (rekordbox analyses and retries, code 10) but skipped and logged as `[4]` with the local path.
+  - A playlist on the device is compared with the master list **after** the format gate, so lists with refused tracks are not refilled on every export (*hypothesis*: § 1.7 does not say which list is compared).
+  - On a re-export with a changed info marker, export.pdb gets the row rebuilt from the source and exportLibrary.db the metadata columns that differ (title, subtitle, BPM, track/disc number, colour, comment, rating, year, release date, play count, hot-cue auto load, KUVO fields, artist/remixer/original artist/composer/lyricist/genre/label/key, album). Unused lookup rows are kept (`delete_unused_record` is not replayed). Which fields `checkAndSetChanges` compares is open (§ 4.2).
+  - My Tags: one sync on a new stick, two on an existing one (mount + export, as on the oracle stick). After the tree rewrite, the links of every device track from this library are re-added (*hypothesis*: the trace shows `select content_id, masterContentId from content where masterDbId = …` right after `delete from myTag_content`).
+  - Folders: a selected folder is created (attribute 1) and its children are appended inside it in master order (not moved to position 0; *hypothesis*). Intelligent playlists are refused.
+  - Missing `_s`/`_m` artwork is generated from the base image with the `image` crate (letterboxed on black, q85); those files are not byte-identical to rekordbox's JUCE encoder. Every fixture track has both variants.
+  - macOS tags every file a process creates with `com.apple.provenance`; on FAT the OS stores it in an AppleDouble `._` file. The oracle stick has such files next to what rekordbox wrote (`PIONEER/._*`; that they come from this attribute is a *hypothesis*). The copy itself carries no attribute of the source (quarantine, last-used date).
+  - Not implemented: deleting tracks or lists from the device (§ 4.3), the Device Library Plus conversion of an old stick with export.pdb only (§ 6.4; refused), `playlists3*.sync` bookkeeping (§ 4.4; files are left as they are), "like" relations (§ 1.2 step 8), cues from master `djmdCue` (the local ANLZ cues are used, which equals rekordbox's output when the cues were saved to the local files).
+
+**Verification** (`cargo test -p mb-usb`, test `oracle_a_export_matches_rekordbox`): `oracle-small` exported to an empty directory, then `oracle-all` onto it, from `fixtures/oracle-a`; the second session replays the recorded export.pdb history (ten close/open cycles, `oracle-small` emptied and refilled, `oracle-all` inserted at position 1 and moved to the top, one more cycle; `pdb.md` § The oracle stick's history). Compared with `fixtures/oracle-a/rbtest`:
+
+| Check | Result |
+|---|---|
+| (a) `/Contents` paths | 157/157 identical to `Contents.sha256` |
+| (b) audio bytes | 157/157 SHA-256 equal |
+| (c) ANLZ | 471/471 files byte-identical, same paths |
+| (d) artwork | 380/380 files byte-identical (95 images × a/b × plain/`_m`) |
+| (e) export.pdb / exportExt.pdb | **byte-identical** (78 and 18 pages); pdb-lint clean. With the executor's own operation sequence instead of the replayed session history, every table's rows are identical and lint is clean. |
+| (f) exportLibrary.db | all 22 tables identical row for row (`mb_devlib::diff::compare`); schema text, root pages and every pragma/cipher setting equal, `page_count` included. The encrypted files differ byte-wise (SQLCipher uses a random salt and per-page IVs); a decrypted page comparison (`devlib.md` § Writer: 39/41 pages for the rebuild) was not repeated. |
+| (g) settings | MYSETTING, MYSETTING2, DEVSETTING, DJMMYSETTING byte-identical, generated from the defaults; `djprofile.nxs` identical, but only as a copy of the stick's file placed in the test's settings folder (the local original is not in the fixtures) |
+| export log | byte-identical with the German column titles (`LogStrings::german`) |
+| (h) `rbdiff device` | 0 mismatches |
+| markers / side files | no `sync*.temp`, `-wal`, `-shm` or temp file left |
+
+`tests/synthetic.rs` (no fixtures) covers an incremental export (identical list skipped, new list on top, file-name clash with a file already on the stick → `-1`, stale ANLZ set deleted and the next number used, metadata and analysis-marker updates in both DBs, artwork generated from a non-square base), a re-export that changes nothing, and cancellation mid-copy (partial file removed, DBs hold the finished track only).
+
 ## Writer checklist
-- [ ] Target `/PIONEER` on FAT/exFAT and `/.PIONEER` on HFS(+). Refuse APFS/NTFS and read-only volumes. Never leave a `brokendb` file.
-- [ ] Refuse to start without free space ≥ 1.5 × each file being copied (rekordbox's per-track rule).
-- [ ] Analyse first. Export only tracks that have local `ANLZ0000.DAT`/`.EXT`/`.2EX`, and build the USB ANLZ files from them (`anlz.md` § Local vs USB).
-- [ ] Audio path: `/Contents/<artist≤48>/<album≤48>/<file≤48>`.
-  - [ ] Inhibited `/\:?*"<>|~` → `_`; NFC.
-  - [ ] Directory names: trailing `.` → `_` before the cut; after the cut, trim and strip trailing `.`.
-  - [ ] `UnknownArtist` / `UnknownAlbum` for empty names.
-  - [ ] The file name cut keeps the extension.
-  - [ ] On a clash, `-1`, `-2`, … inside the 48-character limit.
-- [ ] Copy each audio file once per stick, even when two DBs are written; both DB rows share the path, ANLZ set and image ID.
-- [ ] ANLZ: `/PIONEER/USBANLZ/P%03X/%08X/ANLZ%04X.{DAT,EXT,2EX}`, number = max existing in the folder + 1. Before writing a new track, delete any set in that folder whose PPTH equals the new path.
-- [ ] IDs: max + 1 per table. Look up artist/album/genre/label/key by exact name before adding.
-- [ ] Artwork: one image row per track.
-  - [ ] Files `/PIONEER/Artwork/%05d/{a|b}<id>.jpg` + `_m.jpg`, with folder = id/20 + 1.
-  - [ ] 80×80 and 240×240 baseline JPEG q85, letterboxed on black. Use the same bytes for `a` and `b`.
-- [ ] Track rows:
-  - [ ] `masterDbId` = source MasterDBID or library DBID; `masterContentId` = MasterSongID or ID.
-  - [ ] Update markers copied from the source.
-  - [ ] `contentLink` per § 1.2.
-- [ ] Playlists:
-  - [ ] Match existing device lists by (parent, name); skip identical lists; otherwise clear and refill in master order.
-  - [ ] Folders attribute 1; at most 1000 lists; at most 10000 tracks per list (1000 for the special devices).
-- [ ] Re-export:
-  - [ ] Identify tracks by master IDs + (length, bitrate, bitDepth, fileType, fileSize, sampleRate).
-  - [ ] Update rows in place; never re-copy existing audio.
-  - [ ] Rewrite ANLZ only when the analysis or cue marker changed.
+`mb-usb` status: [x] implemented, [ ] not.
+- [x] Target `/PIONEER` on FAT/exFAT and `/.PIONEER` on HFS(+) (statfs). [ ] Refuse APFS/NTFS and read-only volumes (not refused, so that plain directories work as development targets). Never leave a `brokendb` file.
+- [x] Refuse to start without free space ≥ 1.5 × each file being copied (rekordbox's per-track rule).
+- [x] Analyse first. Export only tracks that have local `ANLZ0000.DAT`/`.EXT`/`.2EX`, and build the USB ANLZ files from them (`anlz.md` § Local vs USB).
+- [x] Audio path: `/Contents/<artist≤48>/<album≤48>/<file≤48>`.
+  - [x] Inhibited `/\:?*"<>|~` → `_`; NFC.
+  - [x] Directory names: trailing `.` → `_` before the cut; after the cut, trim and strip trailing `.`.
+  - [x] `UnknownArtist` / `UnknownAlbum` for empty names.
+  - [x] The file name cut keeps the extension.
+  - [x] On a clash, `-1`, `-2`, … inside the 48-character limit (existence compared case-insensitively in NFC, as on FAT).
+- [x] Copy each audio file once per stick, even when two DBs are written; both DB rows share the path, ANLZ set and image ID.
+- [x] ANLZ: `/PIONEER/USBANLZ/P%03X/%08X/ANLZ%04X.{DAT,EXT,2EX}`, number = max existing in the folder + 1. Before writing a new track, delete any set in that folder whose PPTH equals the new path.
+- [x] IDs: max + 1 per table. Look up artist/album/genre/label/key by exact name before adding.
+- [x] Artwork: one image row per track.
+  - [x] Files `/PIONEER/Artwork/%05d/{a|b}<id>.jpg` + `_m.jpg`, with folder = id/20 + 1.
+  - [x] 80×80 and 240×240 baseline JPEG q85, letterboxed on black. Use the same bytes for `a` and `b` (byte copies of the local `_s`/`_m`).
+- [x] Track rows:
+  - [x] `masterDbId` = source MasterDBID or library DBID; `masterContentId` = MasterSongID or ID.
+  - [x] Update markers copied from the source.
+  - [x] `contentLink` per § 1.2.
+- [x] Playlists:
+  - [x] Match existing device lists by (parent, name); skip identical lists; otherwise clear and refill in master order.
+  - [x] Folders attribute 1; at most 1000 lists; at most 10000 tracks per list (1000 for the special devices: `PlanOptions::max_playlist_tracks`).
+- [x] Re-export:
+  - [x] Identify tracks by master IDs + (length, bitrate, bitDepth, fileType, fileSize, sampleRate).
+  - [x] Update rows in place; never re-copy existing audio.
+  - [x] Rewrite ANLZ only when the analysis or cue marker changed.
 - [ ] Deletes:
   - [ ] Remove the audio only if no other DB on the stick (and no library on this machine) uses the path.
   - [ ] Same rule for ANLZ and artwork.
-- [ ] Settings files:
-  - [ ] Never as part of export.
-  - [ ] If written: exact header strings, CRC-16/XMODEM (data block; whole file for DJMMYSETTING), sizes 148/148/140/160.
-  - [ ] Never overwrite a player-written file silently; never create `RBFLTR.DAT`.
-- [ ] Close both DBs cleanly; no `sync*.temp` left; `playlists3*.sync` consistent or absent.
-- [ ] Leave `DeviceLibBackup/`, `log/`, `ImportedHistory.xml`, `RBFLTR.DAT`, `CDJ/`, `MPJ/`, `TrashBox/`, `.CacheData/` and unknown root files untouched.
+- [x] Settings files:
+  - [x] Written when the device DB is created or updated, as rekordbox does (not per track).
+  - [x] Exact header strings, CRC-16/XMODEM (data block; whole file for DJMMYSETTING), sizes 148/148/140/160.
+  - [x] Never overwrite a player-written file silently (merge rule; DEVSETTING only when missing); never create `RBFLTR.DAT`.
+- [x] Close both DBs cleanly; no `sync*.temp` left. [ ] `playlists3*.sync` kept consistent (left untouched).
+- [x] Leave `DeviceLibBackup/`, `log/`, `ImportedHistory.xml`, `RBFLTR.DAT`, `CDJ/`, `MPJ/`, `TrashBox/`, `.CacheData/` and unknown root files untouched.
 
 ## Open questions
 - [ ] Whether OneLibrary players need `cue` rows at all (rekordbox's export writes none; cues are in ANLZ only). Needs a player test.
@@ -618,10 +682,14 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
 - [ ] Player-side path limits: is 48 code points per component a player constraint or only rekordbox's choice?
 - [ ] The source field compared at +0x210 vs device +0x230 in `overwrite_export` (key name?).
 - [ ] Whether the classic DB really allocates max + 1 inside `DevAddContent_` (fixture-consistent, but the procedure body is DeviceSQL bytecode).
-- [ ] DJMMYSETTING field map, unnamed MYSETTING/DEVSETTING bytes, and the exact DEVSETTING version string rekordbox writes.
+- [ ] DJMMYSETTING field map and the unnamed MYSETTING/DEVSETTING bytes. (The DEVSETTING version string is `7.2.19`, verified on the oracle stick.)
 - [ ] No FAT32 4 GiB file-size check was found in the export path. What happens with a larger file?
 - [ ] Whether merely opening or closing the DeviceSQL page manager rewrites the `.pdb` headers when nothing changed. This decides whether § 6.3's explanation of the 20:00 rewrite holds. Test with a before/after diff on a FAT32 image.
 - [ ] For a brand-new stick: does `createDeviceDB` → `needDbConversion` show the conversion dialog, or create the Plus DB silently?
 - [ ] The full table list of `deviceSqliteDbConversion` (history, image, property, My Tag), and why the fixture's exportLibrary.db has 12 playlists against 30 live ones in export.pdb.
 - [ ] Which control writes `djprofile.nxs` on mount (vtable slot 0x240, `exportKuvoProfile`), besides the export-thread copy.
-- [ ] Verify the whole flow byte-for-byte against the oracle export (`docs/oracle-session.md`, pass A) once it exists.
+- [x] Verify the whole flow byte-for-byte against the oracle export (`docs/oracle-session.md`, pass A): done with `mb-usb` (§ 8).
+- [ ] Which list `exportPlaylist` compares with the device list (the master list before or after the format gate), and why the oracle's second session emptied and refilled the unchanged `oracle-small` (`pdb.md` § The oracle stick's history, ids 65–72).
+- [ ] Whether `syncMyTag` re-adds the My Tag links of every device track after clearing them (`mb-usb` does; the oracle has no links).
+- [ ] Where a folder's children go when a folder is exported (appended in master order, or each moved to position 0).
+- [ ] The playlist ID rekordbox gives a new list in export.pdb on a stick with player-created lists at 16385+ (max + 1 assumed).

@@ -10,7 +10,7 @@ Status values: **verified** (checked against real files or a trace), **hypothesi
 | [anlz.md](anlz.md) | ANLZ PMAI container and tags | container + all typed tags verified (3,132 files incl. PSSI/PVDI); USB folder hash verified (704/704); local→USB conversion `to_usb` byte-exact on 471 oracle files |
 | [pdb.md](pdb.md) | export.pdb / exportExt.pdb (DeviceSQL) | reader verified; writer (DeviceSQL storage model) reproduces RBTEST export.pdb 78/78 and exportExt.pdb 18/18 pages byte-exact via replay; pdb-lint clean |
 | [devlib.md](devlib.md) | exportLibrary.db (OneLibrary) | key verified (BlowFishHelper decode, also yields master.db key); read + schema verified; write rules hypothesis |
-| [export.md](export.md) | USB export flow, paths, IDs, artwork, sync, settings files | verified from binary + stick (writer not yet built); open questions listed |
+| [export.md](export.md) | USB export flow, paths, IDs, artwork, sync, settings files, export log | verified; `mb-usb` reproduces the RBTEST stick file-for-file (pdb byte-exact, devlib row-exact, audio/ANLZ/artwork/settings/log byte-exact); deletes + old-stick conversion not yet implemented |
 | [xml.md](xml.md) | rekordbox.xml import/export format, TEMPO/POSITION_MARK derivation | reader + byte-exact writer verified on oracle-a (161/161 tracks); cues/colours untested |
 | analysis.md | analysis pipeline, BALib, WaveCreator, key, phrase, loudness, vocal | open |
 | decode.md | per-format decoding and resampling | open |
