@@ -16,6 +16,8 @@ pub struct Device {
     pub name: String,
     pub root: PathBuf,
     pub state: DeviceState,
+    /// Why musicbox must not write to this device (protected volume), if so.
+    pub write_refusal: Option<String>,
 }
 
 impl Device {
@@ -94,7 +96,8 @@ impl Devices {
                 if !self.list.iter().any(|d| d.root == root) {
                     let name = root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
                     let state = DeviceState::Loading(spawn_load(ctx, root.clone()));
-                    self.list.push(Device { name, root, state });
+                    let write_refusal = crate::protect::write_refusal(&root);
+                    self.list.push(Device { name, root, state, write_refusal });
                 }
             }
             ctx.request_repaint_after(SCAN_INTERVAL);

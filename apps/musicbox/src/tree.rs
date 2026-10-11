@@ -24,7 +24,8 @@ pub fn show(
             ui.weak("Devices");
         }
         for (i, device) in devices.list.iter().enumerate() {
-            egui::CollapsingHeader::new(&device.name)
+            let title = if device.write_refusal.is_some() { format!("{} (protected)", device.name) } else { device.name.clone() };
+            egui::CollapsingHeader::new(title)
                 .id_salt(("device", &device.root))
                 .default_open(true)
                 .show(ui, |ui| match &device.state {

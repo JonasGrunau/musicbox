@@ -6,6 +6,7 @@ pub mod browser;
 pub mod devices;
 pub mod editor;
 pub mod library;
+pub mod protect;
 pub mod theme;
 pub mod tree;
 pub mod waveform;
