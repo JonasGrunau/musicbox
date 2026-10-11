@@ -31,6 +31,7 @@ pub struct Devices {
     pub list: Vec<Device>,
     /// Roots passed with `--device`; always listed, never unmounted.
     pinned: Vec<PathBuf>,
+    scan_volumes: bool,
     last_scan: Option<Instant>,
 }
 
@@ -76,8 +77,8 @@ fn load(root: &Path) -> Result<LibrarySnapshot, String> {
 }
 
 impl Devices {
-    pub fn new(pinned: Vec<PathBuf>) -> Self {
-        Self { list: Vec::new(), pinned, last_scan: None }
+    pub fn new(pinned: Vec<PathBuf>, scan_volumes: bool) -> Self {
+        Self { list: Vec::new(), pinned, scan_volumes, last_scan: None }
     }
 
     /// Rescans mounts every couple of seconds and finishes background loads.
@@ -85,7 +86,9 @@ impl Devices {
         if self.last_scan.is_none_or(|t| t.elapsed() >= SCAN_INTERVAL) {
             self.last_scan = Some(Instant::now());
             let mut roots = self.pinned.clone();
-            roots.extend(mounted_devices());
+            if self.scan_volumes {
+                roots.extend(mounted_devices());
+            }
             self.list.retain(|d| roots.contains(&d.root));
             for root in roots {
                 if !self.list.iter().any(|d| d.root == root) {

@@ -91,6 +91,7 @@ impl DeviceLibrary {
             tracks,
             playlists,
             playlist_entries,
+            playlist_entry_ids: Default::default(),
             histories,
             history_entries,
             my_tags,

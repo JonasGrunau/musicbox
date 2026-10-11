@@ -130,6 +130,9 @@ pub struct LibrarySnapshot {
     pub playlists: Vec<PlaylistNode>,
     /// Track IDs per playlist, in playlist order.
     pub playlist_entries: std::collections::HashMap<DbId, Vec<DbId>>,
+    /// Row IDs of those entries (`djmdSongPlaylist.ID`), parallel to `playlist_entries`; empty for
+    /// libraries whose entries have no own ID (devices).
+    pub playlist_entry_ids: std::collections::HashMap<DbId, Vec<String>>,
     /// History lists (folders and playlists), same shape as `playlists`.
     pub histories: Vec<PlaylistNode>,
     pub history_entries: std::collections::HashMap<DbId, Vec<DbId>>,

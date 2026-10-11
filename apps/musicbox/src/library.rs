@@ -3,9 +3,17 @@
 use crate::Args;
 use mb_core::LibrarySnapshot;
 use mb_masterdb::{LibraryPaths, MasterDb, derive_passphrase};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 
-pub type LoadResult = Result<LibrarySnapshot, String>;
+/// A loaded local library plus what the editor needs to open it for writing.
+pub struct Loaded {
+    pub snapshot: LibrarySnapshot,
+    pub db_path: PathBuf,
+    pub passphrase: String,
+}
+
+pub type LoadResult = Result<Loaded, String>;
 
 pub fn spawn_load(ctx: egui::Context, args: Args) -> Receiver<LoadResult> {
     let (tx, rx) = channel();
@@ -17,7 +25,7 @@ pub fn spawn_load(ctx: egui::Context, args: Args) -> Receiver<LoadResult> {
     rx
 }
 
-fn load(args: &Args) -> anyhow::Result<LibrarySnapshot> {
+fn load(args: &Args) -> anyhow::Result<Loaded> {
     let options = args
         .options
         .clone()
@@ -30,6 +38,7 @@ fn load(args: &Args) -> anyhow::Result<LibrarySnapshot> {
     if let Some(root) = &args.analysis_root {
         paths.analysis_data_root = root.clone();
     }
-    let db = MasterDb::open_read_only(&paths.db_path, &derive_passphrase(&paths.dp)?)?;
-    Ok(db.load_snapshot(&paths)?)
+    let passphrase = derive_passphrase(&paths.dp)?;
+    let snapshot = MasterDb::open_read_only(&paths.db_path, &passphrase)?.load_snapshot(&paths)?;
+    Ok(Loaded { snapshot, db_path: paths.db_path, passphrase })
 }

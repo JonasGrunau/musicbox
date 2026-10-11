@@ -1,12 +1,15 @@
 //! Track table: filtered, sorted, virtualized.
 
+use crate::actions::{Action, TrackDrag};
 use crate::app::{LibraryRef, List, Source};
 use crate::theme;
 use egui_extras::{Column, TableBuilder};
 use mb_core::key::{KeyNotation, display as key_display, wheel_index};
 use mb_core::{LibrarySnapshot, Track};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use mb_core::{DbId, PlaylistKind, PlaylistNode};
+use mb_library::{Command, TrackEdit};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Col {
@@ -49,8 +52,14 @@ pub struct State {
     /// Indices into `LibrarySnapshot::tracks`, in display order.
     rows: Vec<usize>,
     built_for: Option<(Source, String, Col, bool)>,
-    /// (library, track index) of the selected row.
+    /// (library, track index) of the focused row; the deck shows this track.
     pub selected: Option<(LibraryRef, usize)>,
+    /// Track indices of all selected rows (multi-select).
+    pub selection: BTreeSet<usize>,
+    /// Display index where the last plain/⌘ click happened, for ⇧-click ranges.
+    anchor: Option<usize>,
+    /// For playlist views: position of each displayed row within the playlist's entries.
+    entry_pos: Vec<Option<usize>>,
 }
 
 impl Default for State {
@@ -63,6 +72,9 @@ impl Default for State {
             rows: Vec::new(),
             built_for: None,
             selected: None,
+            selection: BTreeSet::new(),
+            anchor: None,
+            entry_pos: Vec::new(),
         }
     }
 }
@@ -81,8 +93,13 @@ impl State {
         if self.built_for.as_ref() == Some(&key) {
             return;
         }
-        let mut rows: Vec<usize> = match &source.list {
-            List::Collection => (0..library.tracks.len()).collect(),
+        if self.built_for.as_ref().is_none_or(|(s, ..)| s != source) {
+            self.selection.clear();
+            self.anchor = None;
+        }
+        // (track index, position in the list's entries)
+        let mut rows: Vec<(usize, Option<usize>)> = match &source.list {
+            List::Collection => (0..library.tracks.len()).map(|i| (i, None)).collect(),
             List::Playlist(id) | List::History(id) | List::MyTag(id) => {
                 let entries = match &source.list {
                     List::Playlist(_) => &library.playlist_entries,
@@ -92,22 +109,28 @@ impl State {
                 let by_id: HashMap<_, _> = library.tracks.iter().enumerate().map(|(i, t)| (&t.id, i)).collect();
                 entries
                     .get(id)
-                    .map(|ids| ids.iter().filter_map(|id| by_id.get(id).copied()).collect())
+                    .map(|ids| {
+                        ids.iter()
+                            .enumerate()
+                            .filter_map(|(pos, id)| by_id.get(id).map(|&i| (i, Some(pos))))
+                            .collect()
+                    })
                     .unwrap_or_default()
             }
         };
         let needle = self.search.to_lowercase();
         if !needle.is_empty() {
-            rows.retain(|&i| matches_search(&library.tracks[i], &needle));
+            rows.retain(|&(i, _)| matches_search(&library.tracks[i], &needle));
         }
         if self.sort != Col::Index {
             let tracks = &library.tracks;
-            rows.sort_by(|&a, &b| compare(&tracks[a], &tracks[b], self.sort));
+            rows.sort_by(|&(a, _), &(b, _)| compare(&tracks[a], &tracks[b], self.sort));
         }
         if !self.ascending {
             rows.reverse();
         }
-        self.rows = rows;
+        self.entry_pos = rows.iter().map(|&(_, p)| p).collect();
+        self.rows = rows.into_iter().map(|(i, _)| i).collect();
         self.built_for = Some(key);
     }
 }
@@ -154,7 +177,16 @@ fn cell_text(t: &Track, col: Col, index: usize, notation: KeyNotation) -> String
     }
 }
 
-pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state: &mut State) {
+/// Context for write actions offered by the table.
+pub struct EditCtx<'a> {
+    pub enabled: bool,
+    /// The local library's playlists, for "Add to playlist".
+    pub playlists: &'a [PlaylistNode],
+}
+
+pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state: &mut State, edit: &EditCtx) -> Vec<Action> {
+    let mut actions = Vec::new();
+    let editable = edit.enabled && source.library == LibraryRef::Local;
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut state.search)
@@ -172,7 +204,7 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
     let mut table = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
-        .sense(egui::Sense::click())
+        .sense(egui::Sense::click_and_drag())
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .min_scrolled_height(0.0)
         .auto_shrink(false);
@@ -199,7 +231,8 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                 let display_index = row.index();
                 let track_index = state.rows[display_index];
                 let track = &library.tracks[track_index];
-                row.set_selected(state.selected == Some((source.library, track_index)));
+                let is_selected = state.selection.contains(&track_index);
+                row.set_selected(is_selected);
                 for (col, _, _) in COLUMNS {
                     row.col(|ui| match col {
                         Col::Rating => stars(ui, track.rating),
@@ -209,9 +242,28 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                         }
                     });
                 }
-                if row.response().clicked() {
+                let response = row.response();
+                if response.clicked() || (response.secondary_clicked() && !is_selected) {
+                    let mods = response.ctx.input(|i| i.modifiers);
+                    click_row(state, display_index, track_index, mods, response.secondary_clicked());
                     state.selected = Some((source.library, track_index));
                 }
+                if editable && response.drag_started() {
+                    if !is_selected {
+                        click_row(state, display_index, track_index, egui::Modifiers::NONE, false);
+                    }
+                    let ids = state.selection.iter().map(|&i| library.tracks[i].id.clone()).collect();
+                    egui::DragAndDrop::set_payload(&response.ctx, TrackDrag(ids));
+                }
+                response.context_menu(|ui| {
+                    if editable {
+                        row_menu(ui, library, source, state, edit, &mut actions);
+                    } else if source.library == LibraryRef::Local {
+                        ui.weak("Turn on editing to change the library");
+                    } else {
+                        ui.weak("Devices are read-only");
+                    }
+                });
             });
         });
     if let Some(col) = clicked_header {
@@ -221,6 +273,92 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
             state.sort = col;
             state.ascending = true;
         }
+    }
+    if let Some(drag) = egui::DragAndDrop::payload::<TrackDrag>(ui.ctx()) {
+        egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("track-drag"), egui::PopupAnchor::Pointer)
+            .show(|ui| ui.label(format!("{} track(s)", drag.0.len())));
+    }
+    actions
+}
+
+/// Plain click selects one row, ⌘ toggles, ⇧ extends from the anchor (display order).
+fn click_row(state: &mut State, display_index: usize, track_index: usize, mods: egui::Modifiers, secondary: bool) {
+    if mods.command && !secondary {
+        if !state.selection.remove(&track_index) {
+            state.selection.insert(track_index);
+        }
+        state.anchor = Some(display_index);
+    } else if mods.shift && !secondary {
+        let anchor = state.anchor.unwrap_or(display_index);
+        let (lo, hi) = (anchor.min(display_index), anchor.max(display_index));
+        state.selection = state.rows[lo..=hi].iter().copied().collect();
+    } else {
+        state.selection = BTreeSet::from([track_index]);
+        state.anchor = Some(display_index);
+    }
+}
+
+fn selected_ids(state: &State, library: &LibrarySnapshot) -> Vec<DbId> {
+    state.selection.iter().map(|&i| library.tracks[i].id.clone()).collect()
+}
+
+/// Write actions for the selected rows (local library, editing on).
+fn row_menu(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state: &State, edit: &EditCtx, actions: &mut Vec<Action>) {
+    let ids = selected_ids(state, library);
+    ui.weak(format!("{} track(s)", ids.len()));
+    ui.menu_button("Add to playlist", |ui| {
+        let mut any = false;
+        for p in edit.playlists.iter().filter(|p| p.kind == PlaylistKind::Playlist) {
+            any = true;
+            if ui.button(&p.name).clicked() {
+                actions.push(Action::Run(Command::AddTracks { playlist: p.id.clone(), content_ids: ids.clone(), position: None }));
+                ui.close();
+            }
+        }
+        if !any {
+            ui.weak("No playlists yet");
+        }
+    });
+    if let List::Playlist(playlist) = &source.list
+        && let Some(entry_ids) = library.playlist_entry_ids.get(playlist)
+    {
+        if ui.button("Remove from playlist").clicked() {
+            let entries: Vec<String> = state
+                .rows
+                .iter()
+                .zip(&state.entry_pos)
+                .filter(|(i, _)| state.selection.contains(i))
+                .filter_map(|(_, pos)| pos.and_then(|p| entry_ids.get(p).cloned()))
+                .collect();
+            actions.push(Action::Run(Command::RemoveFromPlaylist { playlist: playlist.clone(), entry_ids: entries }));
+            ui.close();
+        }
+    }
+    ui.menu_button("Rating", |ui| {
+        for stars in 0..=5u8 {
+            let label = if stars == 0 { "None".to_owned() } else { "★".repeat(stars as usize).replace('★', "*") };
+            if ui.button(label).clicked() {
+                for id in &ids {
+                    actions.push(Action::Run(Command::EditTrack { id: id.clone(), edit: TrackEdit::Rating(stars) }));
+                }
+                ui.close();
+            }
+        }
+    });
+    ui.menu_button("Colour", |ui| {
+        for (slot, name) in [(0u8, "None"), (1, "Pink"), (2, "Red"), (3, "Orange"), (4, "Yellow"), (5, "Green"), (6, "Aqua"), (7, "Blue"), (8, "Purple")] {
+            if ui.button(name).clicked() {
+                for id in &ids {
+                    actions.push(Action::Run(Command::EditTrack { id: id.clone(), edit: TrackEdit::Color(slot) }));
+                }
+                ui.close();
+            }
+        }
+    });
+    ui.separator();
+    if ui.button("Remove from Collection…").clicked() {
+        actions.push(Action::AskRemoveFromCollection(ids));
+        ui.close();
     }
 }
 

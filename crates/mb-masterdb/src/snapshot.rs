@@ -105,13 +105,15 @@ impl MasterDb {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut stmt = conn.prepare(
-            "SELECT PlaylistID, ContentID FROM djmdSongPlaylist \
+            "SELECT PlaylistID, ContentID, ID FROM djmdSongPlaylist \
              WHERE rb_local_deleted = 0 ORDER BY PlaylistID, TrackNo",
         )?;
         let mut playlist_entries: HashMap<DbId, Vec<DbId>> = HashMap::new();
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (playlist, content) = row?;
-            playlist_entries.entry(DbId(playlist)).or_default().push(DbId(content));
+        let mut playlist_entry_ids: HashMap<DbId, Vec<String>> = HashMap::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+            let (playlist, content, entry) = row?;
+            playlist_entries.entry(DbId(playlist.clone())).or_default().push(DbId(content));
+            playlist_entry_ids.entry(DbId(playlist)).or_default().push(entry);
         }
 
         let (histories, history_entries) = self.load_lists(
@@ -129,6 +131,7 @@ impl MasterDb {
             tracks,
             playlists,
             playlist_entries,
+            playlist_entry_ids,
             histories,
             history_entries,
             my_tags,

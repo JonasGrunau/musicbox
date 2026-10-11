@@ -1,0 +1,55 @@
+//! musicbox app as a library, so the headless UI tests (egui_kittest) can build the real `App`.
+
+pub mod actions;
+pub mod app;
+pub mod browser;
+pub mod devices;
+pub mod editor;
+pub mod library;
+pub mod theme;
+pub mod tree;
+pub mod waveform;
+
+pub use app::App;
+
+use std::path::PathBuf;
+
+/// Command-line overrides, mainly for running against fixture copies:
+/// `musicbox [--options <options.json>] [--db <master.db>] [--analysis-root <dir>] [--device <root>]...
+/// [--backup-root <dir>]`
+#[derive(Default, Clone)]
+pub struct Args {
+    pub options: Option<PathBuf>,
+    pub db: Option<PathBuf>,
+    pub analysis_root: Option<PathBuf>,
+    /// Extra device roots (folders containing `PIONEER/`), e.g. fixture copies.
+    pub devices: Vec<PathBuf>,
+    /// Where session backups go (default `~/Library/Application Support/musicbox/backups`).
+    pub backup_root: Option<PathBuf>,
+    /// Don't list mounted volumes as devices (tests).
+    pub no_volume_scan: bool,
+}
+
+pub fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Args> {
+    let mut out = Args::default();
+    let mut it = args.into_iter();
+    while let Some(flag) = it.next() {
+        let mut value = || it.next().map(PathBuf::from).ok_or_else(|| anyhow::anyhow!("{flag} needs a value"));
+        match flag.as_str() {
+            "--options" => out.options = Some(value()?),
+            "--db" => out.db = Some(value()?),
+            "--analysis-root" => out.analysis_root = Some(value()?),
+            "--device" => out.devices.push(value()?),
+            "--backup-root" => out.backup_root = Some(value()?),
+            "--no-volume-scan" => out.no_volume_scan = true,
+            other => anyhow::bail!("unknown argument {other}"),
+        }
+    }
+    Ok(out)
+}
+
+/// Shared setup for the native window and the test harness.
+pub fn install(ctx: &egui::Context) {
+    theme::apply(ctx);
+    egui_extras::install_image_loaders(ctx);
+}

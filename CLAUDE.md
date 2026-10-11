@@ -19,6 +19,10 @@ The full plan is in `docs/plan.md`; progress and handoffs are in `docs/progress.
    - `docs/re/` is written in our own words: addresses, behaviour and constants.
    - Never copy rekordbox models, dylibs or skin assets into the repo or the app.
 
+## UI testing
+- Drive the app only through the headless harness (`apps/musicbox/tests/ui_*.rs`, egui_kittest): click by label, type, drag/drop, render off-screen. `MB_UI_SHOTS=<dir> cargo test -p musicbox` saves the renders.
+- **Never** post OS-level mouse/keyboard events or take screen-region screenshots; they steal the user's input and can hit other apps.
+
 ## Layout
 - `crates/mb-*` — libraries; see the architecture section of the plan.
 - `apps/musicbox` — the egui app.
