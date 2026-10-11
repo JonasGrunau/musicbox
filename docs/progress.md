@@ -12,7 +12,21 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 - Pre-check snapshot: `fixtures/sandbox-pre-m2`. musicbox backup: `~/Library/Application Support/musicbox/backups/20261012-010939.360`.
 - **Writers:** export.pdb/exportExt.pdb (78/78 + 18/18 pages) and exportLibrary.db (all tables) reproduce rekordbox's RBTEST export byte-exact or row-exact.
 - **UI:** the editing UI is done and tested headlessly with egui_kittest. The user asked for no OS-level input automation, so UI tests never touch the real mouse or keyboard.
-- **Running:** `mb-usb` export engine (planner + executor), verified against RBTEST.
+- **Protected volumes:** `apps/musicbox/src/protect.rs` + `~/Library/Application Support/musicbox/protected-volumes.txt`. The reference stick UUID is always blocked. Every device write path must call `protect::write_refusal(root)` first.
+- **Running background jobs (2026-10-12 ~01:15), results land as notifications:**
+  1. `crates/mb-usb`: export planner + executor; target is reproducing `fixtures/oracle-a/rbtest` (paths, audio, ANLZ, artwork, pdb, devlib, settings).
+  2. `crates/mb-audio` + `crates/mb-player` + `docs/re/decode.md`: decode spine (dlopen rekordbox's libmpg123, AudioToolbox for AAC) with a per-format offset table, plus cpal preview player.
+- **On their completion:** review, run tests, commit and push to `main`; update INDEX/progress.
+- **Then wire into the UI:**
+  - Export: drag a playlist onto a device, or a context menu. Check `protect::write_refusal` first.
+  - Preview: play/scrub in the deck.
+  - Cover all of it with egui_kittest tests (no OS input).
+- **Then:** spare-stick (RBTEST) CDJ test with the user (M3 check); M4 sync; M5 cue/grid editing; M6 analysis.
+- **Session rules:**
+  - Commit and push straight to `main`, no branches.
+  - Never synthetic OS input or region screenshots.
+  - Reference stick stays unplugged or read-only.
+  - Never run rekordbox while musicbox tests the sandbox.
 - **Next:**
   - Export in the UI. Writes go only to unprotected sticks: the reference stick's volume UUID 2335E32F-… is hard-blocked.
   - Spare-stick CDJ test (M3 user check).
