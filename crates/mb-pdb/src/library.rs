@@ -11,7 +11,7 @@ use crate::page::Pdb;
 use crate::tables::*;
 
 /// Every table of export.pdb, typed.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExportDb {
     pub tracks: Vec<Track>,
     pub genres: Vec<Genre>,
@@ -63,7 +63,7 @@ impl ExportDb {
 }
 
 /// Every table of exportExt.pdb, typed.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtDb {
     pub recommend_likes: Vec<RecommendLike>,
     pub histories: Vec<ExtHistory>,
@@ -261,13 +261,20 @@ impl DeviceLibrary {
                         id: id(t.id),
                         parent: (t.parent_id != 0).then(|| id(t.parent_id)),
                         name: t.name.clone(),
-                        kind: if t.attribute == 1 { PlaylistKind::Folder } else { PlaylistKind::Playlist },
+                        kind: if t.attribute == 1 {
+                            PlaylistKind::Folder
+                        } else {
+                            PlaylistKind::Playlist
+                        },
                         seq: i64::from(t.seq),
                     })
                     .collect();
                 let mut entries: HashMap<DbId, Vec<DbId>> = HashMap::new();
                 for link in &ext.tag_tracks {
-                    entries.entry(id(link.tag_id)).or_default().push(id(link.track_id));
+                    entries
+                        .entry(id(link.tag_id))
+                        .or_default()
+                        .push(id(link.track_id));
                 }
                 (nodes, entries)
             }
@@ -278,6 +285,7 @@ impl DeviceLibrary {
             tracks,
             playlists,
             playlist_entries,
+            playlist_entry_ids: Default::default(),
             histories: history_nodes,
             history_entries,
             my_tags,

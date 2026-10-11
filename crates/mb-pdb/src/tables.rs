@@ -5,8 +5,8 @@
 //! nothing read from the file is dropped.
 
 use crate::page::Pdb;
-use crate::row::Row;
-use crate::schema::DbKind;
+use crate::row::{Row, Value};
+use crate::schema::{DbKind, TableSchema};
 use crate::string::DeviceString;
 use crate::{Error, Result};
 
@@ -15,6 +15,69 @@ pub trait TypedRow: Sized {
     const DB: DbKind;
     const TABLE_TYPE: u32;
     fn from_row(row: &Row) -> Self;
+    /// One value per schema column in declaration order, as the writer stores them
+    /// ([`crate::encode::encode_row`]). Inverse of [`TypedRow::from_row`] for rows rekordbox
+    /// wrote: strings are re-encoded with rekordbox's form choice ([`DeviceString::from_text`]).
+    fn to_values(&self) -> Vec<Value>;
+}
+
+/// Builds a value list by column name, so the `to_values` implementations mirror `read`.
+struct Values {
+    schema: &'static TableSchema,
+    values: Vec<Option<Value>>,
+}
+
+impl Values {
+    fn new(db: DbKind, table_type: u32) -> Self {
+        let schema = db.table(table_type).expect("static schema");
+        Self {
+            schema,
+            values: vec![None; schema.columns.len()],
+        }
+    }
+
+    fn index(&self, name: &str) -> usize {
+        self.schema
+            .column_index(name)
+            .unwrap_or_else(|| panic!("{}.{name} is not a column", self.schema.name))
+    }
+
+    fn int(mut self, name: &str, v: u32) -> Self {
+        let i = self.index(name);
+        self.values[i] = Some(match self.schema.columns[i].ty.size() {
+            Some(1) => Value::U8(v as u8),
+            Some(2) => Value::U16(v as u16),
+            Some(_) => Value::U32(v),
+            None => panic!("{}.{name} is a string column", self.schema.name),
+        });
+        self
+    }
+
+    fn string(mut self, name: &str, s: DeviceString) -> Self {
+        let i = self.index(name);
+        assert!(
+            self.schema.columns[i].ty.is_variable(),
+            "{}.{name} is not a string column",
+            self.schema.name
+        );
+        self.values[i] = Some(Value::Str(s));
+        self
+    }
+
+    fn text(self, name: &str, s: &str) -> Self {
+        self.string(name, DeviceString::from_text(s))
+    }
+
+    fn finish(self) -> Vec<Value> {
+        let name = self.schema.name;
+        self.values
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.unwrap_or_else(|| panic!("{name}.{} has no value", self.schema.columns[i].name))
+            })
+            .collect()
+    }
 }
 
 /// Decodes every live row of a table with its schema.
@@ -47,6 +110,9 @@ macro_rules! typed {
             const TABLE_TYPE: u32 = $table;
             fn from_row(r: &Row) -> Self {
                 Self::read(r)
+            }
+            fn to_values(&self) -> Vec<Value> {
+                self.write(Values::new(DbKind::$db, $table)).finish()
             }
         }
     };
@@ -853,3 +919,372 @@ impl GeneralOption {
     }
 }
 typed!(GeneralOption, ExportExt, 8);
+
+// ---- writers: the inverse of the `read` functions above ----
+
+impl Track {
+    /// RESERVED9 as rekordbox stores it: `isrc_raw` when it still matches `isrc`, otherwise the
+    /// `db::dsqlAddTrack` rule (exactly 12 bytes → the special 0x90 form, anything else → "").
+    pub fn isrc_string(&self) -> DeviceString {
+        let raw_matches = self.isrc_raw.text() == self.isrc;
+        if raw_matches && (self.isrc.is_empty() || !self.isrc_raw.is_empty()) {
+            return self.isrc_raw.clone();
+        }
+        if self.isrc.len() == 12 && self.isrc.is_ascii() {
+            DeviceString::from_isrc(&self.isrc)
+        } else {
+            DeviceString::from_text("")
+        }
+    }
+
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id)
+            .text("FOLDERPATH", &self.folder_path)
+            .text("FILENAMEL", &self.file_name)
+            .text("FILENAMES", &self.file_name_short)
+            .text("TITLE", &self.title)
+            .int("ARTISTID", self.artist_id)
+            .int("ALBUMID", self.album_id)
+            .int("GENREID", self.genre_id)
+            .int("BPM", self.bpm_x100)
+            .int("LENGTH", self.length_s.into())
+            .int("TRACKNO", self.track_no)
+            .int("BITRATE", self.bitrate)
+            .int("BITDEPTH", self.bit_depth.into())
+            .text("COMMNT", &self.comment)
+            .int("FILETYPE", self.file_type.into())
+            .int("RATING", self.rating.into())
+            .int("RELEASEYEAR", self.release_year.into())
+            .int("REMIXERID", self.remixer_id)
+            .int("LABELID", self.label_id)
+            .int("ORGARTISTID", self.original_artist_id)
+            .int("KEYID", self.key_id)
+            .text("STOCKDATE", &self.stock_date)
+            .int("COLORID", self.color_id.into())
+            .int("DJPLAYCOUNT", self.play_count.into())
+            .int("IMAGEID", self.artwork_id)
+            .int("MASTERDBID", self.master_db_id)
+            .int("MASTERCONTENTID", self.master_content_id)
+            .text("ANALYSISDATAPATH", &self.analysis_path)
+            .text("SEARCHSTR", &self.search_str)
+            .int("FILESIZE", self.file_size)
+            .int("DISCNO", self.disc_no.into())
+            .int("COMPOSERID", self.composer_id)
+            .text("SUBTITLE", &self.subtitle)
+            .int("SAMPLERATE", self.sample_rate)
+            .int("DISABLEQUANTIZE", self.disable_quantize.into())
+            .int("ANALYSED", self.analysed.into())
+            .text("RELEASEDATE", &self.release_date)
+            .text("DATECREATED", &self.date_created)
+            .int("CONTENTLINK", self.content_link)
+            .text("TAG", &self.tag)
+            .text("RESERVED1", &self.modified_by_rbm)
+            .text("RESERVED2", &self.hot_cue_auto_load)
+            .text("RESERVED3", &self.delivery_control)
+            .text("RESERVED4", &self.delivery_comment)
+            .text("RESERVED5", &self.cue_updated)
+            .text("RESERVED6", &self.analysis_updated)
+            .text("RESERVED7", &self.track_info_updated)
+            .text("RESERVED8", &self.lyricist)
+            .string("RESERVED9", self.isrc_string())
+            .text("RESERVED10", &self.reserved10)
+    }
+}
+
+impl Named {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id).text("NAME", &self.name)
+    }
+}
+
+impl Genre {
+    fn write(&self, v: Values) -> Values {
+        self.0.write(v)
+    }
+}
+
+impl Label {
+    fn write(&self, v: Values) -> Values {
+        self.0.write(v)
+    }
+}
+
+impl HistoryPlaylist {
+    fn write(&self, v: Values) -> Values {
+        self.0.write(v)
+    }
+}
+
+impl Artist {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id)
+            .text("NAME", &self.name)
+            .text("SEARCHSTR", &self.search_str)
+    }
+}
+
+impl Album {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id)
+            .text("NAME", &self.name)
+            .int("ALBUMARTISTID", self.album_artist_id)
+            .int("IMAGEID", self.artwork_id)
+            .int("COMPILATION", self.compilation.into())
+            .text("SEARCHSTR", &self.search_str)
+    }
+}
+
+impl Key {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id)
+            .text("SCALENAME", &self.name)
+            .int("SEQ", self.seq.into())
+    }
+}
+
+impl Color {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id.into())
+            .int("COLORCODE", self.color_code)
+            .int("SORTKEY", self.sort_key.into())
+            .text("COMMNT", &self.name)
+    }
+}
+
+impl TreeNode {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id)
+            .int("SEQ", self.seq)
+            .text("NAME", &self.name)
+            .int("IMAGEID", self.artwork_id)
+            .int("ATTRIBUTE", self.attribute.into())
+            .int("PARENTID", self.parent_id)
+    }
+}
+
+impl PlaylistNode {
+    fn write(&self, v: Values) -> Values {
+        self.0.write(v)
+    }
+}
+
+impl HotCueBankList {
+    fn write(&self, v: Values) -> Values {
+        self.0.write(v)
+    }
+}
+
+impl PlaylistEntry {
+    fn write(&self, v: Values) -> Values {
+        v.int("PLAYLISTID", self.playlist_id)
+            .int("CONTENTID", self.track_id)
+            .int("TRACKNO", self.entry_index)
+    }
+}
+
+impl HotCueBankListEntry {
+    fn write(&self, v: Values) -> Values {
+        v.int("HOTCUEBANKLISTID", self.bank_list_id)
+            .int("CONTENTID", self.track_id)
+            .int("TRACKNO", self.entry_index)
+            .int("CUEID", self.cue_id)
+    }
+}
+
+impl HistoryEntry {
+    fn write(&self, v: Values) -> Values {
+        v.int("HISTORYID", self.history_id)
+            .int("SEQ", self.seq.into())
+            .int("CONTENTID", self.track_id)
+            .int("ONAIR", self.on_air.into())
+    }
+}
+
+impl Artwork {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id).text("PATH", &self.path)
+    }
+}
+
+impl MixerParam {
+    fn write(&self, v: Values) -> Values {
+        v.int("CONTENTID", self.track_id)
+            .int("GAIN", self.gain.into())
+            .int("HIGH", self.high.into())
+            .int("MID", self.mid.into())
+            .int("LOW", self.low.into())
+    }
+}
+
+impl HotCueBankPoint {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id)
+            .int("CONTENTID", self.track_id)
+            .int("INMSEC", self.in_msec)
+            .int("INFRAME", self.in_frame)
+            .int("INMPEGFRAME", self.in_mpeg_frame)
+            .int("INMPEGABS", self.in_mpeg_abs)
+            .int("OUTMSEC", self.out_msec)
+            .int("OUTFRAME", self.out_frame)
+            .int("OUTMPEGFRAME", self.out_mpeg_frame)
+            .int("OUTMPEGABS", self.out_mpeg_abs)
+            .int("KIND", self.kind.into())
+    }
+}
+
+impl MenuItem {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id.into())
+            .int("CLASS", self.class.into())
+            .text("NAME", &self.name)
+    }
+}
+
+impl Category {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id.into())
+            .int("MENUITEMID", self.menu_item_id.into())
+            .int("SEQ", self.seq.into())
+            .int("DISABLE", self.disable.into())
+            .int("INFOORDER", self.info_order.into())
+    }
+}
+
+impl Sort {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id.into())
+            .int("MENUITEMID", self.menu_item_id.into())
+            .int("SEQ", self.seq.into())
+            .int("DISABLE", self.disable.into())
+    }
+}
+
+impl Property {
+    fn write(&self, v: Values) -> Values {
+        v.text("DEVNAME", &self.device_name)
+            .text("DBVERSION", &self.db_version)
+            .int("SONGNUMBER", self.track_count)
+            .text("DATECREATED", &self.date_created)
+            .int("COLORID", self.color_id.into())
+            .int("PROTECTED", self.protected.into())
+    }
+}
+
+impl RecommendLike {
+    fn write(&self, v: Values) -> Values {
+        v.int("CONTENTID1", self.track_id1)
+            .int("CONTENTID2", self.track_id2)
+            .int("LIKERATE", self.like_rate.into())
+            .int("RESERVED1", self.reserved1.into())
+            .int("RESERVED2", self.reserved2.into())
+            .int("DATACREATEDH", self.date_created_hi)
+            .int("DATACREATEDL", self.date_created_lo)
+            .text("RESERVED3", &self.reserved3)
+    }
+}
+
+impl ExtHistory {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id)
+            .int("SEQ", self.seq)
+            .text("NAME", &self.name)
+            .int("ATTRIBUTE", self.attribute.into())
+            .int("RESERVED1", self.reserved1.into())
+            .int("RESERVED2", self.reserved2.into())
+            .int("PARENTID", self.parent_id)
+            .text("DATECREATED", &self.date_created)
+            .int("RESERVED3", self.reserved3)
+            .text("RESERVED4", &self.reserved4)
+    }
+}
+
+impl ExtHistoryEntry {
+    fn write(&self, v: Values) -> Values {
+        v.int("HISTORYID", self.history_id)
+            .int("CONTENTID", self.track_id)
+            .int("TRACKNO", self.entry_index)
+            .text("RESERVED1", &self.reserved1)
+    }
+}
+
+impl MyTag {
+    fn write(&self, v: Values) -> Values {
+        v.int("ID", self.id)
+            .int("SEQ", self.seq)
+            .int("ATTRIBUTE", self.attribute.into())
+            .int("RESERVED1", self.reserved1.into())
+            .int("RESERVED2", self.reserved2.into())
+            .int("PARENTID", self.parent_id)
+            .int("RESERVED3", self.reserved3)
+            .int("RESERVED4", self.reserved4)
+            .text("RESERVED5", &self.reserved5)
+            .text("NAME", &self.name)
+            .text("RESERVED6", &self.reserved6)
+    }
+}
+
+impl MyTagTrack {
+    fn write(&self, v: Values) -> Values {
+        v.int("MYTAGID", self.tag_id)
+            .int("CONTENTID", self.track_id)
+            .int("RESERVED1", self.reserved1)
+            .text("RESERVED2", &self.reserved2)
+    }
+}
+
+impl CueOption {
+    fn write(&self, v: Values) -> Values {
+        v.int("CUEID", self.cue_id)
+            .int("COLOR", self.color.into())
+            .int("RESERVED1", self.reserved1.into())
+            .int("RESERVED2", self.reserved2.into())
+            .text("COMMNT", &self.comment)
+            .int("BEATSIZE", self.beat_size)
+            .int("CUEMICRO", self.cue_micro)
+            .int("RESERVED5", self.reserved5)
+            .int("RESERVED6", self.reserved6)
+            .int("RESERVED7", self.reserved7)
+            .int("RESERVED8", self.reserved8)
+            .text("INSEEKINFO", &self.in_seek_info)
+            .text("OUTSEEKINFO", &self.out_seek_info)
+    }
+}
+
+fn reserved_ints(mut v: Values, r: &[u32]) -> Values {
+    for (i, x) in r.iter().enumerate() {
+        v = v.int(&format!("RESERVED{}", i + 1), *x);
+    }
+    v
+}
+
+fn reserved_strings(mut v: Values, r: &[String]) -> Values {
+    for (i, x) in r.iter().enumerate() {
+        v = v.text(&format!("RESERVEDSTRING{}", i + 1), x);
+    }
+    v
+}
+
+impl ContentOption {
+    fn write(&self, v: Values) -> Values {
+        let v = v.int("CONTENTID", self.track_id);
+        reserved_strings(reserved_ints(v, &self.reserved), &self.reserved_strings)
+    }
+}
+
+impl DbPropertyOption {
+    fn write(&self, v: Values) -> Values {
+        let v = v
+            .int("MYTAGMASTERDBID", self.my_tag_master_db_id)
+            .text("DBVERSION", &self.db_version);
+        reserved_strings(reserved_ints(v, &self.reserved), &self.reserved_strings)
+    }
+}
+
+impl GeneralOption {
+    fn write(&self, v: Values) -> Values {
+        let v = v
+            .int("TABLEKIND", self.table_kind)
+            .int("TABLEID", self.table_id);
+        reserved_strings(reserved_ints(v, &self.reserved), &self.reserved_strings)
+    }
+}

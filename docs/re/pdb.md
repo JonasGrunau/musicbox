@@ -1,6 +1,6 @@
 # export.pdb / exportExt.pdb (Encirq DeviceSQL)
 
-Status: **reader verified**. Every page and row of both fixture files decodes, and every header field below is either checked against the fixture on every page (`crates/mb-pdb/tests/fixture.rs`) or traced to the binary. The writer rules at the end are partly **hypothesis**; each one is marked.
+Status: **reader verified, writer verified**. Every page and row of both fixture files decodes, and every header field below is either checked against the fixture on every page (`crates/mb-pdb/tests/fixture.rs`) or traced to the binary. The writer (`crates/mb-pdb/src/engine.rs`, `writer.rs`) models the DeviceSQL storage layer function by function; replaying the oracle export history through it reproduces rekordbox's `export.pdb` and `exportExt.pdb` **byte for byte** (§ Writer verification). The few writer details that are still **hypothesis** are marked.
 
 Status words used below:
 - **verified (fixture)**: holds on every page/row of `fixtures/stick/PIONEER/rekordbox/export.pdb` and `exportExt.pdb`.
@@ -8,7 +8,9 @@ Status words used below:
 - **hypothesis**: fits the evidence but is not proven.
 - **open**: unknown.
 
-Implementation: `crates/mb-pdb`. The fixture is a 2026-10-11 rekordbox 7.2.19 rewrite of an older stick (see `fixtures/manifest.toml`), so it carries deleted rows and update history. That makes it a good reader test and a poor template for byte-exact writer output.
+Implementation: `crates/mb-pdb`. Two fixtures:
+- `fixtures/stick/PIONEER/rekordbox` ("the stick"): a 2026-10-11 rekordbox 7.2.19 rewrite of an older stick (see `fixtures/manifest.toml`), so it carries deleted rows and years of update history. A good reader test.
+- `fixtures/oracle-a/rbtest/PIONEER/rekordbox` ("the oracle stick"): a fresh export by rekordbox 7.2.19 to an empty FAT32 stick: playlist `oracle-small` (5 tracks), then, in a later session, `oracle-all` (157 tracks). Its source library is `fixtures/oracle-a`. The byte-exact writer target.
 
 ## Files
 | File | Content | Tables |
@@ -40,7 +42,7 @@ DeviceSQL is statically linked. Generated "EPL" code (`__epl_*`, `_edb_*_MODULEn
 | master.db query that fills `RowDataTrack` (same column order as DJDBCONTENT) | string @0x104f9db00 |
 | Column updates: `DEV_MODULE6_DEVMODIFY*` forms (record layout gives the RESERVEDn meanings) | 0x1006b…–0x1006cc… |
 
-Tooling note: the REA/Ghidra MCP provider timed out on every request during this work. Most of the analysis used `nm`, `objdump` and a small instruction emulator (kept in the session scratchpad, not in the repo). The emulator replays the `TETableCreate` call sites and decodes the chained-fixup pointers to the column-name and column-type string arrays. The late checks used the headless decompiler (`re/ghidra/decompile.sh`): reuse-list flag bits, header-page free list, dirty-bit clearing, and category enable/disable.
+Tooling note: the REA/Ghidra MCP provider timed out on every request during this work. Most of the analysis used `nm`, `objdump` and a small instruction emulator (kept in the session scratchpad, not in the repo). The emulator replays the `TETableCreate` call sites and decodes the chained-fixup pointers to the column-name and column-type string arrays. The late checks used the headless decompiler (`re/ghidra/decompile.sh`): reuse-list flag bits, header-page free list, dirty-bit clearing, and category enable/disable. The writer work (§ Storage engine) decompiled the `TE_DPgm_*`, `TE_psmgr_*`/`TE_PSmgr*`, `TE_RowFormSmgr` and update-scan functions the same way.
 
 ## File header (page 0)
 | Off | Size | Field | Value in fixture | Status |
@@ -48,9 +50,9 @@ Tooling note: the REA/Ghidra MCP provider timed out on every request during this
 | 0x00 | 4 | reserved | 0 | verified (fixture) |
 | 0x04 | 4 | page size | 4096 | verified; `CheckFirstHeader` compares it to the page manager's page size |
 | 0x08 | 4 | table count | 20 / 9 | verified |
-| 0x0c | 4 | next unused page: first page number never handed out | 0x13d / 0x15 | verified: above every chained page and every empty candidate; `CheckPageHeader` requires `page.index < it` and `page.next < it` (or `next == 0x03ffffff`) |
-| 0x10 | 4 | page-manager state | 5 | verified (binary): `TE_DPgm_Close` writes 5 (6 if a close flag is set); `TE_DPgm_WritePage` writes 7 into the in-memory header before the first page write of a session. `InitialSetup` accepts 0, 1, 5 |
-| 0x14 | 4 | transaction id, low word ("sequence") | 0x4f8f / 0x23c | verified: ≥ every page's id; `TE_DPgm_Close` increments it with `TE_XidIncr` |
+| 0x0c | 4 | next unused page: first page number never handed out | 0x13d / 0x15 | verified: above every chained page and every empty candidate; `CheckPageHeader` requires `page.index < it` and `page.next < it` (or `next == 0x03ffffff`). Advanced by `TE_DPgm_PageGetNew` (§ Storage engine) |
+| 0x10 | 4 | page-manager state | 5 | verified (binary): `TE_DPgm_Close` writes 5 (6 if a close flag is set); `TE_DPgm_Open` sets 4 and `TE_DPgm_Commit` 1 in memory; `TE_DPgm_WritePage` writes 7 before the first page write of a session when `COMMITOPT=1`. `InitialSetup` accepts 0, 1, 5 |
+| 0x14 | 4 | transaction id, low word ("sequence") | 0x4f8f / 0x23c | verified: ≥ every page's id. +1 at every writable open (`TE_DPgm_Open`), +1 at every commit that wrote a page (`TE_DPgm_Commit`), +1 at close (`TE_DPgm_Close`), all through `TE_XidIncr` (§ Storage engine) |
 | 0x18 | 4 | transaction id, high word | 0 | verified (binary): carry of `TE_XidAdd`; `CheckPageHeader` compares it to page 0x14 |
 | 0x1c | 16×n | table directory | | see below |
 | … | | zero | | verified (fixture) |
@@ -65,7 +67,7 @@ The directory can hold `(page_size − 0x1c) / 16` entries (`InitialSetup`, stor
 | 8 | first page = the table's header page (flags 0x64) | verified |
 | 12 | last page of the chain | verified: readers stop here, not at a sentinel |
 
-Every in-file page is either in exactly one chain or is an all-zero empty candidate (verified for both files: 19 + 6 candidate pages). The file ends after the highest chained page; candidates past that are not written. In the initial layout table *t* got header page 2t+1 and candidate 2t+2 (verified pattern in both files; pages added later are allocated from `next_unused_page` and interleave across tables).
+Every in-file page is either in exactly one chain or is an all-zero empty candidate (verified for both files: 19 + 6 candidate pages). The file ends after the highest chained page; candidates past that are not written (a candidate is only a reserved number until the table takes it). Table *t* of a new file gets header page 2t+1 and candidate 2t+2; every later page of any table is the table's current candidate, and `next_unused_page` becomes the new candidate (verified, binary: `TE_DPgm_PageGetNew` @0x102f54f88; and by the byte-exact replay).
 
 ## Pages
 Every page except page 0 has a 40-byte header. Bytes 0x00..0x17 are the disk page manager's; 0x18..0x27 are the storage manager's ("psmgr" header, `psh` below = page+0x18).
@@ -81,8 +83,8 @@ Every page except page 0 has a 40-byte header. Bytes 0x00..0x17 are the disk pag
 | 0x18 | 4 | bits 0..12 slot count; bits 13..25 live-row count; bits 26..31 flags | verified (binary: `CheckPsmgrHeader`, `psmgr_getnext`, `area_free`, `GetSpaceAtEnd`; fixture: live count = number of present bits on all 278 data pages) |
 | 0x1c | 2 | free bytes | verified: `free + used + footer = page_size − 0x28` on every data page |
 | 0x1e | 2 | used bytes (heap allocated to rows, from 0x28 up, deleted rows included) | verified |
-| 0x20 | 2 (14 bits) | number of dirty slots (data page) or dirty reuse-list entries (header page); 0x1fff = none | verified (fixture, every page; binary `TE_PSmgrAddDirtyArea`, `area_free`) |
-| 0x22 | 2 (14 bits) | lowest dirty slot (data page) or list entry (header page); 0x1fff = none | verified (fixture, every page) |
+| 0x20 | 2 (14 bits) | number of dirty slots (data page) or dirty reuse-list entries (header page); 0x1fff = none. It can also be 0 with no dirty bit (a slot inserted and deleted in one transaction) | verified (fixture, every page; binary `TE_PSmgrAddDirtyArea`, `area_free`) |
+| 0x22 | 2 (14 bits) | lowest dirty slot (data page) or list entry (header page); 0x1fff = none. A lower bound: deleting a slot inserted in the same transaction lowers 0x20 but leaves 0x22 | verified (binary `TE_psmgr_area_free`; equality holds on every fixture page) |
 | 0x24 | 2 | data page: 0. Header page: capacity of the reuse list (1004 = (4096−40)/4 − 10) | verified |
 | 0x26 | 2 | data page: 0. Header page: slots of the reuse list in use (high-water mark) | verified |
 
@@ -109,11 +111,12 @@ Fields that older descriptions call "num_rows_small/num_rows_large" are this pac
   | −6 − 2k | heap offset of slot 16g+k |
 
 - Read slots in order 0..slot_count−1 and keep those whose present bit is set (`TE_psmgr_getnext` @0x102f67818, verified).
-- **Insert** (`GetSpaceAtEnd`): `slot = slot_count++`, `live++`, set present and dirty bits, write the offset, `used += align4(size)`, `free -= align4(size) + (slot % 16 == 0 ? 6 : 2)` (`TE_PSmgrCalcAddedOffset` @0x102f6965c).
-- **Delete** (`TE_psmgr_area_free`): `live--`, clear the present bit. If the slot was inserted in the same transaction, clear its dirty bit and decrement 0x20; otherwise set its dirty bit. The row bytes and the slot stay. On the first deletion the page joins the header page's reuse list and gets flag 0x10. A page whose live count drops to 0 (outside the reuse list) goes to a free list. Not seen in the fixture: emptied pages there are still chained, e.g. 0x92 in history entries.
+- **Insert at the end** (`GetSpaceAtEnd`): `slot = slot_count++`, `live++`, set present and dirty bits, write the offset, `used += align4(size)`, `free -= align4(size) + (slot % 16 == 0 ? 6 : 2)` (`TE_PSmgrCalcAddedOffset` @0x102f6965c).
+- **Insert into a deleted slot** (`GetSpaceMidPage`): the first slot that is neither present nor dirty and whose space (offset of the next slot, or `used` for the last one, minus its own offset) holds `align4(size)` is taken again: same slot number, same offset, present and dirty bits set, `live++`; `used` and `free` do not change. Which insert path is used is described in § Storage engine.
+- **Delete** (`TE_psmgr_area_free`): `live--`, clear the present bit. If the slot was inserted in the same transaction, clear its dirty bit and decrement 0x20 (0x22 stays); otherwise set its dirty bit. The row bytes and the slot stay. On the first deletion the page joins the header page's reuse list and gets flag 0x10. A page whose live count drops to 0 outside the reuse list goes to a free list; that only happens when the reuse list is full (1004 pages), so emptied pages normally stay chained (e.g. 0x92 in the stick's history entries).
 - Dirty bits are cleared lazily the next time a transaction touches the page (`TE_PSmgrClearDirtyBits` @0x102f694d4, verified). It zeroes the dirty masks group by group from the first dirty slot and sets 0x20 and 0x22 back to 0x1fff. It also clears flag 0x10 when the page has no deleted slots left (slot count = live count). In a file the dirty bits only mark slots changed in the page's last write. Readers ignore them.
 - `TE_PSmgrAddDirtyArea` @0x102f69d28 (verified) keeps the counters current: 0x20 goes 0x1fff → 1 → +1, and 0x22 = the minimum dirty slot.
-- Rows can later be rewritten in place with fewer bytes, so the gaps between consecutive row offsets may exceed the row's encoded size. In the fixture this happens on 142 of 146 track pages and one playlist page. Readers must take each slot's offset as authoritative and never derive row starts from sizes.
+- A deleted slot taken again by a shorter row keeps its old allocation, and the bytes of the earlier row stay behind the new one (the row formatter writes only the new row's fields, see § Offset width). So the gap between consecutive row offsets may exceed the row's encoded size; on the stick this happens on 142 of 146 track pages and one playlist page, on the oracle stick for 39 of 875 rows. Readers must take each slot's offset as authoritative and never derive row starts from sizes.
 
 ### Table header pages (kind 3, flags 0x64)
 The first page of every chain. Written by `TE_PSmgrInitHeaderPage` @0x102f68b84.
@@ -146,7 +149,7 @@ The first page of every chain. Written by `TE_PSmgrInitHeaderPage` @0x102f68b84.
 - No other index structure is stored. The runtime creates its MPHash/MPAVL indexes (`IDXCONTENT`, `IDXCONTENTTITLE`, … in `DEV_MODULE1_table_inits`) in memory; they never reach the file (verified: no page in either file is unaccounted for).
 
 ### Deleted rows
-- A deleted row only has its present bit cleared. Its bytes, slot and offset stay, and the page keeps flag 0x10 and its reuse-list entry.
+- A deleted row only has its present bit cleared. Its bytes, slot and offset stay, and the page keeps flag 0x10 and its reuse-list entry. A later insert can take the slot again (§ Data pages); when no deleted slot is left the page leaves the reuse list.
 - In header rows, bit 4 of the row header is a separate storage-layer "deleted" flag, checked by `TE_Pgm_CheckFlatRow`. It is 0 on every fixture row, deleted ones included.
 - The fixture has 455 deleted track slots: 1159 slots, 704 live.
 
@@ -205,7 +208,9 @@ size += align4(width · nvar)
 - **long-form strings (0x40/0x90) are moved to a 4-aligned offset** (verified on all 719 long strings);
 - short strings get no alignment.
 
-`fixed_end` here is the 4-aligned start of the variable area (equivalent for every rekordbox table). The fixture matches this allocation on every page where rows were not rewritten in place.
+`fixed_end` here is the 4-aligned start of the variable area (equivalent for every rekordbox table). Verified: every slot of all four fixture files (7826 rows, deleted ones included) re-encodes to the stored bytes, the allocation never exceeds the slot's space, and it equals the space for every slot that was not taken over from a deleted row (`tests/writer.rs` `encoder_reproduces_every_stored_row`).
+
+**What the formatter writes** (verified, binary + oracle replay): `TE_RowFormSmgr` writes straight into the page area returned by the storage manager: the row header (all 32 bits; the slot is set right after by `TE_SmgrRowSetOffset`), each fixed column, the offset-array entries and the string bytes. Alignment gaps are skipped, not zeroed. On a fresh page they are zero; in a reused slot they and everything after the new row keep the old row's bytes.
 
 ## Strings (verified, binary + fixture)
 | First byte | Form | Layout |
@@ -423,92 +428,146 @@ Invariants checked on every page of both files (`headers_round_trip_and_invarian
   - the table word is type+1 (export) or type+49 (ext);
   - long strings are 4-aligned.
 
-## Writer requirements
-What a writer has to produce for players and rekordbox to accept the file. Each rule is marked **[F]** (verified in the fixture), **[B]** (read from the binary) or **[H]** (hypothesis).
+## Storage engine (how rekordbox writes the files)
+Status: **verified** (binary, function by function; replaying the oracle export through the model reproduces both oracle files byte for byte). Model: `crates/mb-pdb/src/engine.rs`. Every rule of § Writer follows from this section.
+
+### Sessions and transaction ids
+- **Open** (`TE_DPgm_Open` @0x102f55c40): a new file starts as an all-zero header with `next_unused_page` = 1 and id 0. Every writable open adds 1 to the id; the running transaction uses that value ("current id").
+- **Table sessions** (`TE_psmgr_open` @0x102f66b30): each table starts every session with no insert page (psmgr+0x20 = 0x03ffffff) and its reuse cursor at 0. So the first insert of a session never continues the page the previous session filled: it uses the reuse list or a new page.
+- **Page id** (`TE_DPgm_PageMarkDirty` @0x102f552e8): the first change of a page in a transaction stores the current id at page 0x10.
+- **Commit** (`TE_DPgm_Commit` @0x102f554d4): if the transaction changed anything, the dirty pages are written and the id advances by 1. A transaction that changed nothing (a lookup that found its row) does not advance it.
+- **Close** (`TE_DPgm_Close` @0x102f56568): state 5, id + 1, header written.
+- Consequence: a session costs 1 (open) + its writing transactions + 1 (close). A closed file's id is the last page id + 2 when the last session wrote; every later open/close without writes adds 2.
+- **New file:** until `TE_DPgm_PageManagerActivate` @0x102f5708c (pgm+0x21 set), immediate page writes are deferred into the first transaction, so a new file's header pages carry id 1 like the rows of that transaction.
+
+### Pages
+- **Numbers** (`TE_DPgm_PageGetNew` @0x102f54f88): a table's first page is `next_unused_page`, its candidate the page after it, and `next_unused_page` += 2. Every later page of the table is its candidate; `next_unused_page` becomes the new candidate and += 1. The new page is zeroed, gets its number, type and `next` (the new candidate) and is written at once. The previous last page already links to it.
+- **Init:** `TE_PSmgrPageInit` @0x102f68d3c and `TE_PSmgrInitHeaderPage` @0x102f68b84, as in § Pages.
+- **First data page:** when a table gets its first data page, header-page field 0x2c is set and the header page is written at once *without* a new id (`TE_PSmgrSyncHeaderPage(…, 1)` → `TE_DPgm_PageWriteImmediate`). That is why the header pages of tables filled later still show id 1.
+- **Buffer vs disk:** a change reaches the file only when its page is created, written immediately, or committed dirty. `TE_PSmgrClearDirtyBits` on a full insert page changes only the buffer (the page is released without being marked dirty), so the file keeps that page's last committed dirty bits.
+
+### Insert (`TE_psmgr_request` @0x102f66f24)
+`size` = `align4` of the row's allocation request (§ Offset width).
+1. **Reuse list first** (`TE_PSmgrGetReusedSpace` @0x102f68e58):
+   - `TE_PSmgrHandleDirtyHeader`: once per transaction and table, if the header page has dirty entries, `TE_PSmgrClearHeaderDirtyBits(…, 0)` drops the entries marked for removal (bit 2), clears bits 0/1 of the others, resets 0x20/0x22, updates the first-hole field and marks the header page dirty.
+   - The list is skipped when it is empty or every entry is dirty (added in this transaction).
+   - From the session's cursor, dirty and empty entries are skipped. The page found has its old dirty bits cleared (first touch in the transaction) and is **marked dirty even if nothing ends up there**. Then:
+     - room at its end (`free ≥ size + 6` for a slot that starts a row group, `+ 2` otherwise): append there. Done.
+     - otherwise a deleted slot (`TE_PSmgrGetSpaceMidPage` @0x102f69930, § Data pages). If the page then has no deleted slot, its entry gets bits 0 and 2 (removal pending), the header's dirty counters count it, the page loses flag 0x10 and the cursor moves on. The header page is marked dirty. Done.
+     - otherwise the cursor moves to the next entry and one more page is tried; after two failures the insert falls through.
+2. **Insert page:** the session's insert page, or a new page (`TE_PSmgrGetEmptyPage` → `TE_PSmgrPageGetNew`; the free list is always empty) when there is none. Its old dirty bits are cleared on first touch. Append if `free ≥ size + 6|2` and it has fewer than 2048 slots; otherwise a new page becomes the insert page.
+
+So rows fill pages in insertion order, pages with deleted rows are filled first, and every session starts a new page per table unless the reuse list has room.
+
+### Delete (`TE_psmgr_area_free` @0x102f673c4)
+1. Clear the page's old dirty bits on first touch; mark it dirty.
+2. If the page is not in the reuse list: `HandleDirtyHeader`, then `TE_PSmgrAddToReuseCache` @0x102f6a50c. The entry `page << 3 | 3` goes to the high-water mark (0x26 += 1) or into the first hole; 0x38 += 1; header dirty counters updated; header page marked dirty. The page gets flag 0x10.
+3. `live -= 1`, present bit cleared, dirty bit as in § Data pages.
+
+### Update
+- **Copying UPDATE** (`TE_RunUpdateScanSmgr` @0x102f6e9e0): matching rows are collected, then each one (in reverse scan order) is inserted anew through the normal insert path and the old row is deleted, in one transaction. Verified on the oracle stick: every track IMAGEID update, every property update and the playlist reorder.
+- **In-place UPDATE** (`TE_RunInPlaceUpdateScanSmgr` @0x102f6f5cc): copies new values of fixed-size columns into the row. Which statements use it, and how the page gets marked dirty (`TE_SmgrAreaMarkDirty` dispatches to storage-manager callback slot 14), is **open**. The oracle stick shows no in-place update that survived later writes; the model marks the page dirty.
+
+## Export operation sequence (rekordbox 7.2.19)
+Status: **verified** by the byte-exact replay of the oracle stick (`crates/mb-pdb/src/replay.rs`), except where marked. Every bullet is one transaction.
+
+**Creating the stick** (`createDeviceDB` → `startupDeviceDB` → `initPropertyTable`):
+1. All tables (header pages 1, 3, …) and the property row: DEVNAME "", DBVERSION "1000", SONGNUMBER 0, today's date, COLORID 0, PROTECTED 0. exportExt.pdb: all tables and the DBPROPERTYOPTION row.
+2. Colours (8 rows), then menu items (27), categories (master `Seq` order) and sorts (master `Seq` order), one transaction each.
+
+**Playlists** (UI thread, when the jobs are built):
+- The first list on an empty stick: one transaction inserts the row with SEQ 0 and rewrites it with the same values (copying update). A deleted copy stays in slot 0.
+- A further top-level list: inserted with SEQ = number of siblings. Later in the session one transaction moves it to position 0: every sibling is rewritten with SEQ + 1, then the new list with SEQ 0. On the oracle stick this ran after the jobs queued before it (timing **hypothesis**).
+- An existing list whose tracks differ: all its entries are deleted in one transaction; its job re-adds them.
+
+**Per new track** (`execExport` → `export_track_data_to_db` → `addTrack`, then `export_artwork`, `add_track_to_device_playlist`):
+1. Each missing lookup row, in the order artist, genre, album, remixer, original artist, composer, label, key. A name that exists costs nothing.
+2. The track row with IMAGEID 0, together with the property row rewritten with SONGNUMBER = track count (copying update): one `DevAddContent_` transaction.
+3. If the track has artwork: the image row, then the track row rewritten with its IMAGEID (copying update).
+4. The playlist entry.
+
+A track that is already on the stick and unchanged costs no transaction; only its entry is added.
+
+**My Tags** (exportExt.pdb, `syncMyTag`): one transaction deletes all My Tag rows (none on a new stick, so no id), then one transaction inserts the whole tree: each column by SEQ, followed by its tags by SEQ.
+
+### The oracle stick's history (fitted ids)
+| Ids | Session | Operations |
+|---|---|---|
+| 1–5 | 1 | create (+ property), colours, menu items, categories, sorts |
+| 6 | 1 | `oracle-small` (insert + rewrite) |
+| 7–42 | 1 | its 5 tracks: lookups, track + property, image, track update, entry |
+| 43–45 | – | commit → 43, close → 44, open → 45 |
+| 46–65 | – | ten close/open cycles without writes; the last open makes 65 current (**fitted**; the same ten cycles fit exportExt.pdb) |
+| 65 | 2 | `oracle-small`'s 5 entries deleted |
+| 66 | 2 | a write whose page is rewritten later (**unknown**) |
+| 67 | 2 | `oracle-all` inserted with SEQ 1 |
+| 68–72 | 2 | `oracle-small`'s entries re-added (its tracks unchanged) |
+| 73 | 2 | a write whose page is rewritten later (**unknown**) |
+| 74 | 2 | reorder: `oracle-small` SEQ 1, then `oracle-all` SEQ 0 |
+| 75–818 | 2 | `oracle-all` in list order: 152 new tracks, 5 already there (entry only) |
+| 819–822 | – | commit → 819, close, one more open/close cycle |
+
+exportExt.pdb: 1 create + DBPROPERTYOPTION, 2 My Tag tree; close/open (3–5) and the same ten cycles (→ 25); 25/26 and 27/28 two more My Tag syncs (delete, insert); close and one more cycle (→ 32). Only the cycle counts and the two unknown writes are fitted; every page, slot, offset, mask, counter and stale byte follows from the model.
+
+## Writer
+Code: `crates/mb-pdb/src/encode.rs` (row formatter), `engine.rs` (storage model), `writer.rs` (API), `defaults.rs` (rows of a new stick), `lint.rs` (pdb-lint), `compare.rs` (page diff), `replay.rs` (oracle replay).
+
+API:
+- **`writer::write_export(&ExportDb)` / `write_ext(&ExtDb)`** (compact layout): the creation sequence above, then each remaining table in one transaction. Dense pages, no deleted rows; each page's dirty bits mark the rows of its table's transaction, as on rekordbox's colour, menu, category and sort pages.
+- **`writer::export_like_rekordbox(&ExportDb)` / `ext_like_rekordbox(&ExtDb)`**: one export session in rekordbox's operation sequence. The first top-level list is created as rekordbox does; further lists get their final SEQ (the later reorder is a **hypothesis** and is not replayed). Then each list's tracks in entry order, tracks in no list, and the remaining rows compactly.
+- **`writer::Exporter`**: the operation sequence step by step (`create`, `create_first_playlist`, `insert_playlist`, `create_playlist_at_top`, `add_track`, `update_track`, `add_entry`, `clear_playlist`, `reopen`, `finish`).
+- **Incremental mode:** `Exporter::load(bytes)` opens an existing export.pdb as a new session (id + 1, no insert pages), indexes its live rows and continues with the same operations. Tested on the stick: a new list at position 0, a new track with artist and artwork, and an edited track. Only the changed pages change.
+- **`engine::Db`**: the storage model (`create`, `load`, `begin`/`commit`/`txn`, `create_table`, `insert`, `delete`, `update`, `update_in_place`, `reopen`, `close`, `to_bytes`).
+- **`defaults`**: colours, menu items, categories and sorts of a fresh rekordbox 7.2.19 library (those of the oracle stick), and the property and DBPROPERTYOPTION rows of a new stick. A library with edited browse menus needs its own master.db rows.
+- **IDs** are the caller's. rekordbox uses `max + 1` per table in insertion order, its own playlist numbering, and master.db IDs for My Tags.
+
+### Writer rules
+Status: **[V]** verified (binary + byte-exact replay), **[F]** holds in every fixture file, **[H]** hypothesis. `pdb-lint` checks the structural ones.
 
 **File and pages**
-1. **[F][B] Page 0.**
-   - Page size 4096.
-   - The table count is 20 (export) or 9 (ext), with directory entries in type order.
-   - `state = 5`.
-   - `xid_hi = 0`; `xid_lo` ≥ every page's id.
-   - Everything after the directory is zero.
-2. **[F] One chain per table.** It starts with a table header page (flags 0x64) even when the table is empty. An empty table is just the header page: `first_page = last_page = header page`, `next_page` = empty candidate, and 0x2c = 0x03ffffff.
-3. **[F][B] Empty candidates.** Every table owns one distinct reserved page.
-   - The last chain page's `next_page` points to it.
-   - Candidates inside the file are all zero.
-   - Candidates may lie past EOF. The file ends after the last written page.
-   - `next_unused_page` = highest page number used anywhere (chains and candidates) + 1.
-4. **[F] Page header bytes 0x00 and 0x14 are 0.** 0x04 = own page number; 0x08 = table type; 0x10 = a transaction id ≤ the header's.
-5. **[B] Page numbers and links.**
-   - `page < next_unused_page`.
-   - `next_page < next_unused_page` or 0x03ffffff.
-   - Page type ≤ table count.
-6. **[F][H] Page allocation order.** rekordbox's fresh-database order is header 2t+1, candidate 2t+2, then sequential growth from `next_unused_page`. Players follow links, so any order that satisfies rules 2–5 should work **[H]**.
+1. **[V] Page 0.** Page size 4096; table count 20 / 9, directory in type order; state 5 after close; `xid_hi` 0; id above every page's; zero after the directory.
+2. **[V] Chains.** One per table, starting at its header page (flags 0x64). An empty table is only its header page, with 0x2c = 0x03ffffff and `next` = its candidate.
+3. **[V] Page numbers and candidates.** As `TE_DPgm_PageGetNew` hands them out (§ Storage engine). Each table owns one candidate, its last page links to it, and candidates are never written: inside the file they are zero, and the file ends at the highest chained page.
+4. **[V] Page header.** 0x00 = 0, 0x04 own number, 0x08 table type, 0x0c next, 0x10 id of the last transaction that changed the page, 0x14 = 0.
+5. **[V] Data page counters.**
+   - 0x18 = `slots | live << 13 | flags << 24`.
+   - `free + used + 2·slots + 4·groups = 4056`.
+   - 0x20 = number of dirty bits (0x1fff for none; 0 after an insert and delete in one transaction); 0x22 ≤ the lowest dirty slot (0x1fff for none).
+   - 0x24 = 0x26 = 0; flag 0x10 exactly on the pages in the reuse list.
+6. **[V] Dirty bits** mark the slots changed by the page's last transaction (inserted, deleted, or deleted and taken again). A later transaction clears them when it first touches the page. **[H]** Players ignore them; all-clean pages (masks 0, counters 0x1fff) are valid too, since `TE_PSmgrClearDirtyBits` produces them.
+7. **[V] Header page.** As § Table header pages. The reuse list holds every page with a deleted slot, plus entries marked for removal (bit 2) until the table's next writing transaction. Its dirty bits mark entries changed in that table's last writing transaction.
+8. **[V] Placement.** Rows go where the insert path puts them, `align4(size)` each. At most 2048 slots by the insert check (slot index ≤ 0x7ff), 510 by `CheckPsmgrHeader` for 4 KiB pages; the footer limits real pages far below.
 
-**Data pages**
+**Rows and values**
 
-7. **[F][B] Header fields.**
-   - Flags 0x24, no deletions, so no 0x34 and an empty reuse list.
-   - 0x18 packs `slot_count | live_count << 13 | 0x24 << 24`.
-   - `used` = sum of `align4(alloc)`.
-   - `free = 4056 − used − (2·slots + 4·groups)`.
-   - 0x24 = 0x26 = 0.
-8. **[F][B] Dirty state.** Either all dirty masks are 0 and 0x20 = 0x22 = 0x1fff (clean, as after `TE_PSmgrClearDirtyBits`), or mirror the insert path:
-   - dirty bit set for every inserted slot;
-   - 0x20 = count;
-   - 0x22 = lowest slot.
+9. **[V] Layout.** Row layout and header word per § Rows; offset width and allocation per § Offset width; alignment gaps are not written.
+10. **[V] Strings.** ASCII ≤ 126 chars → short; longer ASCII → 0x40; anything else → 0x90 UTF-16LE; NULL → `03`; ISRC special form; menu names in U+FFFA … U+FFFB.
+11. **[V] Values rekordbox writes.**
+    - **Tracks:** FILENAMES, SEARCHSTR, TAG, RESERVED1 and RESERVED10 = `03`; DISABLEQUANTIZE 0; ANALYSED = `Analysed & 0x3f`; CONTENTLINK = `(src & 0xC1600) | 0x100`; RESERVED2/3 "ON" or ""; RESERVED5–7 the update counters as text.
+    - **Property:** DEVNAME "" and DBVERSION "1000" on a fresh stick ("REKORDBOX" on the old stick); SONGNUMBER = track count, rewritten after every track.
+    - **Colours, menu items, categories, sorts:** copied from master.db.
+12. **[V] exportExt.pdb** is created with all 9 tables and the DBPROPERTYOPTION row in its first transaction. MYTAGMASTERDBID is the value rekordbox has at creation (oracle: 2140940981; source: `export.md` § 2.5).
+13. **[H] Players.** Only the structure matters to them (chains, slot footers, row layouts, strings), and IDs only need to be consistent. The compact layout meets every rule above.
 
-   The fixture has both kinds of page. Clean is the safer choice **[H]**.
-9. **[F][B] Rows.**
-   - Rows are placed in slot order from heap offset 0, each at a 4-aligned offset.
-   - Footer groups follow the layout above. Unused bits of the last group's masks are 0.
-   - The page is full when `align4(alloc) + (slot % 16 == 0 ? 6 : 2) > free`.
-   - At most 510 slots per 4 KiB page **[B]**.
+### Writer verification
+`cargo test -p mb-pdb` (`tests/writer.rs`); examples `pdb_write` (read + rewrite), `pdb_lint`, `pdb_replay`, `pdb_slots`.
 
-**Header pages**
-
-10. **[F][B]**
-    - Flags 0x64, counters 0.
-    - 0x20 = 0x22 = 0x1fff, 0x24 = 1004, 0x26 = 0.
-    - 0x28 = own page, 0x2c = first data page or 0x03ffffff, 0x30 = 0x03ffffff, 0x34 = 0.
-    - 0x38 = 0, 0x3a = 0x1fff.
-    - 1004 entries of 0x1ffffff8, then 20 zero bytes.
-    - With deletions in the written file: list each such page as `page << 3` (flag bits 0), set 0x38 to the entry count and 0x26 to the high-water mark, and give the page flag 0x34 **[F][B]**.
-
-**Rows**
-
-11. **[B][F] Layout.** Use the column lists in `crates/mb-pdb/src/schema.rs` (extracted from the binary) and the layout rule above. Fixed columns are packed with no padding; no-header rows end with their single string at the 4-aligned offset after the fixed part.
-12. **[B][F] Header rows.**
-    - Row header = `slot << 21 | table_word << 5 | width_code << 2`, with table_word = type+1 (export) or type+49 (ext).
-    - Choose the width with the allocation formula. Use u16 for every track row (u8 is impossible there, because the fixed part alone is 0x5c).
-    - The inline string goes at the 4-aligned variable start. The offset array follows, aligned to the width.
-    - Strings follow in physical order; long strings are 4-aligned.
-13. **[B] Allocation.** Allocate `align4(alloc)` with the formula in § Offset width. Slack between the encoded end and the next row is allowed; it appears in the fixture.
-
-**Strings and values**
-
-14. **[B][F] Strings.**
-    - ASCII ≤ 126 chars → short form; longer ASCII → 0x40; anything else → 0x90 UTF-16LE.
-    - NULL → `03`.
-    - ISRC → the special form above.
-    - Menu-item names in UTF-16 with U+FFFA/U+FFFB.
-15. **[F] Fixed values rekordbox writes.**
-    - **Tracks:** FILENAMES, SEARCHSTR, TAG, RESERVED1 and RESERVED10 = `03`.
-    - **Tracks:** DISABLEQUANTIZE = 0; ANALYSED = `Analysed & 0x3f`.
-    - **Tracks:** RESERVED2/3 = "ON" or NULL from boolean flags (`RowDataTrack+0x3ae/+0x3af`).
-    - **Property row:** DEVNAME "REKORDBOX", DBVERSION "1000", SONGNUMBER = track count.
-    - **Menu items:** the 27 rows listed above.
-    - **Category and sort:** reproduce rekordbox's tables (`DevInitMenuItemsTable`, `DevInitCategoryTable`, `DevInitSortTable` @0x100b61140…0x100b60ed0). Copying the fixture's rows is the pragmatic choice **[H]**.
-16. **[H] Player-irrelevant detail.** IDs only need to be consistent across tables. rekordbox numbers tracks, artists and the other lookups 1..n in insertion order, and the fixture's track IDs are 1..704. Keep IDs ≤ 0x7fffffff where possible; master.db random IDs above that already appear as My Tag IDs.
-17. **[H] exportExt.pdb.** Must exist alongside export.pdb with all 9 tables. rekordbox writes a DBPROPERTYOPTION row even when nothing else is present.
+| Step | Result |
+|---|---|
+| a. Round trip | read → typed rows → `write_export` / `write_ext` → read gives identical rows for both files of both fixtures. `export_like_rekordbox` gives the same rows in its own order. Every stored slot of the four files (7826 rows, deleted ones included) re-encodes to rekordbox's bytes. |
+| b. pdb-lint | 0 errors and 0 warnings on all four rekordbox files and on every file the writer produces (compact, export sequence, incremental onto the stick, from scratch). Corrupted files are flagged. |
+| c. export.pdb vs the oracle | `replay::oracle_export` = rekordbox's file, **78/78 pages identical**. The compact rewrite shares 33 of 78 pages: the header pages of tables 1–6 and 9–18, the colour, menu-item, category and sort pages, and the zero candidates. The rest differs by design: rows packed table by table, no deleted versions, other ids. |
+| d. exportExt.pdb vs the oracle | `replay::oracle_ext` = rekordbox's file, **18/18 pages identical**. The compact rewrite differs in 3 pages: page 0 (id), and the My Tag header and data pages (one tree instead of three). |
 
 ## Open questions
 - [ ] CONTENTLINK value 0x000c0700 on every track: what it encodes.
 - [ ] ANALYSED bits (shared with master.db `Analysed`).
-- [ ] Category DISABLE values 3 and 5; sort DISABLE 2; menu-item CLASS codes; COLORCODE; property COLORID.
-- [ ] Layout of free-list pages (kind 2; entries use the same 3 flag bits as the reuse list). Not present in rekordbox files seen so far.
+- [ ] Category DISABLE values 2, 3 and 5; sort DISABLE 2; menu-item CLASS codes; COLORCODE; property COLORID.
+- [ ] Layout of free-list pages (kind 2; entries use the same 3 flag bits as the reuse list). Only reached when a reuse list is full; not present in rekordbox files seen so far, not modelled by the writer.
 - [ ] Playlist ATTRIBUTE values besides 0 (folder = 1 is a hypothesis); how smart playlists are exported.
-- [ ] Whether players care about dirty masks, the reuse list or `xid` (byte-exact writer output needs an oracle export of a small library).
+- [ ] Whether players care about dirty masks, the reuse list or the ids. The writer reproduces rekordbox's, so this only matters for simpler writers. Needs a player test.
 - [ ] Tables 9, 10, 14, 15 and the empty ext tables: no fixture rows, layouts from the binary only.
 - [ ] Does rekordbox ever emit u32 offset arrays or 0x40/0x90 strings in other tables? Only seen in tracks (0x40 paths, 0x90 ISRC) and menu items (0x90).
+- [ ] In-place UPDATE (`TE_RunInPlaceUpdateScanSmgr`): which DevModify statements use it, and how it marks the page dirty (storage-manager callback slot 14).
+- [ ] Oracle replay, fitted parts: the ten close/open cycles at the start of session 2, and the two writes at ids 66 and 73 whose pages were rewritten later. A trace of the classic DB (DeviceSQL calls) would settle them.
+- [ ] When rekordbox moves a new top-level list to position 0 when several new lists are exported in one session (`export_like_rekordbox` keeps the final SEQ instead).

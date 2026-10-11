@@ -2178,6 +2178,7 @@ dependencies = [
  "mb-anlz",
  "mb-core",
  "mb-devlib",
+ "mb-library",
  "mb-masterdb",
  "mb-pdb",
 ]

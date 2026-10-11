@@ -12,13 +12,30 @@
 //! - [`tables`]: typed rows for every table of both files.
 //! - [`library`]: [`DeviceLibrary`], which loads both files and converts them to
 //!   [`mb_core::LibrarySnapshot`].
+//!
+//! Writing (spec: `docs/re/pdb.md` § Storage engine, § Writer):
+//! - [`encode`]: the row formatter (`TE_RowFormSmgr`), inverse of [`row`].
+//! - [`engine`]: a model of the DeviceSQL storage layer (sessions, transaction ids, page
+//!   allocation, insert/delete/update with the reuse list and dirty bits).
+//! - [`writer`]: typed rows → files: compact layout, rekordbox's export sequence, and the
+//!   step-by-step [`writer::Exporter`] (also for incremental updates of an existing stick).
+//! - [`defaults`]: the rows of a new stick. [`lint`]: structural checks (`pdb-lint`).
+//!   [`compare`]: page-by-page diff. [`replay`]: the oracle stick's export history, replayed
+//!   byte for byte.
 
+pub mod compare;
+pub mod defaults;
+pub mod encode;
+pub mod engine;
 pub mod library;
+pub mod lint;
 pub mod page;
+pub mod replay;
 pub mod row;
 pub mod schema;
 pub mod string;
 pub mod tables;
+pub mod writer;
 
 pub use library::{DeviceHistory, DeviceLibrary, ExportDb, ExtDb};
 pub use page::{DataPage, FileHeader, HeaderPage, PageHeader, Pdb, Slot, TableDirEntry};
@@ -54,6 +71,10 @@ pub enum Error {
     BadString { offset: usize, reason: &'static str },
     #[error("table type {0} is not part of the schema")]
     UnknownTable(u32),
+    #[error("{table}: cannot encode row: {reason}")]
+    BadValue { table: &'static str, reason: String },
+    #[error("writer: {0}")]
+    Write(String),
     #[error("io error on {path}: {source}")]
     Io {
         path: std::path::PathBuf,
