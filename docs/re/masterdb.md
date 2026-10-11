@@ -82,7 +82,7 @@ Exact statement sequences, placeholders and value derivations per operation are 
 **Playlists** (verified) — new playlists go to `Seq` 1 and push siblings down; each also gets a `djmdCloudFilterPlaylist` row; add-to-playlist appends `TrackNo` n+1… with one USN per batch (`ops/playlist-create.md`, `ops/playlist-add-tracks.md`).
 
 **Side files**
-- `masterPlaylists6.xml` (verified): one `NODE` per playlist in `Seq` order with hex `Id`, `ParentId`, `Attribute`, a millisecond `Timestamp` (last change of the list or of a member track), `Lib_Type` and `CheckType`; CRLF line endings; flushed lazily.
+- `masterPlaylists6.xml` (verified): one `NODE` per playlist in `Seq` order with hex `Id`, `ParentId`, `Attribute`, a millisecond `Timestamp` (last change of the list or of a member track; a pure `Seq` shift does not change it), `Lib_Type` and `CheckType`; CRLF line endings; flushed lazily. `mb_masterdb::playlists_xml` round-trips the three fixture files byte for byte; nesting for folders is a *hypothesis* (`ops/playlist-edit.md`).
 - `datafile.edb` and `ExtData.edb` (verified): **not rewritten** by playlist creation, adds or analysis (byte-identical before and after).
 - Backup at quit (verified): `ATTACH '<dir>/tmp.db' … KEY <passphrase>; sqlcipher_export`; then renamed to `master.backup.%Y%m%d.db` (one per day, last quit wins, `journal_mode = delete`) and old backups pruned (`ops/shutdown.md`).
 - No master.db writes for settings changes, rekordbox.xml export or USB export.
@@ -94,4 +94,4 @@ Exact statement sequences, placeholders and value derivations per operation are 
 - [ ] `ContentLink` bit meanings (observed transitions in `ops/analyse-track.md`).
 - [ ] Meaning of `Analysed` bits 0x08, 0x20 and 0x40 (0x01 = analysed and 0x02 = queued are verified; see `ops/analyse-track.md`).
 - [ ] rekordboxAgent's exact statements (`contentFile`, `agentNotification*`): needs a trace of the agent process.
-- [ ] Ops not yet exercised: playlist folders/smart lists/delete/reorder, track edits, cues, My Tags, history, duplicate import.
+- [ ] Ops not yet exercised: playlist folders/smart lists/delete/reorder, track edits, cues, My Tags, history, duplicate import. musicbox's current patterns for folders, delete, move and entry edits (`ops/playlist-edit.md`) and for track edits (`ops/edit-track.md`) are hypotheses built from the traced blocks and rekordbox's SQL templates in the binary.

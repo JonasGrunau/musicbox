@@ -53,3 +53,9 @@ Here 4 orphan deletions ran (2 artists, 1 album, 1 genre, 1 label; no keys exist
 
 ## Counters
 `localUpdateCount` +11 inside the transaction (10 DELETE-ROWS + VideoAssociate) + 1 per orphan table: 511–525 here.
+
+## Replay check
+`crates/mb-library/tests/session_oracle.rs` runs `mb_library` on a copy of `fixtures/sandbox-initial` (the exact pre-trace library, counter 505) with the same 14 IDs: +15 bumps, all rows of the 10 tables gone (52 `contentFile`, 14 mixer, 8 `djmdSongSampler` rows), no soft-deleted rows, and the orphans deleted are exactly the trace's (`4207772168`, `415774920`, `267108510`, `3229839016`, `1103520049`).
+
+## Tracks that sit in playlists (musicbox, *hypothesis*)
+Not traced: the removed demo tracks were in no playlist. DELETE-ROWS removes the `djmdSongPlaylist` rows and leaves `TrackNo` gaps; the traced add-to-playlist then appends at `count + 1`, which could repeat a `TrackNo`. musicbox therefore closes each gap after the orphan cleanup, with the entry-removal shift of `playlist-edit.md` (one builder update and one bump per removed membership, highest `TrackNo` first), and gives the affected playlists a new `masterPlaylists6.xml` `Timestamp`. Cost: +11, +1 per orphan table, +1 per playlist membership. Open: what rekordbox does.

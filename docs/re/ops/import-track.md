@@ -105,6 +105,22 @@ Columns never written by import (stay NULL): `OrgArtistID`, `ComposerID`, `Searc
 
 The tag reader itself (which frames/atoms feed Title, Commnt, ReleaseYear, …) is a separate topic. Some values are odd (one WAV got `Title = "M"`, `ReleaseYear = 3`); musicbox should match rekordbox's reader where possible, but those are tag-parsing questions, not write rules.
 
+## Tag reading (calibrated on the 161 traced imports)
+`mb-library`'s reader (lofty plus the rules below, `crates/mb-library/src/tags.rs`) reproduces every traced value of Title, Commnt, TrackNo, DiscNo, ReleaseYear, ReleaseDate, ISRC, Length, FileType, FileSize, `rb_file_id`, Lyricist and the artist/genre/album artist/album/remixer/label/key lookup names on **161/161 files** (`crates/mb-library/tests/tags_calibration.rs`). Findings:
+- **`Length`** = the decoder duration truncated to whole seconds (161/161).
+- **`ReleaseYear`** = the leading digits of the recording date or year tag (`07.08.2016` → 7, which explains the odd small years).
+- **`ReleaseDate`** = the raw ID3 `TDRL` text, completed when it is not a full date: `02.20.2017` was stored as `02.20.2017-01-01`; the 29 full dates were stored verbatim. Only AIFF files had one. *Hypothesis:* the completion counts dashes (`2017-05` → `2017-05-01`).
+- **FLAC (Vorbis comments):** `ALBUMARTIST` is **not** used (`Audiomatiques,Cosmic Boys - Let's Go`: album looked up without album artist), `publisher` is **not** read as label (15 files), `DESCRIPTION` is not the comment, and the ID3-style keys some converters write (`TSRC`, `TKEY`, `TPE4`) are ignored. *Hypothesis:* a Vorbis `LABEL` comment would be read (no corpus file has one).
+- **ID3 (MP3/AIFF/WAV):** label from `TPUB`, remixer from `TPE4`, key from `TKEY`, album artist from `TPE2`.
+- **AIFF whose `NAME` chunk is not UTF-8** (`Cosmic Boys - Titan`): rekordbox read all tags from the `ID3 ` chunk. Some corpus AIFFs also have a `FORM` size one byte larger than the file and ID3 `UFID` frames with an empty owner; rekordbox imported them normally.
+- **No composer, original artist or lyricist tag occurs in the corpus**, so the import order and behaviour for them stay open. musicbox leaves `ComposerID`/`OrgArtistID` NULL and `Lyricist` `""`, as on all 161 traced rows.
+
+## Replay check
+`crates/mb-library/tests/session_oracle.rs` replays the trace on a copy of `fixtures/sandbox-initial` (remove the 14 demo tracks, then import the 161 files in trace order) and compares: every traced column of every `djmdContent` insert (9,062 values; IDs/UUIDs/timestamps by shape, lookup IDs by name, dates = import day), storage classes against the oracle-a after-DB, `rb_local_usn` of every content and lookup row = rekordbox's − 5 (the 5 launch bumps), the lookup table row counts (93/14/97/45/30) and the total of 440 bumps. All match.
+
+## Duplicate import (musicbox, *hypothesis*)
+musicbox skips a file whose absolute path equals the `FolderPath` of a live content row and reports it; no statement is written. rekordbox's behaviour (skip, prompt, or a second row) is untested.
+
 ## Counters
 - `localUpdateCount`: +1 per created artist/genre/album/label/key row, +1 for the content row. Here: 161 content + 93 artist + 14 genre + 97 album + 45 label + 30 key = 440 bumps (USN 526–965).
 - `rb_local_usn` of each new row = its own bump.
@@ -135,3 +151,5 @@ commit
 ## Open
 - Duplicate import (file already in the collection), compilation albums, original artist/composer/lyricist tags: not exercised.
 - Whether `StockDate`/`DateCreated` use the local or the UTC date.
+- Whether `FolderPath` is NFC-normalised (the corpus paths are ASCII).
+- The `ReleaseDate` completion rule beyond the one observed case; the Vorbis `LABEL` key.

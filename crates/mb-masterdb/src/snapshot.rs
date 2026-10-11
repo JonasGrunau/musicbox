@@ -23,6 +23,9 @@ LEFT JOIN djmdArtist oa ON oa.ID = c.OrgArtistID
 LEFT JOIN djmdKey k ON k.ID = c.KeyID
 WHERE c.rb_local_deleted = 0";
 
+/// List ID → content IDs in list order.
+type Links = HashMap<DbId, Vec<DbId>>;
+
 fn text(row: &Row, i: usize) -> rusqlite::Result<String> {
     Ok(row.get::<_, Option<String>>(i)?.unwrap_or_default())
 }
@@ -135,7 +138,7 @@ impl MasterDb {
 
     /// A tree table (ID, ParentID, Name, Attribute, Seq; Attribute 1 = folder/group) plus its
     /// (list ID, content ID) link table.
-    fn load_lists(&self, nodes_sql: &str, links_sql: &str) -> Result<(Vec<PlaylistNode>, HashMap<DbId, Vec<DbId>>)> {
+    fn load_lists(&self, nodes_sql: &str, links_sql: &str) -> Result<(Vec<PlaylistNode>, Links)> {
         let conn = self.connection();
         let mut stmt = conn.prepare(nodes_sql)?;
         let nodes = stmt

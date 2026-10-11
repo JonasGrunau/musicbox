@@ -68,5 +68,11 @@ The cloud filter row is not touched by a rename.
 - The file mtime (22:07:39) is later than both timestamps, so the file is flushed lazily, not on every change.
 - `datafile.edb` and `ExtData.edb` were **not** rewritten (byte-identical before and after).
 
+- `30D40` kept `Timestamp="1791739907631"` through both creations although its `Seq` was rewritten twice (2476–2479, 2758–2762): **a `Seq` shift is not a change** for the timestamp (verified).
+- `mb_masterdb::MasterPlaylists` parses and rewrites all three fixture files byte for byte (`crates/mb-masterdb/tests/playlists_xml.rs`). Folders, nesting and the empty tree are *hypotheses* (`playlist-edit.md`).
+
 ## Counters
 Per creation: 1 (insert) + number of rewritten nodes in step 2 + 1 (cloud filter row). Rename: +1. Here 2476–2479, 2595, 2758–2762, 2924.
+
+## Replay check
+`crates/mb-library/tests/session_oracle.rs` creates and renames both lists on a copy of `fixtures/sandbox-initial` after the replayed removal and import: 4, 1, 5 and 1 bumps; the final `rb_local_usn` order equals rekordbox's (oracle-all and the CUE list last written by the second create's move, oracle-small by its rename, cloud filter rows by the last step of each create); `Seq`, `Name`, `Attribute`, `ParentID`, NULL `ImagePath`/`SmartList`, status columns and storage classes equal the oracle-a rows; and `masterPlaylists6.xml` equals oracle-a's file byte for byte once the two random IDs and the two new timestamps are substituted.

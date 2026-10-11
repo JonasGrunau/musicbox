@@ -58,7 +58,7 @@ Rules (all verified):
 ## Row-change columns
 - **Insert (B and O):** `rb_data_status = 0, rb_local_deleted = 0, rb_local_synced = 0, rb_local_usn = <U>, created_at = <TS>, updated_at = <TS>`. `rb_local_data_status` and `usn` are omitted (defaults 0 and NULL).
 - **B update:** `rb_data_status = case when usn != 0 then 257 else 0 end, rb_local_usn = <U>, updated_at = "<TS>"`, with `where rb_local_deleted = 0 and ID = <id>`. With `usn` NULL the CASE yields 0, so unsynced rows keep `rb_data_status = 0`.
-- **O update:** sets every listed column explicitly, including `rb_data_status, rb_local_data_status, rb_local_deleted, rb_local_synced` (all 0 in this unsynced library; whether these are forced to 0 or written back from the row is *open*), `rb_local_usn = <U>`, `updated_at = '<TS>'`, `WHERE ID = '<id>'`.
+- **O update:** sets every listed column explicitly, including `rb_data_status, rb_local_data_status, rb_local_deleted, rb_local_synced` (all 0 in this unsynced library; whether these are forced to 0 or written back from the row is *open*), `rb_local_usn = <U>`, `updated_at = '<TS>'`, `WHERE ID = '<id>'`. musicbox (`WriteTxn::update_orm`) leaves the four status columns unchanged, i.e. assumes they are written back from the `SELECT *` that precedes every ORM update (*hypothesis*; identical for never-synced rows).
 
 ## UPDATE-COL macro (B, one column of one content row)
 ```

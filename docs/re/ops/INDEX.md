@@ -13,12 +13,17 @@ Read `common.md` first: it defines the placeholders (`<U>`, `<TS>`, `<CID>`, …
 | [remove-tracks.md](remove-tracks.md) | remove tracks from the collection | verified (hard-delete branch) | DELETE-ROWS over 10 tables, orphan cleanup | +11, +1 per orphan table |
 | [playlist-create.md](playlist-create.md) | create, reorder, rename a playlist; `masterPlaylists6.xml` | verified | `djmdPlaylist`, `djmdCloudFilterPlaylist` | 1 + reordered siblings + 1; rename +1 |
 | [playlist-add-tracks.md](playlist-add-tracks.md) | add tracks to a playlist | verified | N × `djmdSongPlaylist` | **+1 per batch** |
+| [playlist-edit.md](playlist-edit.md) | folders, tree move/reorder, delete, remove/reorder/insert entries | **hypothesis** (binary templates + traced blocks) | `djmdPlaylist`, `djmdSongPlaylist`, `djmdCloudFilterPlaylist` | see spec |
+| [edit-track.md](edit-track.md) | track metadata edits | **hypothesis** (traced blocks) | `djmdContent` UPDATE-COL, lookups, orphan step, `TrackInfoUpdated` | 2 + created/orphaned rows |
 | [analyse-track.md](analyse-track.md) | request, start, completion of analysis | verified (Normal mode, all options on) | `djmdContent` field by field, `djmdMixerParam`, `djmdKey`; agent `contentFile` | 18 per track on the first pass (+1 with artwork, +1 per new/orphaned key; agent +3, +1 with artwork), 18 per re-analysis |
 | [settings.md](settings.md) | analysis settings change | verified | none | 0 |
 | [export-xml.md](export-xml.md) | rekordbox.xml export | verified | none | 0 |
 | [export-usb.md](export-usb.md) | USB export, master.db side | verified | none | 0 |
 | [export-devlib.md](export-devlib.md) | USB export, `exportLibrary.db` statement sequence | verified (first export to an empty stick) | — (device DB only) | — |
 | [shutdown.md](shutdown.md) | quit: `sqlcipher_export` backup | verified + binary | none (backup file only) | 0 |
+
+## Implementation (`crates/mb-library`)
+One module per op, replaying the statements above through `mb_masterdb::WriteTxn`; each command returns its inverse (undo = forward command with new USNs). Replay checks against the trace and the oracle-a after-DB: `session_oracle.rs` (remove → import 161 files → create/rename/add playlists on `sandbox-initial`: every traced column, every USN = rekordbox's − 5, `masterPlaylists6.xml` byte-exact after ID/timestamp substitution), `tags_calibration.rs` (tag values 161/161). The hypothesis ops are pinned by `playlist_ops.rs` and `track_ops.rs`. Every modified copy is re-opened with the snapshot loader and passes `PRAGMA integrity_check`.
 
 ## USN rules: verdicts on the `../masterdb.md` hypotheses
 | Hypothesis (masterdb.md, before this trace) | Verdict | Evidence |
@@ -68,3 +73,5 @@ Read `common.md` first: it defines the placeholders (`<U>`, `<TS>`, `<CID>`, …
 - [ ] The source of `myTagMasterDBID` when no sync service row exists.
 - [ ] Whether rekordbox deletes ANLZ/artwork files when tracks are removed.
 - [ ] Backup retention count.
+- [ ] Trace the ops of `playlist-edit.md` and `edit-track.md` (all hypotheses today), duplicate import, and the removal of tracks that are in playlists.
+- [ ] Import behaviour for composer, original artist and lyricist tags (none in the corpus).

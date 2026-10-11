@@ -1,0 +1,15 @@
+[package]
+name = "mb-library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mb-core.workspace = true
+mb-masterdb = { path = "../mb-masterdb" }
+thiserror.workspace = true
+lofty = "0.25"
+
+[dev-dependencies]
+anyhow.workspace = true

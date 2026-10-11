@@ -4,6 +4,7 @@ mod backup;
 mod guard;
 mod key;
 mod paths;
+pub mod playlists_xml;
 mod snapshot;
 pub mod write;
 
@@ -11,7 +12,10 @@ pub use backup::{backup_library, default_backup_root};
 pub use guard::{REKORDBOX_PROCESSES, running_rekordbox};
 pub use key::derive_passphrase;
 pub use paths::LibraryPaths;
-pub use write::{MasterDbWriter, WriteTxn};
+pub use playlists_xml::MasterPlaylists;
+/// Re-exported so that crates writing through [`WriteTxn`] bind values with the same rusqlite.
+pub use rusqlite;
+pub use write::{CounterColumn, MasterDbWriter, OrphanTable, WriteTxn};
 
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
@@ -28,6 +32,8 @@ pub enum Error {
     RekordboxRunning(Vec<String>),
     #[error("random source: {0}")]
     Random(String),
+    #[error("masterPlaylists6.xml: {0}")]
+    PlaylistsXml(String),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }

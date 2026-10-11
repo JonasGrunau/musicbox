@@ -36,5 +36,8 @@ select ContentID, rb_local_deleted from djmdSongPlaylist where PlaylistID = <P> 
 - **One USN per batch**, taken **outside** `begin exclusive` (the only op that does this). 161 rows → `localUpdateCount` +1.
 - The `djmdPlaylist` row is not updated (its `updated_at` and `rb_local_usn` stay at the create/rename values).
 - `masterPlaylists6.xml`: the playlist's `Timestamp` becomes the time of the add (`playlist-create.md` §5). This is a file write, not visible in the trace.
-- Duplicate handling (track already in the list) and inserting at a position other than the end were not exercised (*open*; a mid-list insert presumably renumbers `TrackNo`).
+- Duplicate handling (track already in the list) and inserting at a position other than the end were not exercised (*open*; a mid-list insert presumably renumbers `TrackNo`; musicbox's *hypothesis* is in `playlist-edit.md`).
 - `datafile.edb` / `ExtData.edb` were not rewritten.
+
+## Replay check
+`crates/mb-library/tests/session_oracle.rs` replays the 161-row batch and the five single adds (contents mapped by `FolderPath`): one bump per batch, `TrackNo` 1…161 and 1…5 in rekordbox's content order, two distinct v4 UUIDs per row, storage classes equal to oracle-a's rows, the playlist rows untouched, and the same number of distinct batch USNs per list as in oracle-a (1 and 5).
