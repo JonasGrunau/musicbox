@@ -2023,11 +2023,13 @@ dependencies = [
  "base64 0.23.1",
  "blowfish",
  "chrono",
+ "getrandom 0.4.3",
  "mb-core",
  "rusqlite",
  "serde_json",
  "sysinfo",
  "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
@@ -3919,6 +3921,7 @@ version = "1.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "serde_core",
  "wasm-bindgen",

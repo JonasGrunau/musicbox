@@ -5,11 +5,13 @@ mod guard;
 mod key;
 mod paths;
 mod snapshot;
+pub mod write;
 
 pub use backup::{backup_library, default_backup_root};
 pub use guard::{REKORDBOX_PROCESSES, running_rekordbox};
 pub use key::derive_passphrase;
 pub use paths::LibraryPaths;
+pub use write::{MasterDbWriter, WriteTxn};
 
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
@@ -22,6 +24,10 @@ pub enum Error {
     Options(String),
     #[error("dp field: {0}")]
     Passphrase(String),
+    #[error("rekordbox is running ({}); master.db is read-only until it quits", .0.join(", "))]
+    RekordboxRunning(Vec<String>),
+    #[error("random source: {0}")]
+    Random(String),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
 }
