@@ -13,7 +13,7 @@ Status values: **verified** (checked against real files or a trace), **hypothesi
 | [export.md](export.md) | USB export flow, paths, IDs, artwork, sync, settings files, export log | verified; `mb-usb` reproduces the RBTEST stick file-for-file (pdb byte-exact, devlib row-exact, audio/ANLZ/artwork/settings/log byte-exact); deletes + old-stick conversion not yet implemented |
 | [xml.md](xml.md) | rekordbox.xml import/export format, TEMPO/POSITION_MARK derivation | reader + byte-exact writer verified on oracle-a (161/161 tracks); cues/colours untested |
 | analysis.md | analysis pipeline, BALib, WaveCreator, key, phrase, loudness, vocal | open |
-| decode.md | per-format decoding and resampling | open |
+| [decode.md](decode.md) | per-format decoding, analysis rate, 16-bit analysis input, resampler, PVBR | verified: lengths 169/169, PVBR 37/37 byte-exact, PVB2 23/23, per-format onset columns match rekordbox; MP3/AAC sample identity by construction |
 
 ## Binary landmarks (rekordbox 7.2.19, arm64 slice)
 These come from the 2026-10-11 survey; confirm each one in Ghidra before relying on it.

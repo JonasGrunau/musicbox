@@ -1,0 +1,18 @@
+[package]
+name = "mb-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Decode spine: rekordbox-identical PCM for every supported format (spec: docs/re/decode.md)"
+
+[dependencies]
+thiserror.workspace = true
+libloading = "0.8"
+symphonia = { version = "0.5.4", default-features = false, features = ["flac"] }
+
+[dev-dependencies]
+anyhow.workspace = true
+mb-anlz = { path = "../mb-anlz" }
+mb-masterdb = { path = "../mb-masterdb" }
+serde_json = "1"
