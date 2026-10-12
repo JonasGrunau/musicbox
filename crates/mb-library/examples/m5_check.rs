@@ -50,7 +50,11 @@ fn main() -> anyhow::Result<()> {
     lib.execute(Command::EditCue { id: memory, edit: CueEdit::Comment("musicbox memo".into()) })?;
 
     // Track 2: grid 50 ms later, downbeat one beat later.
-    let duration = |t: &Track| t.length_seconds.unwrap_or(0) * 1000;
+    let duration = |t: &Track| {
+        let ext = t.analysis_path.as_ref().and_then(|p| std::fs::read(p.with_extension("EXT")).ok());
+        let ext = ext.and_then(|b| mb_anlz::AnlzFile::parse(&b).ok());
+        grid::duration_ms(ext.as_ref(), t.length_seconds.unwrap_or(0))
+    };
     let b = beats(shifted)?;
     let moved = grid::shift(&b, 50, duration(shifted));
     let down = moved.iter().position(|x| x.beat_in_bar == 1).unwrap_or(0) + 1;

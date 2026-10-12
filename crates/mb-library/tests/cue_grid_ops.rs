@@ -230,3 +230,44 @@ fn counter_value(dir: &TempLibrary, track: &str) -> i64 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
 }
+
+/// rekordbox's own grid edit (`fixtures/oracle-grid-edit`): "move grid right" once on the
+/// oracle-b analysis of one track moved every beat +1 ms, set `BPM` to the first beat's tempo,
+/// bumped `AnalysisUpdated` and `TrackInfoUpdated`, and emptied PQT2. musicbox's `grid::shift`
+/// + `SetBeatGrid` must write the same `.DAT`/`.EXT` bytes and counters.
+#[test]
+fn grid_shift_matches_rekordbox_byte_for_byte() {
+    let Some(edited) = fixture_dir("oracle-grid-edit") else { return };
+    let Some(dir) = TempLibrary::new("oracle-b") else { return };
+    let mut lib = open(&dir);
+    let track = "4059363";
+    let content = DbId(track.into());
+    let (rel, secs): (String, i64) = lib
+        .connection()
+        .query_row("SELECT AnalysisDataPath, Length FROM djmdContent WHERE ID = ?1", [track], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    let root = private_anlz(&dir, &rel);
+    lib.set_analysis_root(&root);
+    lib.set_anlz_backup(&dir.dir.join("backup"));
+    let dat = root.join(rel.trim_start_matches('/'));
+    let ext = dat.with_extension("EXT");
+    let old = read(&dat).beat_grid().unwrap();
+    let (info0, analysis0) = (counter(lib.connection(), "TrackInfoUpdated", track), counter(lib.connection(), "AnalysisUpdated", track));
+
+    let shifted = grid::shift(&old.beats, 1, grid::duration_ms(Some(&read(&ext)), secs as u32));
+    assert_eq!(shifted.len(), old.beats.len(), "rekordbox kept every beat");
+    History::default().run(&mut lib, Command::SetBeatGrid { content, beats: shifted }).unwrap();
+
+    assert!(std::fs::read(&dat).unwrap() == std::fs::read(edited.join("ANLZ0000.DAT")).unwrap(), ".DAT differs from rekordbox's");
+    assert!(std::fs::read(&ext).unwrap() == std::fs::read(edited.join("ANLZ0000.EXT")).unwrap(), ".EXT differs from rekordbox's");
+    let c = lib.connection();
+    let bump = |v: Option<String>| (v.unwrap().parse::<i64>().unwrap() + 1).to_string();
+    assert_eq!(c.query_row("SELECT BPM FROM djmdContent WHERE ID = ?1", [track], |r| r.get::<_, i64>(0)).unwrap(), 7087);
+    assert_eq!(counter(c, "TrackInfoUpdated", track), Some(bump(info0)));
+    assert_eq!(counter(c, "AnalysisUpdated", track), Some(bump(analysis0)));
+}
+
+fn fixture_dir(name: &str) -> Option<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures").join(name);
+    dir.is_dir().then_some(dir)
+}

@@ -33,3 +33,12 @@ captured = "2026-10-11"
 settings = "HighPrecisionBeatAnalyze=1, trackAnalysisMode=0 (Dynamic intended; key reads 0 — open), key/phrase/vocal ON, network OFF; see analysis-settings.txt"
 contents = "sandbox library after re-analysis of all tracks"
 notes = "vs oracle-a: PQTZ differs on 154/169, PQT2 154, PSSI 142, PWAV 4, PWV2 1; all other tags identical."
+
+[oracle-grid-edit]
+path = "fixtures/oracle-grid-edit"
+captured = "2026-10-12"
+rekordbox = "7.2.19.0342"
+macos = "27.0"
+contents = "ANLZ0000.DAT/.EXT of one track after a rekordbox grid edit ('move grid right' once) on the oracle-b analysis; README.txt has the row values"
+sha256_dat = "d11dbab7d0a8a5804ee26982a8f59acb539e065f0bc7ae74e1bd1ae22d30eb22"
+sha256_ext = "5ae23ab5829d23c3098c73799811672bfd681240905cd8a11d8b242cc5bf90df"

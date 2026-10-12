@@ -1,6 +1,13 @@
 # Op: edit the beat grid of a collection track
 
-Status: **binary-derived** (rekordbox 7.2.19 arm64, Ghidra). No grid edit is in the 2026-10-11 trace; the M5 user check (`mb-library` example `m5_check`) is the first test. Implementation: `crates/mb-library/src/grid.rs`.
+Status: **verified for "move grid" (2026-10-12)**, the rest binary-derived (rekordbox 7.2.19 arm64, Ghidra). Implementation: `crates/mb-library/src/grid.rs`.
+
+**rekordbox oracle** (`fixtures/oracle-grid-edit`, test `grid_shift_matches_rekordbox_byte_for_byte`): on the oracle-b (high-precision) analysis of one track, the user clicked "move grid right" once in rekordbox's grid edit, left grid edit and quit. rekordbox then:
+- moved every PQTZ beat by **+1 ms** (one click = 1 ms) and kept all 1178 beats (the last at 521.261 s, inside the track's 521.400 s scroll-wave length, past its 521 s `Length`);
+- set `BPM` to the **first beat's tempo** (137.40 → 70.87, displayed so in rekordbox), and bumped `TrackInfoUpdated` and `AnalysisUpdated` by 1;
+- emptied PQT2 (56-byte header) and left every other section unchanged.
+
+musicbox's `grid::shift(beats, 1, grid::duration_ms(ext, Length))` + `Command::SetBeatGrid` writes the same `.DAT` and `.EXT` **byte for byte** and the same row values. The M5 user check (`m5_check`) also passed in rekordbox: cues, hot cues, loop, comment, shifted grid and doubled tempo all show. On a high-precision grid the first beat's tempo can be far from the track BPM (149/166 tracks of the sandbox), so a doubled grid shows 2 × the first beat's tempo (253.64 for a 125.00 track whose first beat is 126.82); rekordbox does the same.
 
 ## Save sequence (`djplay::BeatGridAdjustment::saveBeatPosition` @0x1010bfdc0)
 The grid editor works on an in-memory beat list (16-byte entries: beat number, tempo, position) and saves it in three steps:
@@ -32,8 +39,8 @@ The `.2EX` and every other tag are untouched. `djmdCue` rows are not moved by a 
 - Undo (`Command::RestoreBeatGrid`) puts the previous PQTZ and PQT2 sections and BPM back; the files become byte-identical to before (tested on oracle-a).
 
 ## Open questions
-- [ ] Verify against rekordbox: edit a grid in the sandbox and diff the `.DAT`/`.EXT` and `djmdContent` (BPM, counters).
-- [ ] Is `modifyTrackData(0x1a)` the BPM column, and does it bump `TrackInfoUpdated`?
+- [x] Verify against rekordbox: done for "move grid right" (above). ×2/÷2, downbeat and tempo entry are still unverified.
+- [x] `modifyTrackData(0x1a)` is the BPM column and bumps `TrackInfoUpdated` (oracle above).
 - [ ] The beat-number offset `saveBeatPosition` passes (its argument, else `this+0x250`); musicbox keeps the stored value.
 - [ ] `expandBeatPos`, `shrinkBeatInterval`/`expandBeatInterval` (fine tempo steps), `tapTap`, and the phrase editing on the same panel.
-- [ ] High-precision grids (oracle-b): an edit empties PQT2, so the per-beat sub-ms values are lost, as in rekordbox (by the code above).
+- [x] High-precision grids: an edit empties PQT2, so the per-beat sub-ms values are lost (verified by the oracle above).

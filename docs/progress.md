@@ -8,7 +8,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 |---|---|---|
 | M3 | export done; **CDJ check pending** (studio) | 1faf385 |
 | M4 | done: deletes (both DBs + files + sync files), old-stick conversion, `playlists3*.sync`, foreign My Tags kept, row paths stay taken, ≥ 4 GiB on FAT32 planned as failed copy; export onto a reference-stick clone keeps every row and file ; My Settings editor (466caa5) | 5abe8e9, 22d7451, d846f4a, eb85e3d, 1729250, 466caa5 |
-| M5 | built from the binary (no trace has a cue write): cue/grid ops with undo, deck UI; device cues built from `djmdCue` (410/410 reference-stick cue sets byte-exact). **rekordbox check pending** (`m5_check`) | 0d0d509, b3e4840 |
+| M5 | built from the binary (no trace has a cue write): cue/grid ops with undo, deck UI; device cues built from `djmdCue` (410/410 reference-stick cue sets byte-exact). rekordbox check passed; grid edit byte-exact vs rekordbox | 0d0d509, b3e4840 |
 | M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact 169/169 (AAC fixed: the decode depended on the stack alignment at `AudioConverterFillComplexBuffer`, `decode.md` § 6); Normal-mode beat grid: BPM 161/161, grids identical 140/161, the other 21 moved by the phrase pass (not ported) | 617fc5f, 8def9c4 |
 | M7 | smart lists (rules, editor, XML, USB export); import from device (tracks, playlists, histories); app bundle (`tools/bundle/bundle.sh`); key display follows `ShowOriginalKey`/`KeyStringSetting`. rekordbox.xml export (byte-exact vs oracle-a) and import. **rekordbox checks pending** (`m7_check`, device import, XML) | 0d0d509, 88593cc, d0babf3, e93d3a4, 3997b37, 53af01b, 35c036c |
 
@@ -49,7 +49,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 
 **User checks waiting** (all need rekordbox quit first; sandbox library only):
 1. Studio: RBTEST on the CDJ-3000 (§ M3 entry below), then the My Settings check (musicbox "My Settings…" on RBTEST: LANGUAGE German, JOG DISPLAY MODE ARTWORK, TEMPO RANGE WIDE, Waveform color 3Band; the CDJ shows them after loading the stick's My Settings).
-2. Mac: `cargo run -p mb-library --example m5_check -- "$HOME/Library/Application Support/Pioneer/rekordboxAgent/storage/options.json"`, then rekordbox shows the printed cues/grid changes.
+2. ~~Mac: `m5_check`~~ **passed 2026-10-12** (cues, hot cues, loop, comment, grid shift, ×2 all shown; the doubled BPM is 2 × the first beat's tempo, which rekordbox's own grid edit also does). A rekordbox grid edit was captured as `fixtures/oracle-grid-edit`; musicbox reproduces it byte for byte.
 3. Mac: same with `--example m7_check`: three "mb …" intelligent playlists with the printed counts and rules.
 4. Mac: device import from RBTEST (musicbox "Import to Collection" on `oracle-small`, "Import Histories" after the CDJ wrote histories), then rekordbox shows the tracks with waveforms/cues and the histories; a rekordbox export of `oracle-small` to RBTEST copies nothing again.
 5. Mac: XML. musicbox "Export Collection in xml format…" → rekordbox imports a playlist from it (metadata, grid, cues). Then musicbox "Open rekordbox xml…" on a rekordbox-written XML → "Import to Collection" → rekordbox shows the list, grids at once, cue colours right.

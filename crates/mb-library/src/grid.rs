@@ -92,6 +92,20 @@ pub fn shift(beats: &[Beat], delta_ms: i32, duration_ms: u32) -> Vec<Beat> {
     extend(moved, duration_ms)
 }
 
+/// Track length for grid edits: the `.EXT` scroll wave's length (PWV3, 150 columns per second)
+/// when present, else `length_seconds` × 1000. `Length` holds whole seconds, so a grid edit
+/// bounded by it would drop beats in the last second that rekordbox keeps (verified against
+/// rekordbox's own "move grid right", `fixtures/oracle-grid-edit`).
+pub fn duration_ms(ext: Option<&AnlzFile>, length_seconds: u32) -> u32 {
+    let tag = length_seconds.saturating_mul(1000);
+    let wave = ext
+        .and_then(|f| f.sections_with(Tag::PWV3).next())
+        .and_then(|s| mb_anlz::tags::WaveScroll::decode(s).ok())
+        .map(|w| (w.data.len() as u64 * 1000 / u64::from(w.columns_per_second.max(1))) as u32)
+        .unwrap_or(0);
+    tag.max(wave)
+}
+
 /// Makes beat `index` a downbeat (1) and renumbers every other beat around it.
 pub fn set_downbeat(beats: &[Beat], index: usize) -> Vec<Beat> {
     beats
