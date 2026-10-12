@@ -268,8 +268,10 @@ fn entries_remove_restore_reorder_insert() {
     dir.verify_loads();
 }
 
+/// Smart lists hold no entries (`docs/re/smartlist.md`): every entry op is refused. Rename, move
+/// and delete work as for playlists (`tests/smartlist_ops.rs`).
 #[test]
-fn smart_playlists_are_read_only() {
+fn smart_playlists_hold_no_entries() {
     let Some(dir) = TempLibrary::new("oracle-a") else { return };
     let mut lib = open(&dir);
     lib.connection()
@@ -282,9 +284,6 @@ fn smart_playlists_are_read_only() {
     let smart = DbId("77".into());
     let before = lib.usn().unwrap();
     for cmd in [
-        Command::RenamePlaylist { id: smart.clone(), name: "x".into() },
-        Command::DeletePlaylist { id: smart.clone() },
-        Command::MovePlaylist { id: smart.clone(), parent: None, position: 1 },
         Command::AddTracks { playlist: smart.clone(), content_ids: vec![], position: None },
         Command::RemoveFromPlaylist { playlist: smart.clone(), entry_ids: vec![] },
         Command::ReorderPlaylist { playlist: smart.clone(), order: vec![] },

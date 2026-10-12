@@ -152,6 +152,8 @@ impl DeviceLibrary {
         let artists: HashMap<u32, &str> =
             e.artists.iter().map(|a| (a.id, a.name.as_str())).collect();
         let albums: HashMap<u32, &str> = e.albums.iter().map(|a| (a.id, a.name.as_str())).collect();
+        let album_artists: HashMap<u32, u32> =
+            e.albums.iter().map(|a| (a.id, a.album_artist_id)).collect();
         let genres: HashMap<u32, &str> = e
             .genres
             .iter()
@@ -182,6 +184,9 @@ impl DeviceLibrary {
                 remixer: name(&artists, t.remixer_id),
                 composer: name(&artists, t.composer_id),
                 original_artist: name(&artists, t.original_artist_id),
+                album_artist: name(&artists, album_artists.get(&t.album_id).copied().unwrap_or(0)),
+                mix_name: t.subtitle.clone(),
+                file_name: t.file_name.clone(),
                 key: name(&keys, t.key_id),
                 color: (t.color_id != 0).then_some(t.color_id),
                 bpm_x100: nonzero(t.bpm_x100),
@@ -199,6 +204,7 @@ impl DeviceLibrary {
                 file_type: FileType::from_code(i64::from(t.file_type)),
                 path: self.device_path(&t.folder_path),
                 date_added: t.stock_date.clone(),
+                date_created: t.date_created.clone(),
                 release_date: t.release_date.clone(),
                 analysis_path: (!t.analysis_path.is_empty())
                     .then(|| self.device_path(&t.analysis_path)),
@@ -290,6 +296,7 @@ impl DeviceLibrary {
             history_entries,
             my_tags,
             my_tag_entries,
+            smart_lists: Default::default(),
         }
     }
 

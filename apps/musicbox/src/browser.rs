@@ -51,7 +51,9 @@ pub struct State {
     pub key_notation: KeyNotation,
     /// Indices into `LibrarySnapshot::tracks`, in display order.
     rows: Vec<usize>,
-    built_for: Option<(Source, String, Col, bool)>,
+    /// What `rows` was built for: source, search, sort, direction, and the snapshot's address
+    /// and track count (a device reload swaps the snapshot under the same source).
+    built_for: Option<(Source, String, Col, bool, usize, usize)>,
     /// (library, track index) of the focused row; the deck shows this track.
     pub selected: Option<(LibraryRef, usize)>,
     /// Track indices of all selected rows (multi-select).
@@ -89,13 +91,17 @@ impl State {
     }
 
     fn rebuild(&mut self, library: &LibrarySnapshot, source: &Source) {
-        let key = (source.clone(), self.search.clone(), self.sort, self.ascending);
+        let snapshot = std::ptr::from_ref(library) as usize;
+        let key = (source.clone(), self.search.clone(), self.sort, self.ascending, snapshot, library.tracks.len());
         if self.built_for.as_ref() == Some(&key) {
             return;
         }
-        if self.built_for.as_ref().is_none_or(|(s, ..)| s != source) {
+        if self.built_for.as_ref().is_none_or(|(s, .., ptr, _)| s != source || *ptr != snapshot) {
             self.selection.clear();
             self.anchor = None;
+            if self.selected.is_some_and(|(l, _)| l == source.library) {
+                self.selected = None;
+            }
         }
         // (track index, position in the list's entries)
         let mut rows: Vec<(usize, Option<usize>)> = match &source.list {
@@ -258,10 +264,15 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                 response.context_menu(|ui| {
                     if editable {
                         row_menu(ui, library, source, state, edit, &mut actions);
-                    } else if source.library == LibraryRef::Local {
-                        ui.weak("Turn on editing to change the library");
+                    } else if let LibraryRef::Device(device) = source.library {
+                        let tracks: Vec<_> = state.selection.iter().map(|&i| library.tracks[i].path.clone()).collect();
+                        ui.weak(format!("{} track(s)", tracks.len()));
+                        if ui.button("Remove from device…").clicked() {
+                            actions.push(Action::AskRemoveFromDevice { device, playlists: Vec::new(), tracks });
+                            ui.close();
+                        }
                     } else {
-                        ui.weak("Devices are read-only");
+                        ui.weak("Turn on editing to change the library");
                     }
                 });
             });

@@ -9,6 +9,8 @@ use std::sync::mpsc::{Receiver, channel};
 /// A loaded local library plus what the editor needs to open it for writing.
 pub struct Loaded {
     pub snapshot: LibrarySnapshot,
+    /// `djmdCue` rows by content ID.
+    pub cues: std::collections::HashMap<mb_core::DbId, Vec<mb_library::Cue>>,
     pub db_path: PathBuf,
     pub passphrase: String,
     pub analysis_root: PathBuf,
@@ -42,9 +44,12 @@ fn load(args: &Args) -> anyhow::Result<Loaded> {
         paths.analysis_data_root = root.clone();
     }
     let passphrase = derive_passphrase(&paths.dp)?;
-    let snapshot = MasterDb::open_read_only(&paths.db_path, &passphrase)?.load_snapshot(&paths)?;
+    let db = MasterDb::open_read_only(&paths.db_path, &passphrase)?;
+    let snapshot = db.load_snapshot(&paths)?;
+    let cues = mb_library::cues::load_all(db.connection())?;
     Ok(Loaded {
         snapshot,
+        cues,
         db_path: paths.db_path,
         passphrase,
         analysis_root: paths.analysis_data_root,

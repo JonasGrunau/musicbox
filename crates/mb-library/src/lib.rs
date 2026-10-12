@@ -10,12 +10,17 @@
 //! | [`playlist`] | create, rename | `playlist-create.md` | traced |
 //! | [`playlist`] | add tracks (append) | `playlist-add-tracks.md` | traced |
 //! | [`playlist`] | folders, delete, move, remove/reorder entries, insert at a position | `playlist-edit.md` | hypothesis |
+//! | [`playlist`] | smart lists: create, set rules | `smartlist.md` | binary-derived (no trace) |
 //! | [`edit`] | track metadata edits | `edit-track.md` | hypothesis (built from traced macros) |
 //! | [`xml_sync`] | `masterPlaylists6.xml` after playlist changes | `playlist-create.md` §5 | traced format, hypothesis for folders |
+//! | [`cues`] | add, delete, edit memory/hot cues and loops | `edit-cues.md` | binary-derived (no trace) |
+//! | [`grid`] | replace a beat grid (shift, downbeat, tempo, ×2, ÷2) | `edit-grid.md` | binary-derived (no trace) |
 //!
 //! [`WriteTxn`]: mb_masterdb::WriteTxn
 
+pub mod cues;
 pub mod edit;
+pub mod grid;
 pub mod import;
 mod lookup;
 pub mod playlist;
@@ -23,7 +28,9 @@ pub mod remove;
 pub mod tags;
 pub mod xml_sync;
 
+pub use cues::{Cue, CueEdit, CueSlot, NewCue};
 pub use edit::TrackEdit;
+pub use mb_anlz::tags::Beat;
 pub use import::{ImportReport, SkipReason};
 pub use mb_core::DbId;
 pub use playlist::{EntrySnapshot, NodeKind, PlaylistSnapshot};
@@ -72,6 +79,16 @@ pub enum Command {
     DeletePlaylist { id: DbId },
     /// Re-create a deleted subtree (inverse of [`Command::DeletePlaylist`]).
     RestorePlaylist { snapshot: PlaylistSnapshot },
+    /// Create a smart list under `parent` with these rules (`docs/re/smartlist.md`).
+    CreateSmartList {
+        parent: Option<DbId>,
+        name: String,
+        /// [`mb_core::smartlist::MATCH_ALL`] or [`mb_core::smartlist::MATCH_ANY`].
+        logical_operator: i32,
+        conditions: Vec<mb_core::smartlist::Condition>,
+    },
+    /// Replace a smart list's rule XML (`None` = NULL).
+    SetSmartList { id: DbId, xml: Option<String> },
     /// Add tracks to a playlist, appended (`position = None`) or inserted before `position`.
     AddTracks { playlist: DbId, content_ids: Vec<DbId>, position: Option<u32> },
     /// Remove entries (`djmdSongPlaylist.ID`s) from a playlist.
@@ -82,6 +99,18 @@ pub enum Command {
     ReorderPlaylist { playlist: DbId, order: Vec<String> },
     /// Change one metadata field of a track.
     EditTrack { id: DbId, edit: TrackEdit },
+    /// Add a memory cue, hot cue or loop to a track (`edit-cues.md`).
+    AddCue { content: DbId, cue: NewCue },
+    /// Delete one cue (`djmdCue.ID`).
+    DeleteCue { id: String },
+    /// Put a deleted cue row back unchanged (inverse of [`Command::DeleteCue`]).
+    RestoreCue { row: Vec<(String, mb_masterdb::rusqlite::types::Value)> },
+    /// Change the colour, colour code, comment or active-loop flag of one cue.
+    EditCue { id: String, edit: CueEdit },
+    /// Replace a track's beat grid (`edit-grid.md`); build `beats` with the [`grid`] functions.
+    SetBeatGrid { content: DbId, beats: Vec<Beat> },
+    /// Put the previous grid sections and BPM back (inverse of [`Command::SetBeatGrid`]).
+    RestoreBeatGrid { content: DbId, pqtz: mb_anlz::Section, pqt2: Option<mb_anlz::Section>, bpm_x100: Option<i64> },
 }
 
 /// What a command did.
@@ -94,6 +123,8 @@ pub enum Effect {
     PlaylistsRestored { ids: Vec<DbId> },
     /// New `djmdSongPlaylist.ID`s of added or restored entries.
     EntriesAdded { entry_ids: Vec<String> },
+    /// `djmdCue.ID` of an added or restored cue.
+    CueAdded { id: String },
     Done,
     /// Nothing to do (e.g. an edit to the current value); no statement was written.
     Unchanged,
@@ -119,6 +150,10 @@ impl Outcome {
 pub struct Library {
     pub(crate) writer: MasterDbWriter,
     pub(crate) xml_path: PathBuf,
+    /// The analysis root (`analysis-data-root-path` of options.json); needed by grid edits.
+    pub(crate) analysis_root: Option<PathBuf>,
+    /// Session backup folder; analysis files are copied there before their first change.
+    pub(crate) anlz_backup: Option<PathBuf>,
 }
 
 impl Library {
@@ -133,7 +168,18 @@ impl Library {
     }
 
     fn with_writer(writer: MasterDbWriter, db_path: &Path) -> Self {
-        Self { writer, xml_path: mb_masterdb::playlists_xml::path_for_db(db_path) }
+        Self { writer, xml_path: mb_masterdb::playlists_xml::path_for_db(db_path), analysis_root: None, anlz_backup: None }
+    }
+
+    /// Where `AnalysisDataPath` (`/PIONEER/USBANLZ/…`) resolves; grid edits fail without it.
+    pub fn set_analysis_root(&mut self, root: impl Into<PathBuf>) {
+        self.analysis_root = Some(root.into());
+    }
+
+    /// The session backup folder (from `backup_library`); analysis files touched by this session
+    /// are copied below `<dir>/anlz/` first.
+    pub fn set_anlz_backup(&mut self, dir: impl Into<PathBuf>) {
+        self.anlz_backup = Some(dir.into());
     }
 
     pub fn connection(&self) -> &Connection {
@@ -164,6 +210,10 @@ impl Library {
             Command::MovePlaylist { id, parent, position } => playlist::move_node(self, &id, parent.as_ref(), position)?,
             Command::DeletePlaylist { id } => playlist::delete(self, &id)?,
             Command::RestorePlaylist { snapshot } => playlist::restore(self, &snapshot)?,
+            Command::CreateSmartList { parent, name, logical_operator, conditions } => {
+                playlist::create_smart(self, parent.as_ref(), &name, logical_operator, &conditions)?
+            }
+            Command::SetSmartList { id, xml } => playlist::set_smart_list(self, &id, xml.as_deref())?,
             Command::AddTracks { playlist, content_ids, position } => {
                 playlist::add_tracks(self, &playlist, &content_ids, position)?
             }
@@ -171,6 +221,14 @@ impl Library {
             Command::RestoreEntries { playlist, entries } => playlist::restore_entries(self, &playlist, &entries)?,
             Command::ReorderPlaylist { playlist, order } => playlist::reorder(self, &playlist, &order)?,
             Command::EditTrack { id, edit } => edit::edit_track(self, &id, &edit)?,
+            Command::AddCue { content, cue } => cues::add_cue(self, &content, &cue)?,
+            Command::DeleteCue { id } => cues::delete_cue(self, &id)?,
+            Command::RestoreCue { row } => cues::restore_cue(self, &row)?,
+            Command::EditCue { id, edit } => cues::edit_cue(self, &id, &edit)?,
+            Command::SetBeatGrid { content, beats } => grid::set_beat_grid(self, &content, &beats)?,
+            Command::RestoreBeatGrid { content, pqtz, pqt2, bpm_x100 } => {
+                grid::restore_beat_grid(self, &content, &pqtz, pqt2.as_ref(), bpm_x100)?
+            }
         };
         Ok(Outcome { effect, inverse, usn_before, usn_after: self.usn()? })
     }

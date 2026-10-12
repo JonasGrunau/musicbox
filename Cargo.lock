@@ -2279,6 +2279,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "mb-analysis"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mb-anlz",
+ "mb-audio",
+ "mb-dsp",
+ "mb-masterdb",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mb-anlz"
 version = "0.1.0"
 dependencies = [
@@ -2301,6 +2314,9 @@ dependencies = [
 [[package]]
 name = "mb-core"
 version = "0.1.0"
+dependencies = [
+ "unicode-normalization",
+]
 
 [[package]]
 name = "mb-devlib"
@@ -2316,11 +2332,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mb-dsp"
+version = "0.1.0"
+
+[[package]]
 name = "mb-library"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "lofty",
+ "mb-anlz",
  "mb-core",
  "mb-masterdb",
  "thiserror 2.0.21",

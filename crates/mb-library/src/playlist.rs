@@ -4,7 +4,9 @@
 //! are built from the traced building blocks and rekordbox's statement templates found in the
 //! binary, and every such place is marked `hypothesis`.
 //!
-//! Smart playlists (`Attribute` 4) are read-only: every op that targets one directly is refused.
+//! Smart playlists (`Attribute` 4, `docs/re/smartlist.md`) are created like playlists and get
+//! their rule XML with [`set_smart_list`]; they can be renamed, moved and deleted, but they hold no
+//! entries, so every entry op on one is refused.
 
 use crate::lookup::{any_row_with_id, fresh_id};
 use crate::{Command, DbId, Effect, Error, Library, Result, xml_sync};
@@ -24,6 +26,8 @@ pub const ROOT: &str = "root";
 pub enum NodeKind {
     Playlist,
     Folder,
+    /// An intelligent playlist; its rules are set with [`crate::Command::SetSmartList`].
+    Smart,
 }
 
 impl NodeKind {
@@ -31,6 +35,7 @@ impl NodeKind {
         match self {
             Self::Playlist => ATTRIBUTE_PLAYLIST,
             Self::Folder => ATTRIBUTE_FOLDER,
+            Self::Smart => ATTRIBUTE_SMART,
         }
     }
 }
@@ -285,7 +290,6 @@ pub(crate) fn create(lib: &mut Library, parent: Option<&DbId>, name: &str, kind:
 /// touched.
 pub(crate) fn rename(lib: &mut Library, id: &DbId, name: &str) -> Result<(Effect, Option<Command>)> {
     let n = require_node(lib.connection(), id.as_str())?;
-    refuse_smart(&n)?;
     if n.name == name {
         return Ok((Effect::Unchanged, None));
     }
@@ -297,11 +301,52 @@ pub(crate) fn rename(lib: &mut Library, id: &DbId, name: &str) -> Result<(Effect
     Ok((Effect::Done, Some(Command::RenamePlaylist { id: id.clone(), name: n.name })))
 }
 
+/// Writes a smart list's rule XML (`None` = NULL). smartlist.md § Writing:
+/// `AppSyncDBController::modifySmartPlaylistCriteria` @0x100a7ee90 updates `SmartList` through
+/// the same one-property update as `modifyPlaylistName` (the traced rename: one builder update,
+/// one USN).
+pub(crate) fn set_smart_list(lib: &mut Library, id: &DbId, xml: Option<&str>) -> Result<(Effect, Option<Command>)> {
+    let n = require_node(lib.connection(), id.as_str())?;
+    if n.attribute != ATTRIBUTE_SMART {
+        return Err(Error::Invalid(format!("{} is not a smart playlist", n.id)));
+    }
+    if n.smart_list.as_deref() == xml {
+        return Ok((Effect::Unchanged, None));
+    }
+    let value = xml.map_or(Value::Null, |x| Value::Text(x.to_owned()));
+    let tx = lib.writer.transaction()?;
+    tx.update("djmdPlaylist", "ID", Value::Text(n.id.clone()), &[("SmartList", value)])?;
+    tx.commit()?;
+    // hypothesis: a criteria change counts as a change of the list, like a rename.
+    xml_sync::sync(lib, std::slice::from_ref(&n.id))?;
+    Ok((Effect::Done, Some(Command::SetSmartList { id: id.clone(), xml: n.smart_list })))
+}
+
+/// A new smart list: the playlist-create statements with `Attribute` 4 (rekordbox's
+/// `addPlaylist(parent, 4, name)` → `AppSyncDBController::insertPlaylist` @0x100a7cf0c, which
+/// leaves `SmartList` NULL), then the rule XML with this list's ID as `NODE Id`.
+// hypothesis: the order (insert first, criteria after the dialog) is inferred from the code; the
+// stored rows do not depend on it.
+pub(crate) fn create_smart(
+    lib: &mut Library,
+    parent: Option<&DbId>,
+    name: &str,
+    logical_operator: i32,
+    conditions: &[mb_core::smartlist::Condition],
+) -> Result<(Effect, Option<Command>)> {
+    let (effect, inverse) = create(lib, parent, name, NodeKind::Smart)?;
+    let Effect::PlaylistCreated { id } = &effect else {
+        return Err(Error::Invalid("smart playlist was not created".into()));
+    };
+    let list = mb_core::smartlist::SmartList::new(id.as_str(), logical_operator, conditions.to_vec());
+    set_smart_list(lib, id, Some(&list.to_xml()))?;
+    Ok((effect, inverse))
+}
+
 /// hypothesis (not traced): a tree move uses the same ORM move routine as the traced
 /// move-to-top after create.
 pub(crate) fn move_node(lib: &mut Library, id: &DbId, parent: Option<&DbId>, position: u32) -> Result<(Effect, Option<Command>)> {
     let mut n = require_node(lib.connection(), id.as_str())?;
-    refuse_smart(&n)?;
     let target = resolve_parent(lib.connection(), parent)?;
     // A node cannot move into its own subtree.
     let mut cursor = target.clone();
@@ -334,7 +379,6 @@ pub(crate) fn move_node(lib: &mut Library, id: &DbId, parent: Option<&DbId>, pos
 /// DELETE-ROWS macro of the traced track removal.
 pub(crate) fn delete(lib: &mut Library, id: &DbId) -> Result<(Effect, Option<Command>)> {
     let root = require_node(lib.connection(), id.as_str())?;
-    refuse_smart(&root)?;
     let position = position_among_siblings(lib.connection(), &root)?;
     // Pre-order subtree with entries.
     let mut nodes: Vec<(NodeRow, Vec<EntrySnapshot>)> = Vec::new();

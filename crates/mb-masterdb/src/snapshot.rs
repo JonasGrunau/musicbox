@@ -11,7 +11,8 @@ const TRACKS_SQL: &str = "
 SELECT c.ID, c.Title, ar.Name, al.Name, ge.Name, la.Name, rm.Name, co.Name, oa.Name,
        k.ScaleName, c.ColorID, c.BPM, c.Length, c.TrackNo, c.DiscNo, c.ReleaseYear, c.Rating,
        c.Commnt, c.DJPlayCount, c.BitRate, c.SampleRate, c.BitDepth, c.FileSize, c.FileType,
-       c.FolderPath, c.StockDate, c.ReleaseDate, c.AnalysisDataPath, c.ImagePath, c.Analysed
+       c.FolderPath, c.StockDate, c.ReleaseDate, c.AnalysisDataPath, c.ImagePath, c.Analysed,
+       aa.Name, c.Subtitle, c.FileNameL, c.DateCreated
 FROM djmdContent c
 LEFT JOIN djmdArtist ar ON ar.ID = c.ArtistID
 LEFT JOIN djmdAlbum al ON al.ID = c.AlbumID
@@ -21,6 +22,7 @@ LEFT JOIN djmdArtist rm ON rm.ID = c.RemixerID
 LEFT JOIN djmdArtist co ON co.ID = c.ComposerID
 LEFT JOIN djmdArtist oa ON oa.ID = c.OrgArtistID
 LEFT JOIN djmdKey k ON k.ID = c.KeyID
+LEFT JOIN djmdArtist aa ON aa.ID = al.AlbumArtistID
 WHERE c.rb_local_deleted = 0";
 
 /// List ID → content IDs in list order.
@@ -58,6 +60,9 @@ impl MasterDb {
                     remixer: text(r, 6)?,
                     composer: text(r, 7)?,
                     original_artist: text(r, 8)?,
+                    album_artist: text(r, 30)?,
+                    mix_name: text(r, 31)?,
+                    file_name: text(r, 32)?,
                     key: text(r, 9)?,
                     color: text(r, 10)?.parse::<u8>().ok().filter(|c| (1..=8).contains(c)),
                     bpm_x100: positive_u32(r, 11)?,
@@ -75,6 +80,7 @@ impl MasterDb {
                     file_type: FileType::from_code(r.get::<_, Option<i64>>(23)?.unwrap_or(0)),
                     path: PathBuf::from(text(r, 24)?),
                     date_added: text(r, 25)?,
+                    date_created: text(r, 33)?,
                     release_date: text(r, 26)?,
                     analysis_path: under_root(root, r.get(27)?),
                     artwork_path: under_root(root, r.get(28)?),
@@ -84,16 +90,20 @@ impl MasterDb {
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         let mut stmt = conn.prepare(
-            "SELECT ID, ParentID, Name, Attribute, Seq FROM djmdPlaylist WHERE rb_local_deleted = 0",
+            "SELECT ID, ParentID, Name, Attribute, Seq, SmartList FROM djmdPlaylist WHERE rb_local_deleted = 0",
         )?;
+        let mut smart_lists: HashMap<DbId, String> = HashMap::new();
         let playlists = stmt
             .query_map([], |r| {
                 let parent: Option<String> = r.get(1)?;
+                if r.get::<_, Option<i64>>(3)? == Some(4) {
+                    smart_lists.insert(DbId(r.get(0)?), text(r, 5)?);
+                }
                 Ok(PlaylistNode {
                     id: DbId(r.get(0)?),
                     parent: parent.filter(|p| p != "root" && !p.is_empty()).map(DbId),
                     name: text(r, 2)?,
-                    // Attribute: 0 playlist, 1 folder, 4 smart (to be confirmed by M2 traces).
+                    // Attribute: 0 playlist, 1 folder, 4 smart list (docs/re/smartlist.md).
                     kind: match r.get::<_, Option<i64>>(3)?.unwrap_or(0) {
                         1 => PlaylistKind::Folder,
                         4 => PlaylistKind::Smart,
@@ -136,6 +146,7 @@ impl MasterDb {
             history_entries,
             my_tags,
             my_tag_entries,
+            smart_lists,
         })
     }
 

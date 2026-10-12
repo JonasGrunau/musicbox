@@ -3,6 +3,8 @@
 pub mod actions;
 pub mod app;
 pub mod browser;
+pub mod cue_panel;
+pub mod device_remove;
 pub mod devices;
 pub mod editor;
 pub mod export;

@@ -369,10 +369,16 @@ pub fn track_from_core(t: &mb_core::Track, language: KindLanguage, beats: &[Grid
 
 /// The `ROOT` folder rekordbox writes for a playlist tree: siblings in `Seq` order, folders with
 /// their children, playlists with `KeyType="0"` and one `TRACK Key` per entry in playlist order.
-/// Smart playlists are written as plain playlists of their current result (rekordbox evaluates
-/// them; the snapshot has no entries for them, so they come out empty here).
+/// Smart playlists are written as plain playlists of their current result, as rekordbox does
+/// (`DjPlaylistsWriter::addPlaylistNode` asks `getTrackList` with the list's attribute;
+/// `docs/re/smartlist.md`). "In the last N days" is evaluated in UTC here.
 pub fn playlists_from_snapshot(snapshot: &LibrarySnapshot) -> PlaylistNode {
-    fn children(s: &LibrarySnapshot, parent: Option<&mb_core::DbId>) -> Vec<PlaylistNode> {
+    let smart = mb_core::smartlist::evaluate_all(snapshot, mb_core::smartlist::Clock::utc_now());
+    fn children(
+        s: &LibrarySnapshot,
+        smart: &std::collections::HashMap<mb_core::DbId, Vec<mb_core::DbId>>,
+        parent: Option<&mb_core::DbId>,
+    ) -> Vec<PlaylistNode> {
         let mut nodes: Vec<&mb_core::PlaylistNode> = s
             .playlists
             .iter()
@@ -384,15 +390,13 @@ pub fn playlists_from_snapshot(snapshot: &LibrarySnapshot) -> PlaylistNode {
             .map(|n| match n.kind {
                 PlaylistKind::Folder => PlaylistNode::Folder {
                     name: n.name.clone(),
-                    children: children(s, Some(&n.id)),
+                    children: children(s, smart, Some(&n.id)),
                     extra: Extra::default(),
                 },
                 PlaylistKind::Playlist | PlaylistKind::Smart => PlaylistNode::Playlist {
                     name: n.name.clone(),
                     key_type: Some(KeyType::TrackId),
-                    entries: s
-                        .playlist_entries
-                        .get(&n.id)
+                    entries: if n.kind == PlaylistKind::Smart { smart.get(&n.id) } else { s.playlist_entries.get(&n.id) }
                         .map(|ids| {
                             ids.iter()
                                 .map(|id| match id.as_str().parse::<u32>() {
@@ -412,7 +416,7 @@ pub fn playlists_from_snapshot(snapshot: &LibrarySnapshot) -> PlaylistNode {
     }
     PlaylistNode::Folder {
         name: "ROOT".into(),
-        children: children(snapshot, None),
+        children: children(snapshot, &smart, None),
         extra: Extra::default(),
     }
 }

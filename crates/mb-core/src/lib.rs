@@ -1,6 +1,7 @@
 //! Pure domain types shared by every musicbox crate. No I/O lives here.
 
 pub mod key;
+pub mod smartlist;
 
 use std::path::PathBuf;
 
@@ -71,6 +72,12 @@ pub struct Track {
     pub remixer: String,
     pub composer: String,
     pub original_artist: String,
+    /// The album's artist (`djmdAlbum.AlbumArtistID`).
+    pub album_artist: String,
+    /// "Mix name" (`djmdContent.Subtitle`).
+    pub mix_name: String,
+    /// `djmdContent.FileNameL`; on devices the last path component.
+    pub file_name: String,
     /// Key name as stored (`djmdKey.ScaleName`), e.g. `Am`.
     pub key: String,
     /// rekordbox colour slot 1..=8, if set.
@@ -92,6 +99,8 @@ pub struct Track {
     pub path: PathBuf,
     /// `StockDate`, YYYY-MM-DD.
     pub date_added: String,
+    /// `DateCreated`, YYYY-MM-DD.
+    pub date_created: String,
     pub release_date: String,
     /// Absolute path of `ANLZ0000.DAT`, if analysed.
     pub analysis_path: Option<PathBuf>,
@@ -140,4 +149,7 @@ pub struct LibrarySnapshot {
     pub my_tags: Vec<PlaylistNode>,
     /// Track IDs per My Tag.
     pub my_tag_entries: std::collections::HashMap<DbId, Vec<DbId>>,
+    /// Rule XML of each smart list (`djmdPlaylist.SmartList`, [`smartlist`]); its tracks are
+    /// computed by [`smartlist::evaluate_all`], never stored.
+    pub smart_lists: std::collections::HashMap<DbId, String>,
 }

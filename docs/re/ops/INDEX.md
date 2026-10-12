@@ -16,6 +16,8 @@ Read `common.md` first: it defines the placeholders (`<U>`, `<TS>`, `<CID>`, …
 | [playlist-edit.md](playlist-edit.md) | folders, tree move/reorder, delete, remove/reorder/insert entries | **hypothesis** (binary templates + traced blocks) | `djmdPlaylist`, `djmdSongPlaylist`, `djmdCloudFilterPlaylist` | see spec |
 | [edit-track.md](edit-track.md) | track metadata edits | **hypothesis** (traced blocks) | `djmdContent` UPDATE-COL, lookups, orphan step, `TrackInfoUpdated` | 2 + created/orphaned rows |
 | [analyse-track.md](analyse-track.md) | request, start, completion of analysis | verified (Normal mode, all options on) | `djmdContent` field by field, `djmdMixerParam`, `djmdKey`; agent `contentFile` | 18 per track on the first pass (+1 with artwork, +1 per new/orphaned key; agent +3, +1 with artwork), 18 per re-analysis |
+| [edit-cues.md](edit-cues.md) | add, delete, edit memory/hot cues and loops | **binary-derived** (no trace, no fixture cues) | `djmdCue` (no USN), `contentCue` JSON, `CueUpdated` | 2 per add without options, 3 with; 2 per delete or edit |
+| [edit-grid.md](edit-grid.md) | beat-grid edits (shift, downbeat, BPM, ×2, ÷2) | **binary-derived** | local `.DAT` PQTZ / `.EXT` PQT2, `BPM`, `TrackInfoUpdated`, `AnalysisUpdated` | 1, or 3 when the BPM changes |
 | [settings.md](settings.md) | analysis settings change | verified | none | 0 |
 | [export-xml.md](export-xml.md) | rekordbox.xml export | verified | none | 0 |
 | [export-usb.md](export-usb.md) | USB export, master.db side | verified | none | 0 |
@@ -63,7 +65,7 @@ One module per op, replaying the statements above through `mb_masterdb::WriteTxn
 - **rekordboxAgent writes are not traced** (`contentFile`, `agentNotification*`). A second shim for the agent's node-sqlcipher, or before/after diffs, is needed for exact statements.
 - An **untraced writer at 22:23:24** (between this trace and trace 27865) re-added 8 rekordbox demo tracks with ready-made analysis, a sampler pack and their `contentFile` rows (USN 7483–7742). Probably a normal-app launch; not analysed.
 - The later `oracle-all` export with the normal app is only visible as final state.
-- Not exercised: playlist folders, smart lists, playlist delete/reorder by the user, track edits (title, rating, colour, cues, My Tags), cue writes, history, duplicate import, sync with an already-filled stick, Dynamic/high-precision analysis (pass B has only before/after DBs).
+- Not exercised: playlist folders, smart lists, playlist delete/reorder by the user, track edits (title, rating, colour, cues, My Tags), cue writes (now specified from the binary: `edit-cues.md`), grid edits (`edit-grid.md`), history, duplicate import, sync with an already-filled stick, Dynamic/high-precision analysis (pass B has only before/after DBs).
 
 ## Open questions
 - [ ] Meaning of `ContentLink` bits (0x0E at import, 0x50 queued, 0x10000, 0x600 | 0x1C0000 done) and of `Analysed` bits 0x08, 0x20, 0x40.

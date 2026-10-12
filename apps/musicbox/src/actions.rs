@@ -18,4 +18,7 @@ pub enum Action {
     /// Export a local playlist to the device at this index of `Devices::list`.
     Export { playlist: DbId, device: usize },
     CancelExport,
+    /// Confirm, then remove lists (name paths from the top level) and/or tracks (absolute
+    /// paths) from the device at this index of `Devices::list`.
+    AskRemoveFromDevice { device: usize, playlists: Vec<Vec<String>>, tracks: Vec<std::path::PathBuf> },
 }

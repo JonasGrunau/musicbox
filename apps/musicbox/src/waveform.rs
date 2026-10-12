@@ -1,20 +1,65 @@
 //! Track overview drawn from rekordbox's own analysis files (docs/re/anlz.md):
-//! PWV4 colour preview or PWV6 3-band preview from .EXT/.2EX, plus cue markers.
+//! PWV4 colour preview or PWV6 3-band preview from .EXT/.2EX, plus cue markers; and a zoomed
+//! detail strip (PWV5) with the PQTZ beat grid.
 
 use mb_anlz::{AnlzFile, Tag};
-use mb_anlz::tags::{CueKind, CueListExt, Wave3Band, WaveColorPreview};
+use mb_anlz::tags::{Beat, CueKind, CueListExt, Wave3Band, WaveColorPreview, WaveColorScroll};
 use std::path::Path;
 
 pub struct TrackWaves {
     pub color: Option<WaveColorPreview>,
     pub three_band: Option<Wave3Band>,
+    /// PWV5 colour scroll wave (150 columns per second).
+    pub scroll: Option<WaveColorScroll>,
+    /// PQTZ beat grid from the .DAT.
+    pub grid: Vec<Beat>,
+    /// Cues stored in the .EXT (device tracks; collection cues live in the database).
     pub cues: Vec<CueMark>,
 }
 
+#[derive(Clone)]
 pub struct CueMark {
     pub ms: u32,
+    /// Loop end.
+    pub end_ms: Option<u32>,
     pub hot: Option<char>,
     pub color: egui::Color32,
+}
+
+/// Hot-cue colour codes (`ColorTableIndex`) whose RGB the fixture stick's PCO2 tags show
+/// (docs/re/anlz.md § PCO2). The full 64-entry palette is not decoded yet.
+pub const HOT_CUE_COLORS: [(u8, [u8; 3]); 8] = [
+    (8, [0x00, 0xC4, 0xFF]),
+    (19, [0x00, 0xFF, 0x30]),
+    (23, [0x33, 0xFF, 0x00]),
+    (32, [0xFF, 0xE8, 0x00]),
+    (36, [0xFF, 0x8C, 0x00]),
+    (38, [0xFF, 0x5E, 0x00]),
+    (43, [0xFF, 0x00, 0x17]),
+    (60, [0x4D, 0x00, 0xFF]),
+];
+
+/// Display colour of a hot cue's colour code (default green when unknown).
+pub fn hot_cue_color(code: Option<u8>) -> egui::Color32 {
+    code.and_then(|c| HOT_CUE_COLORS.iter().find(|(k, _)| *k == c))
+        .map_or(HOT_CUE_DEFAULT, |(_, [r, g, b])| egui::Color32::from_rgb(*r, *g, *b))
+}
+
+/// Memory-cue colours by `djmdCue.Color` slot, for display only (rekordbox's RGB values are open).
+pub const MEMORY_CUE_COLORS: [[u8; 3]; 8] = [
+    [0xF8, 0x70, 0xB4],
+    [0xE6, 0x2B, 0x2B],
+    [0xF0, 0x8C, 0x28],
+    [0xF0, 0xDC, 0x28],
+    [0x3C, 0xD2, 0x50],
+    [0x28, 0xC8, 0xD2],
+    [0x32, 0x6E, 0xF0],
+    [0x96, 0x50, 0xE6],
+];
+
+pub fn memory_cue_color(slot: Option<u8>) -> egui::Color32 {
+    slot.and_then(|s| MEMORY_CUE_COLORS.get(usize::from(s)))
+        .map_or(MEMORY_CUE, |[r, g, b]| egui::Color32::from_rgb(*r, *g, *b))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,7 +80,9 @@ fn read_sibling(dat: &Path, ext: &str) -> Option<AnlzFile> {
 pub fn load(dat: &Path) -> Option<TrackWaves> {
     let ext = read_sibling(dat, "EXT")?;
     let ex2 = read_sibling(dat, "2EX");
+    let grid = read_sibling(dat, "DAT").and_then(|f| f.beat_grid()).map(|g| g.beats).unwrap_or_default();
     let color = ext.sections_with(Tag::PWV4).next().and_then(|s| WaveColorPreview::decode(s).ok());
+    let scroll = ext.sections_with(Tag::PWV5).next().and_then(|s| WaveColorScroll::decode(s).ok());
     let three_band = ex2
         .as_ref()
         .and_then(|f| f.sections_with(Tag::PWV6).next().and_then(|s| Wave3Band::decode(s).ok()));
@@ -43,7 +90,7 @@ pub fn load(dat: &Path) -> Option<TrackWaves> {
     for list in ext.cue_lists_ext() {
         push_cues(&mut cues, &list);
     }
-    Some(TrackWaves { color, three_band, cues })
+    Some(TrackWaves { color, three_band, scroll, grid, cues })
 }
 
 fn push_cues(out: &mut Vec<CueMark>, list: &CueListExt) {
@@ -54,13 +101,20 @@ fn push_cues(out: &mut Vec<CueMark>, list: &CueListExt) {
             (Some(_), None) => HOT_CUE_DEFAULT,
             (None, _) => MEMORY_CUE,
         };
-        out.push(CueMark { ms: e.time_ms(), hot, color });
+        out.push(CueMark { ms: e.time_ms(), end_ms: e.loop_end_ms(), hot, color });
     }
 }
 
 /// Full-track overview with cue markers and an optional playhead; `duration_ms` maps times onto
 /// the width. A click returns the clicked position in ms.
-pub fn show_overview(ui: &mut egui::Ui, waves: &TrackWaves, duration_ms: u32, style: Style, playhead_ms: Option<f64>) -> Option<f64> {
+pub fn show_overview(
+    ui: &mut egui::Ui,
+    waves: &TrackWaves,
+    cues: &[CueMark],
+    duration_ms: u32,
+    style: Style,
+    playhead_ms: Option<f64>,
+) -> Option<f64> {
     let desired = egui::vec2(ui.available_width(), 56.0);
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
     let painter = ui.painter_at(rect);
@@ -116,7 +170,7 @@ pub fn show_overview(ui: &mut egui::Ui, waves: &TrackWaves, duration_ms: u32, st
         .map(|p| ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * duration_ms as f64);
 
     if duration_ms > 0 {
-        for cue in &waves.cues {
+        for cue in cues {
             let x = rect.left() + rect.width() * (cue.ms as f32 / duration_ms as f32).min(1.0);
             let top = rect.top();
             painter.line_segment([egui::pos2(x, top), egui::pos2(x, rect.bottom())], egui::Stroke::new(1.0, cue.color));
@@ -134,4 +188,67 @@ pub fn show_overview(ui: &mut egui::Ui, waves: &TrackWaves, duration_ms: u32, st
         }
     }
     clicked
+}
+
+/// Zoomed strip around `center_ms` (± `half_span_ms`): PWV5 columns, beat grid (downbeats
+/// brighter), cue markers with loop spans, and the position line in the middle. A click returns
+/// the clicked position in ms.
+pub fn show_detail(ui: &mut egui::Ui, waves: &TrackWaves, cues: &[CueMark], center_ms: f64, half_span_ms: f64) -> Option<f64> {
+    let desired = egui::vec2(ui.available_width(), 44.0);
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(0x0C, 0x0C, 0x0C));
+    let start = center_ms - half_span_ms;
+    let span = 2.0 * half_span_ms;
+    let x_of = |ms: f64| rect.left() + rect.width() * ((ms - start) / span) as f32;
+    let mid = rect.center().y;
+    if let Some(scroll) = &waves.scroll {
+        let per_ms = f64::from(scroll.columns_per_second.max(1)) / 1000.0;
+        let first = ((start * per_ms).floor().max(0.0)) as usize;
+        let last = (((start + span) * per_ms).ceil().max(0.0) as usize).min(scroll.len());
+        for i in first..last {
+            let Some(col) = scroll.column(i) else { continue };
+            let x0 = x_of(i as f64 / per_ms);
+            let x1 = x_of((i + 1) as f64 / per_ms).max(x0 + 1.0);
+            let h = f32::from(col.height) / 31.0 * (rect.height() / 2.0 - 2.0);
+            let [r, g, b] = col.rgb8();
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, mid - h), egui::pos2(x1, mid + h)), 0.0, egui::Color32::from_rgb(r, g, b));
+        }
+    }
+    for beat in &waves.grid {
+        let ms = f64::from(beat.time_ms);
+        if ms < start || ms > start + span {
+            continue;
+        }
+        let x = x_of(ms);
+        let (stroke, top) = if beat.beat_in_bar == 1 {
+            (egui::Stroke::new(1.5, egui::Color32::from_rgb(0xE0, 0x30, 0x30)), rect.top())
+        } else {
+            (egui::Stroke::new(1.0, egui::Color32::from_white_alpha(110)), rect.top() + rect.height() * 0.6)
+        };
+        painter.line_segment([egui::pos2(x, top), egui::pos2(x, rect.bottom())], stroke);
+    }
+    for cue in cues {
+        let x = x_of(f64::from(cue.ms));
+        if let Some(end) = cue.end_ms {
+            let x1 = x_of(f64::from(end));
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x, rect.top()), egui::pos2(x1, rect.bottom())), 0.0, cue.color.gamma_multiply(0.25));
+        }
+        if x < rect.left() || x > rect.right() {
+            continue;
+        }
+        painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(1.5, cue.color));
+        let marker = vec![egui::pos2(x - 5.0, rect.top()), egui::pos2(x + 5.0, rect.top()), egui::pos2(x, rect.top() + 7.0)];
+        painter.add(egui::Shape::convex_polygon(marker, cue.color, egui::Stroke::NONE));
+        if let Some(letter) = cue.hot {
+            painter.text(egui::pos2(x + 4.0, rect.top() + 7.0), egui::Align2::LEFT_TOP, letter, egui::FontId::proportional(10.0), cue.color);
+        }
+    }
+    let cx = rect.center().x;
+    painter.line_segment([egui::pos2(cx, rect.top()), egui::pos2(cx, rect.bottom())], egui::Stroke::new(1.5, egui::Color32::WHITE));
+    response
+        .clicked()
+        .then(|| response.interact_pointer_pos())
+        .flatten()
+        .map(|p| (start + f64::from((p.x - rect.left()) / rect.width()) * span).max(0.0))
 }

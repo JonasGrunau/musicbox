@@ -1,9 +1,10 @@
 use crate::actions::Action;
 use crate::devices::{DeviceState, Devices};
 use crate::editor::{Editor, Reply, Request};
+use crate::device_remove::{self, RemoveJob};
 use crate::export::{self, ExportJob};
 use crate::library::{LoadResult, spawn_load};
-use crate::{Args, browser, tree, waveform};
+use crate::{Args, browser, cue_panel, tree, waveform};
 use mb_library::{Command, NodeKind};
 use mb_core::{DbId, LibrarySnapshot};
 use std::collections::HashMap;
@@ -38,6 +39,8 @@ enum Dialog {
     Create { parent: Option<DbId>, kind: NodeKind, name: String },
     Rename { id: DbId, name: String },
     ConfirmRemove { ids: Vec<DbId> },
+    /// Remove lists (name paths) and tracks (device paths) from a device.
+    ConfirmDeviceRemove { device: usize, playlists: Vec<Vec<String>>, tracks: Vec<String>, orphans: bool },
 }
 
 pub struct App {
@@ -50,6 +53,7 @@ pub struct App {
     /// Source-library details for USB exports.
     export_source: Option<export::Source>,
     export: Option<ExportJob>,
+    remove: Option<RemoveJob>,
     editor: Option<Editor>,
     dialog: Option<Dialog>,
     /// Last editor message (status bar).
@@ -63,6 +67,11 @@ pub struct App {
     /// Preview player for one track (path of the open file).
     player: Option<(PathBuf, mb_player::Player)>,
     wave_style: waveform::Style,
+    /// Cues of the local library by content ID (`djmdCue`, loaded with the snapshot).
+    cues: HashMap<DbId, Vec<mb_library::Cue>>,
+    deck_edit: cue_panel::State,
+    /// Local track to select again once a reloaded snapshot is shown (edits keep the deck).
+    reselect: Option<DbId>,
 }
 
 static EMPTY: std::sync::LazyLock<LibrarySnapshot> = std::sync::LazyLock::new(LibrarySnapshot::default);
@@ -79,6 +88,7 @@ impl App {
             local_db: None,
             export_source: None,
             export: None,
+            remove: None,
             editor: None,
             dialog: None,
             edit_status: None,
@@ -90,6 +100,9 @@ impl App {
             waves: HashMap::new(),
             player: None,
             wave_style: waveform::Style::Rgb,
+            cues: HashMap::new(),
+            deck_edit: cue_panel::State::default(),
+            reselect: None,
         }
     }
 
@@ -106,7 +119,14 @@ impl App {
             self.loading = None;
             match result {
                 Ok(loaded) => {
+                    self.reselect = self
+                        .browser
+                        .selected
+                        .filter(|(library, _)| *library == LibraryRef::Local)
+                        .and_then(|(_, i)| self.library.tracks.get(i))
+                        .map(|t| t.id.clone());
                     self.library = loaded.snapshot;
+                    self.cues = loaded.cues;
                     self.export_source = Some(export::Source {
                         db_path: loaded.db_path.clone(),
                         passphrase: loaded.passphrase.clone(),
@@ -121,17 +141,18 @@ impl App {
         }
     }
 
-    /// Selected-track header: title/artist and the overview waveform.
-    fn deck(&mut self, ui: &mut egui::Ui) {
-        let track = self
-            .browser
-            .selected
-            .and_then(|(library, i)| self.snapshot(library).tracks.get(i))
-            .cloned();
+    /// Selected-track header: title/artist, the overview and detail waveforms, and for collection
+    /// tracks the cue and grid controls (`cue_panel`).
+    fn deck(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
+        let selected = self.browser.selected;
+        let track = selected.and_then(|(library, i)| self.snapshot(library).tracks.get(i)).cloned();
         let Some(track) = track else {
             ui.centered_and_justified(|ui| ui.weak("No track selected"));
-            return;
+            return Vec::new();
         };
+        let local = selected.is_some_and(|(library, _)| library == LibraryRef::Local);
+        let editing = self.editing();
+        self.deck_edit.follow(&track.id, track.bpm());
         let waves = track.analysis_path.as_ref().and_then(|path| {
             self.waves.entry(path.clone()).or_insert_with(|| waveform::load(path)).as_ref()
         });
@@ -139,11 +160,22 @@ impl App {
         let player = self.player.as_ref().filter(|(p, _)| *p == track.path).map(|(_, pl)| pl);
         let playing = player.is_some_and(|p| p.is_playing());
         let playhead = player.map(|p| p.position_ms());
+        let position = playhead.unwrap_or(self.deck_edit.cursor_ms);
         if playing {
             ui.ctx().request_repaint();
         }
+        let db_cues: &[mb_library::Cue] = if local { self.cues.get(&track.id).map_or(&[], Vec::as_slice) } else { &[] };
+        let marks = match (local, waves) {
+            (true, _) => cue_panel::marks(db_cues),
+            (false, Some(w)) => w.cues.clone(),
+            (false, None) => Vec::new(),
+        };
+        let duration = cue_panel::duration_ms(&track, waves);
         let mut play_clicked = false;
         let mut seek_to = None;
+        let mut jump = None;
+        let mut actions = Vec::new();
+        let deck_edit = &mut self.deck_edit;
         ui.horizontal(|ui| {
             artwork(ui, track.artwork_path.as_deref(), 76.0);
             ui.vertical(|ui| {
@@ -157,17 +189,34 @@ impl App {
                     });
                 });
                 match waves {
-                    Some(w) => seek_to = waveform::show_overview(ui, w, track.length_seconds.unwrap_or(0) * 1000, *wave_style, playhead),
+                    Some(w) => seek_to = waveform::show_overview(ui, w, &marks, duration, *wave_style, Some(position)),
                     None => {
                         ui.weak("Not analysed");
                     }
                 }
             });
         });
+        if local && let Some(w) = waves {
+            jump = waveform::show_detail(ui, w, &marks, position, 4_000.0);
+            actions = cue_panel::controls(ui, &track, db_cues, &w.grid, duration, position, editing, deck_edit, &mut jump);
+        }
+        if let Some(ms) = jump {
+            // Moving the position: the open player seeks (and keeps its play state), otherwise
+            // only the cursor moves; nothing starts playing.
+            match self.player.as_ref().filter(|(p, _)| *p == track.path) {
+                Some((_, player)) if player.is_playing() => player.play_from_ms(ms),
+                Some((_, player)) => player.seek_ms(ms),
+                None => self.deck_edit.cursor_ms = ms,
+            }
+        }
         let space = ui.ctx().input(|i| i.key_pressed(egui::Key::Space)) && !ui.ctx().egui_wants_keyboard_input();
+        if (play_clicked || space) && playhead.is_none() && self.deck_edit.cursor_ms > 0.0 && seek_to.is_none() {
+            seek_to = Some(self.deck_edit.cursor_ms);
+        }
         if play_clicked || space || seek_to.is_some() {
             self.preview(&track.path, play_clicked || space, seek_to);
         }
+        actions
     }
 
     /// Opens the preview player for `path` if needed, then toggles playback and/or seeks.
@@ -224,6 +273,10 @@ impl App {
                 if ui.small_button("Cancel").clicked() {
                     job.cancel();
                 }
+            } else if let Some(job) = &self.remove {
+                ui.separator();
+                ui.spinner();
+                ui.label(format!("Removing from {}…", job.device_name));
             } else if let Some(msg) = &self.edit_status {
                 ui.separator();
                 ui.weak(msg);
@@ -249,7 +302,8 @@ impl App {
                 if !running.is_empty() {
                     self.edit_status = Some(format!("Quit {} first", running.join(", ")));
                 } else if let Some((db, passphrase)) = &self.local_db {
-                    self.editor = Some(Editor::start(ui.ctx(), db, passphrase, self.args.backup_root.clone()));
+                    let analysis_root = self.export_source.as_ref().map(|s| s.analysis_root.clone());
+                    self.editor = Some(Editor::start(ui.ctx(), db, passphrase, self.args.backup_root.clone(), analysis_root));
                     self.edit_status = Some("Backing up the library…".into());
                 }
             } else {
@@ -287,6 +341,10 @@ impl App {
                 }
             }
         }
+        if reload {
+            // Grid edits rewrite the analysis files.
+            self.waves.clear();
+        }
         if reload && self.loading.is_none() {
             self.loading = Some(spawn_load(ctx.clone(), self.args.clone()));
         }
@@ -305,6 +363,7 @@ impl App {
                 Action::AskRename { id, name } => self.dialog = Some(Dialog::Rename { id, name }),
                 Action::AskRemoveFromCollection(ids) => self.dialog = Some(Dialog::ConfirmRemove { ids }),
                 Action::Export { playlist, device } => self.start_export(playlist, device),
+                Action::AskRemoveFromDevice { device, playlists, tracks } => self.ask_remove_from_device(device, playlists, tracks),
                 Action::CancelExport => {
                     if let Some(job) = &self.export {
                         job.cancel();
@@ -327,6 +386,44 @@ impl App {
             return;
         }
         self.export = Some(ExportJob::start(&self.ctx, source, playlist, target.root.clone(), target.name.clone()));
+    }
+
+    fn ask_remove_from_device(&mut self, device: usize, playlists: Vec<Vec<String>>, tracks: Vec<PathBuf>) {
+        let Some(target) = self.devices.list.get(device) else { return };
+        if let Some(reason) = &target.write_refusal {
+            self.edit_status = Some(reason.clone());
+            return;
+        }
+        if self.export.is_some() || self.remove.is_some() {
+            self.edit_status = Some("Wait for the running device job to finish".into());
+            return;
+        }
+        let tracks: Vec<String> = tracks.iter().filter_map(|p| device_remove::device_path(&target.root, p)).collect();
+        if playlists.is_empty() && tracks.is_empty() {
+            return;
+        }
+        self.dialog = Some(Dialog::ConfirmDeviceRemove { device, playlists, tracks, orphans: true });
+    }
+
+    fn start_remove(&mut self, device: usize, playlists: Vec<Vec<String>>, tracks: Vec<String>, orphans: bool) {
+        let Some(target) = self.devices.list.get(device) else { return };
+        // On-stick files the local library still points at stay (`delete_device_song_file`).
+        let local_paths = self.library.tracks.iter().filter(|t| t.path.starts_with(&target.root)).map(|t| t.path.clone()).collect();
+        let request = mb_usb::RemoveRequest { playlists, tracks, delete_orphan_tracks: orphans, local_paths };
+        self.remove = Some(RemoveJob::start(&self.ctx, target.root.clone(), target.name.clone(), request));
+    }
+
+    fn poll_remove(&mut self) {
+        let Some(job) = &mut self.remove else { return };
+        if let Some(result) = job.poll() {
+            let root = job.device_root.clone();
+            self.edit_status = Some(match result {
+                Ok(summary) => format!("{summary} on {}", job.device_name),
+                Err(e) => format!("Remove failed: {e}"),
+            });
+            self.remove = None;
+            self.devices.reload(&self.ctx, &root);
+        }
     }
 
     fn poll_export(&mut self) {
@@ -362,6 +459,7 @@ impl App {
             Dialog::Create { .. } => "New Playlist",
             Dialog::Rename { .. } => "Rename",
             Dialog::ConfirmRemove { .. } => "Remove from Collection",
+            Dialog::ConfirmDeviceRemove { .. } => "Remove from Device",
         };
         egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             match dialog {
@@ -372,6 +470,20 @@ impl App {
                         edit.request_focus();
                     }
                     submit |= enter && !name.trim().is_empty();
+                }
+                Dialog::ConfirmDeviceRemove { device, playlists, tracks, orphans } => {
+                    let name = self.devices.list.get(*device).map(|d| d.name.as_str()).unwrap_or("the device");
+                    let what = match (playlists.len(), tracks.len()) {
+                        (0, n) => format!("{n} track(s)"),
+                        (1, 0) => format!("the playlist \"{}\"", playlists[0].join(" / ")),
+                        (p, 0) => format!("{p} playlists"),
+                        (p, n) => format!("{p} playlist(s) and {n} track(s)"),
+                    };
+                    ui.label(format!("Remove {what} from {name}?"));
+                    ui.weak("Files that no other list or library uses are deleted from the device.");
+                    if !playlists.is_empty() {
+                        ui.checkbox(orphans, "Also delete tracks no other playlist uses");
+                    }
                 }
                 Dialog::ConfirmRemove { ids } => {
                     ui.label(format!("Remove {} track(s) from the collection? Audio files stay on disk.", ids.len()));
@@ -387,6 +499,10 @@ impl App {
                 Some(Dialog::Create { parent, kind, name }) => Command::CreatePlaylist { parent, name, kind },
                 Some(Dialog::Rename { id, name }) => Command::RenamePlaylist { id, name },
                 Some(Dialog::ConfirmRemove { ids }) => Command::RemoveTracks { ids },
+                Some(Dialog::ConfirmDeviceRemove { device, playlists, tracks, orphans }) => {
+                    self.start_remove(device, playlists, tracks, orphans);
+                    return;
+                }
                 None => return,
             };
             self.run(command);
@@ -457,10 +573,13 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.poll_editor(&ctx);
         self.poll_export();
+        self.poll_remove();
         let mut actions = self.global_input(&ctx);
 
         egui::Panel::bottom("status").exact_size(22.0).show(ui, |ui| self.status(ui));
-        egui::Panel::top("deck").exact_size(96.0).show(ui, |ui| self.deck(ui));
+        let local_track = self.browser.selected.is_some_and(|(library, _)| library == LibraryRef::Local);
+        let deck_actions = egui::Panel::top("deck").exact_size(if local_track { 186.0 } else { 96.0 }).show(ui, |ui| self.deck(ui)).inner;
+        actions.extend(deck_actions);
         let editing = self.editing();
         egui::Panel::left("tree")
             .resizable(true)
@@ -475,6 +594,14 @@ impl eframe::App for App {
             let edit = browser::EditCtx { enabled: editing, playlists: &self.library.playlists };
             actions.extend(browser::show(ui, library, &self.source, &mut self.browser, &edit));
         });
+        // The table drops its selection when the snapshot changes; put the deck's track back.
+        if let Some(id) = self.reselect.take()
+            && self.source.library == LibraryRef::Local
+            && let Some(i) = self.library.tracks.iter().position(|t| t.id == id)
+        {
+            self.browser.selected = Some((LibraryRef::Local, i));
+            self.browser.selection.insert(i);
+        }
         self.dialogs(&ctx);
         self.apply(actions);
     }

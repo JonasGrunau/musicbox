@@ -23,6 +23,9 @@ fn to_track(t: &DeviceTrack, stick_root: &Path) -> Track {
         remixer: t.remixer.clone(),
         composer: t.composer.clone(),
         original_artist: t.original_artist.clone(),
+        album_artist: String::new(),
+        mix_name: t.subtitle.clone(),
+        file_name: t.file_name.clone(),
         key: t.key.clone(),
         color: t.color,
         bpm_x100: t.bpm_x100,
@@ -40,6 +43,7 @@ fn to_track(t: &DeviceTrack, stick_root: &Path) -> Track {
         file_type: FileType::from_code(t.file_type),
         path: on_stick(stick_root, &t.path),
         date_added: t.date_added.clone(),
+        date_created: t.date_created.clone(),
         release_date: t.release_date.clone(),
         analysis_path: Some(t.analysis_path.as_str())
             .filter(|p| !p.is_empty())
@@ -96,6 +100,7 @@ impl DeviceLibrary {
             history_entries,
             my_tags,
             my_tag_entries,
+            smart_lists: Default::default(),
         }
     }
 }

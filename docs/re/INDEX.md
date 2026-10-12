@@ -5,7 +5,7 @@ Status values: **verified** (checked against real files or a trace), **hypothesi
 | Spec | Subsystem | Status |
 |---|---|---|
 | [masterdb.md](masterdb.md) | master.db location, key, schema, write rules | key + read verified; writes hypothesis |
-| [ops/INDEX.md](ops/INDEX.md) | exact rekordbox statement sequences per library operation (from SQL trace) | verified for startup, import, remove, playlist create/add, analysis, exports, shutdown; agent-side writes reconstructed |
+| [ops/INDEX.md](ops/INDEX.md) | exact rekordbox statement sequences per library operation (from SQL trace) | verified for startup, import, remove, playlist create/add, analysis, exports, shutdown; agent-side writes reconstructed; cue and grid edits binary-derived (`ops/edit-cues.md`, `ops/edit-grid.md`), user check pending |
 | [masterdb/schema.sql](masterdb/schema.sql) | master.db DDL (48 tables) | verified |
 | [anlz.md](anlz.md) | ANLZ PMAI container and tags | container + all typed tags verified (3,132 files incl. PSSI/PVDI); USB folder hash verified (704/704); local→USB conversion `to_usb` byte-exact on 471 oracle files |
 | [pdb.md](pdb.md) | export.pdb / exportExt.pdb (DeviceSQL) | reader verified; writer (DeviceSQL storage model) reproduces RBTEST export.pdb 78/78 and exportExt.pdb 18/18 pages byte-exact via replay; pdb-lint clean |

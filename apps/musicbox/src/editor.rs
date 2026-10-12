@@ -27,7 +27,9 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn start(ctx: &egui::Context, db_path: &Path, passphrase: &str, backup_root: Option<PathBuf>) -> Self {
+    /// `analysis_root` lets grid edits find the analysis files; they are backed up into the
+    /// session backup folder before their first change.
+    pub fn start(ctx: &egui::Context, db_path: &Path, passphrase: &str, backup_root: Option<PathBuf>, analysis_root: Option<PathBuf>) -> Self {
         let (tx, requests) = channel::<Request>();
         let (replies, rx) = channel::<Reply>();
         let (ctx, db_path, passphrase) = (ctx.clone(), db_path.to_path_buf(), passphrase.to_owned());
@@ -44,8 +46,14 @@ impl Editor {
                 Ok(lib) => lib,
                 Err(e) => return send(Reply::Failed(e.to_string())),
             };
+            if let Some(root) = analysis_root {
+                lib.set_analysis_root(root);
+            }
             match mb_masterdb::backup_library(&db_path, &passphrase, &backup_root) {
-                Ok(dir) => send(Reply::Ready { backup: dir }),
+                Ok(dir) => {
+                    lib.set_anlz_backup(&dir);
+                    send(Reply::Ready { backup: dir })
+                }
                 Err(e) => return send(Reply::Failed(format!("backup failed, editing disabled: {e}"))),
             }
             let mut history = History::default();
@@ -94,6 +102,7 @@ pub fn describe(effect: &mb_library::Effect) -> String {
         Effect::PlaylistCreated { .. } => "Playlist created".into(),
         Effect::PlaylistsRestored { ids } => format!("Restored {} list(s)", ids.len()),
         Effect::EntriesAdded { entry_ids } => format!("Added {} track(s) to the playlist", entry_ids.len()),
+        Effect::CueAdded { .. } => "Cue added".into(),
         Effect::Done => "Done".into(),
         Effect::Unchanged => "No change".into(),
     }

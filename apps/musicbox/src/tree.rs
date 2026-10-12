@@ -19,7 +19,7 @@ pub fn show(
     let targets: Vec<(usize, String, Option<String>)> =
         devices.list.iter().enumerate().map(|(i, d)| (i, d.name.clone(), d.write_refusal.clone())).collect();
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        let mut ctx = Ctx { targets: &targets, library_ref: LibraryRef::Local, library, source, editing, actions: &mut actions };
+        let mut ctx = Ctx { targets: &targets, library_ref: LibraryRef::Local, library, source, editing, device: None, actions: &mut actions };
         library_lists(ui, "Collection", &mut ctx);
         if !devices.list.is_empty() {
             ui.add_space(8.0);
@@ -44,6 +44,7 @@ pub fn show(
                             library: snapshot,
                             source: &mut *source,
                             editing: false,
+                            device: device.write_refusal.is_none().then_some(i),
                             actions: &mut actions,
                         };
                         library_lists(ui, "All Tracks", &mut ctx);
@@ -62,6 +63,9 @@ struct Ctx<'a> {
     source: &'a mut Source,
     /// Write actions are offered (local library only).
     editing: bool,
+    /// Index of the device these lists belong to, when musicbox may write to it ("Remove from
+    /// device").
+    device: Option<usize>,
     actions: &'a mut Vec<Action>,
 }
 
@@ -145,6 +149,26 @@ fn node_menu(ui: &mut egui::Ui, node: &PlaylistNode, actions: &mut Vec<Action>) 
     }
 }
 
+/// Names from the top level down to `node` (how `mb-usb` finds a list in both device DBs).
+fn name_path(nodes: &[PlaylistNode], node: &PlaylistNode) -> Vec<String> {
+    let mut path = vec![node.name.clone()];
+    let mut parent = node.parent.clone();
+    for _ in 0..nodes.len() {
+        let Some(n) = parent.as_ref().and_then(|p| nodes.iter().find(|n| &n.id == p)) else { break };
+        path.push(n.name.clone());
+        parent = n.parent.clone();
+    }
+    path.reverse();
+    path
+}
+
+fn remove_menu(ui: &mut egui::Ui, device: usize, path: Vec<String>, actions: &mut Vec<Action>) {
+    if ui.button("Remove from device…").clicked() {
+        actions.push(Action::AskRemoveFromDevice { device, playlists: vec![path], tracks: Vec::new() });
+        ui.close();
+    }
+}
+
 fn sorted_children<'a>(nodes: &'a [PlaylistNode], parent: Option<&DbId>) -> Vec<&'a PlaylistNode> {
     let mut out: Vec<_> = nodes.iter().filter(|n| n.parent.as_ref() == parent).collect();
     out.sort_by_key(|n| n.seq);
@@ -161,6 +185,9 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mu
                     .show(ui, |ui| children(ui, section, Some(&node.id), ctx));
                 if editable {
                     header.header_response.context_menu(|ui| node_menu(ui, node, ctx.actions));
+                } else if let Some(device) = ctx.device.filter(|_| section == Section::Playlists) {
+                    let path = name_path(section.nodes(ctx.library), node);
+                    header.header_response.context_menu(|ui| remove_menu(ui, device, path, ctx.actions));
                 }
             }
             PlaylistKind::Playlist | PlaylistKind::Smart => {
@@ -194,6 +221,9 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mu
                             node_menu(ui, node, ctx.actions);
                         }
                     });
+                } else if let Some(device) = ctx.device.filter(|_| section == Section::Playlists) {
+                    let path = name_path(section.nodes(ctx.library), node);
+                    response.context_menu(|ui| remove_menu(ui, device, path, ctx.actions));
                 }
                 if editable && node.kind == PlaylistKind::Playlist {
                     if response.dnd_hover_payload::<TrackDrag>().is_some() {
