@@ -19,7 +19,7 @@ fn lanes(x: &[f64], f: impl Fn(f64, f64) -> f64) -> f64 {
     }
     let mut acc = 0.0;
     let mut i = 0;
-    if n - 1 >= 7 {
+    if n > 7 {
         let mut a = [0.0f64; 8];
         let full = n & !7;
         for blk in x[..full].chunks_exact(8) {
@@ -69,19 +69,12 @@ pub fn min_val(x: &[f64]) -> f64 {
 /// `MatArrayFloat::sort_descend_idx(1)`: sorts the values descending (stable) and returns the
 /// 1-based original positions.
 pub fn sort_descend_idx(x: &mut [f64]) -> Vec<i32> {
-    let mut v: Vec<(f64, i32)> = x.iter().enumerate().map(|(i, &v)| (v, i as i32 + 1)).collect();
+    let mut v: Vec<(f64, i32)> = x
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, i as i32 + 1))
+        .collect();
     v.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    for (d, s) in x.iter_mut().zip(&v) {
-        *d = s.0;
-    }
-    v.into_iter().map(|s| s.1).collect()
-}
-
-/// `MatArrayInt::sort_ascend_idx(1)`: sorts ascending (stable) and returns the 1-based
-/// original positions.
-pub fn sort_ascend_idx(x: &mut [i32]) -> Vec<i32> {
-    let mut v: Vec<(i32, i32)> = x.iter().enumerate().map(|(i, &v)| (v, i as i32 + 1)).collect();
-    v.sort_by_key(|s| s.0);
     for (d, s) in x.iter_mut().zip(&v) {
         *d = s.0;
     }

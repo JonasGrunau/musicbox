@@ -178,6 +178,7 @@ fn loudness_matches_rekordbox() {
                         loudness: true,
                         beats: false,
                         phrase: false,
+                        key: false,
                     };
                     let l = mb_analysis::analyze(&t.path, opts)
                         .unwrap()
@@ -246,6 +247,7 @@ fn beats_match_rekordbox() {
                         loudness: false,
                         beats: true,
                         phrase: true,
+                        key: false,
                     };
                     let g = mb_analysis::analyze(&t.path, opts).unwrap().beats.unwrap();
                     let rb = t.dat.as_ref().unwrap().beat_grid().unwrap();

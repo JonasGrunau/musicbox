@@ -2,7 +2,7 @@
 //! `RhythmPatternAnalyze_init` @0x10222f000 and `RhythmPatternAnalyze` @0x10222f334
 //! (`analysis-phrase.md` § 4.1–4.2).
 
-use super::filter::{prewarp, CFilter, SQRT2};
+use super::filter::{CFilter, SQRT2, prewarp};
 use super::mat;
 
 /// `BeatsSamplesCalc(x, fs, bpm, fb_ms)`: 1-based beat positions at `fs`, the last one
@@ -15,10 +15,10 @@ pub fn beats_samples(len: usize, fs: f64, bpm: f64, fb_ms: i32) -> Vec<i32> {
     let mut beats: Vec<i32> = (0..n)
         .map(|i| period.mul_add(i as f64, off as f64 + 1.5) as i32)
         .collect();
-    if let Some(last) = beats.last_mut() {
-        if *last > len as i32 {
-            *last = len as i32;
-        }
+    if let Some(last) = beats.last_mut()
+        && *last > len as i32
+    {
+        *last = len as i32;
     }
     beats
 }
@@ -47,11 +47,17 @@ impl RhythmPattern {
     /// `RhythmPatternAnalyze_init(0.0, 0, 0.0001, fs)`.
     pub fn new(fs: f64) -> Self {
         let w = prewarp(1256.6370614359173, fs);
-        let low = if near(fs, 5512.49, 5512.51) || near(fs, 5999.99, 6000.01) || near(fs, 3999.99, 4000.01) {
+        let low = if near(fs, 5512.49, 5512.51)
+            || near(fs, 5999.99, 6000.01)
+            || near(fs, 3999.99, 4000.01)
+        {
             let a = CFilter::low2(w, 1.8477590650225735, fs);
             let b = CFilter::low2(w, 0.7653668647301797, fs);
             vec![a, b, a, b]
-        } else if near(fs, 1378.115, 1378.135) || near(fs, 1499.99, 1500.01) || near(fs, 999.99, 1000.01) {
+        } else if near(fs, 1378.115, 1378.135)
+            || near(fs, 1499.99, 1500.01)
+            || near(fs, 999.99, 1000.01)
+        {
             vec![CFilter::low2(w, SQRT2, fs)]
         } else {
             Vec::new()
@@ -100,7 +106,11 @@ impl RhythmPattern {
         let q = pf * 0.25;
         let win = (q + 0.5) as i32;
         let s1 = start + 1;
-        let found = if nb < 2 { 0 } else { preroll(&env, start, bar, nb, p, pf, barf, win) };
+        let found = if nb < 2 {
+            0
+        } else {
+            preroll(&env, start, bar, nb, p, pf, barf, win)
+        };
         let end = start + nraw * p;
         self.offset = found;
         // param_6 = 1: the call's own offset is used.
@@ -181,7 +191,16 @@ fn argmax16(v: &[f64; 16]) -> (f64, usize) {
 /// first bar, looking back from each for the onset valley; returns how many samples before
 /// the bar line the rise starts (0 when none qualifies within 8 tries).
 #[allow(clippy::too_many_arguments)]
-fn preroll(env: &[f64], start: i32, bar: i32, nb: i32, p: i32, pf: f64, barf: f64, win: i32) -> i32 {
+fn preroll(
+    env: &[f64],
+    start: i32,
+    bar: i32,
+    nb: i32,
+    p: i32,
+    pf: f64,
+    barf: f64,
+    win: i32,
+) -> i32 {
     let s1 = start + 1;
     let n = (nb - 1) * bar;
     let from = (s1 + bar - 1) as usize;

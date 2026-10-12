@@ -1,10 +1,10 @@
 {
-  "scorecard": "beat grid + BPM (Normal mode, BALib v1)",
+  "scorecard": "beat grid + BPM (Normal mode, BALib v1, with the phrase pass's downbeat shift)",
   "date": "2026-10-12",
   "rekordbox": "7.2.19.0342",
   "macos": "27.0",
-  "code": "crates/mb-analysis/src/beats/",
-  "spec": "docs/re/analysis-beats.md",
+  "code": "crates/mb-analysis/src/beats/, crates/mb-analysis/src/phrase/ (grid shift)",
+  "spec": "docs/re/analysis-beats.md, docs/re/analysis-phrase.md",
   "command": "cargo run --release -p mb-analysis --example beat_score  (--verbose lists every track; --dump prints beats)",
   "test": "cargo test --release -p mb-analysis --test oracle beats_match_rekordbox  (probes; MB_ORACLE_FULL=1 for all 161)",
   "fixture": "oracle-a (Normal mode, BPM range 70-180, high precision off, phrase analysis on)",
@@ -12,21 +12,22 @@
   "tracks_note": "the 161 oracle-a tracks with a PQT2 (analysed by rekordbox itself); the 8 shipped sampler loops carry preset grids",
   "bpm_x100_exact": 161,
   "beat_count_exact": 161,
-  "pqtz_pqt2_identical": 140,
-  "bar_numbers_match": 151,
+  "pqtz_pqt2_identical": 160,
+  "bar_numbers_match": 161,
   "beats": {
     "total": 94897,
-    "exact_ms": 92502,
-    "within_1ms": 92502,
-    "share_within_1ms": 0.975
+    "exact_ms": 94769,
+    "within_1ms": 94769,
+    "share_within_1ms": 0.9987
   },
   "targets": {
     "bpm_x100_exact": ">= 99%: met (100%)",
-    "beats_within_1ms": ">= 99.5%: not met (97.5%); every miss is the phrase pass's whole-grid shift",
-    "downbeat": ">= 99%: not met (151/161 = 93.8%); every miss is the phrase pass's renumbering"
+    "beats_within_1ms": ">= 99.5%: met (99.87%); every miss is the one 96 kHz click probe",
+    "downbeat": ">= 99%: met (161/161)"
   },
   "phrase_pass_moved": {
-    "cause": "CBeatAnalyzeThread::analyze moves the grid to SongStructureAnalyze's first downbeat (spec § 8); not ported",
+    "cause": "CBeatAnalyzeThread::analyze moves the grid to SongStructureAnalyze's first downbeat (analysis-beats.md § 8, analysis-phrase.md); ported (stages A/B)",
+    "result": "all 21 moved grids now match rekordbox exactly",
     "invariant": "BPM, beat count, spacing, per-beat tempo and PQT2 µs remainders still match on all 21",
     "tracks": [
       {"path": "probes/aiff_44k16/click_128_offset1234.aiff", "shift_ms": 936},
@@ -52,7 +53,13 @@
       {"path": "real/flac/Aura Vortex - Futura (Original Mix).flac", "shift_ms": 0, "bars_renumbered": true}
     ]
   },
-  "unmoved_copies_identical": "the 5 click_128_offset1234 copies without the phrase shift (mp3 x3, m4a aac, one wav) equal rekordbox's grid exactly, starting at 296/320/343 ms",
+  "unmoved_copies_identical": "of the 5 click_128_offset1234 copies rekordbox did not move (mp3 x3, m4a aac, wav 96k), we leave the 4 MP3/AAC copies alone and match exactly",
+  "phrase_pass_miss": {
+    "path": "probes/wav_96k32f/click_128_offset1234.wav",
+    "ours": "moved +936 ms onto the first kick (first beat 1232 ms)",
+    "rekordbox": "not moved (first beat 296 ms), although its PSSI shows the pass ran",
+    "hypothesis": "BeatposCorrection2016's digital-silence test before the onset: our 96->48 kHz SRC output is exactly zero up to the click; rekordbox's re-read stream probably is not (resampler priming after the rewind, or a one-sample offset). analysis-phrase.md § 6, § 10"
+  },
   "oracle_b": "not applicable: high precision on (BALib v2 + madmom), see spec § 9",
-  "runtime": "about 0.9 s CPU per track including decode (161 tracks in 12 s on 12 threads)"
+  "runtime": "about 1 s CPU per track including decode and the phrase pass (161 tracks in 25 s on 12 threads)"
 }

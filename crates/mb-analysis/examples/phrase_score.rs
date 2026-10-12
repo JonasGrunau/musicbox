@@ -17,7 +17,11 @@ fn main() {
         eprintln!("fixtures/{fixture} missing");
         return;
     };
-    for t in tracks.iter().filter(|t| filter.as_ref().is_none_or(|f| t.path.to_string_lossy().contains(f.as_str()))) {
+    for t in tracks.iter().filter(|t| {
+        filter
+            .as_ref()
+            .is_none_or(|f| t.path.to_string_lossy().contains(f.as_str()))
+    }) {
         let pssi = t
             .ext
             .as_ref()

@@ -162,22 +162,20 @@ Three of the eight demo tracks that an untraced session re-added at 22:23 end at
 - **Fixtures agree:** `sandbox-initial` (phrase/vocal off, network analysis on) ends at 0x2C060E; oracle-a/oracle-b (phrase/vocal on) at 0x1D060E.
 
 ## musicbox (`mb_library::analyse`, verified 2026-10-12)
-- **`analyse_track` (pure, no database).** Decodes with `mb-audio` and runs `mb-analysis` (8 waveform tags, auto-gain, Normal-mode beat grid). It builds the three files in the order above, plus the `djmdContent` columns and the `djmdMixerParam` words.
-  - Test: `crates/mb-library/tests/analyse_ops.rs` (`MB_ORACLE_FULL=1` for all tracks). 161/161 match, except PSSI/PVDI and 21 grids the phrase pass moves; mixer row and columns are equal.
+- **`analyse_track` (pure, no database).** Decodes with `mb-audio` and runs `mb-analysis` (8 waveform tags, auto-gain, Normal-mode beat grid, phrase shift, key). It builds the three files in the order above, plus the `djmdContent` columns, the `djmdMixerParam` words and the key's `ScaleName`.
+  - Test: `crates/mb-library/tests/analyse_ops.rs` (`MB_ORACLE_FULL=1` for all tracks), with phrase analysis on as for oracle-a. All 161 tracks match apart from PSSI/PVDI; one grid (the 96 kHz click probe) is placed differently by the phrase pass. Mixer rows, columns and keys are equal.
 - **`Command::ApplyAnalysis`.** Replays the trace in one transaction:
   1. The request (re-analysis only).
   2. The start: `Analysed` 74/106, `ContentLink` | 0x50.
   3. The files.
-  4. The completion: `AnalysisDataPath`, `AnalysisUpdated`, BPM/SampleRate/BitRate/BitDepth/Length, `TrackInfoUpdated`, a `djmdMixerParam` insert when missing, `Analysed` 105, the final `ContentLink`.
+  4. The completion: `AnalysisDataPath`, `AnalysisUpdated`, BPM/SampleRate/BitRate/BitDepth/Length, `TrackInfoUpdated`, a `djmdMixerParam` insert when missing, then the key block (`djmdKey` row by `ScaleName`, inserted when missing; `KeyID`; orphaned key rows removed; `TrackInfoUpdated`), `Analysed` 105, the final `ContentLink`.
   5. The playlist timestamps.
   6. The agent's three `contentFile` rows (MD5, size; only new or changed files).
 
   It refuses a locked track. The previous files go to the session backup.
-- **Not computed yet** (phrase, vocal, key):
-  - PSSI and PVDI are carried over from the previous files when the track had them; their `ContentLink` bits are kept only then.
-  - The key block (`djmdKey`/`KeyID`) and its `TrackInfoUpdated` bump are skipped.
-- **Inverse `Command::RestoreAnalysis`.** Puts back the previous files (or removes them), the columns and the `contentFile` hash/size. It deletes the inserted mixer and `contentFile` rows, and bumps `AnalysisUpdated` once (counters only move forward).
-- **Analysis settings.** Normal mode only (BALib v1); high precision and Dynamic are not ported (`analysis-beats.md` § 9). The BPM range is the 70–180 preset. `AutoGain` from `rekordbox3.settings` decides the mixer row.
+- **Not computed yet** (phrase sections, vocal): PSSI and PVDI are carried over from the previous files when the track had them; their `ContentLink` bits are kept only then. The phrase pass's two `AnalysisUpdated` bumps after the key block are skipped.
+- **Inverse `Command::RestoreAnalysis`.** Puts back the previous files (or removes them), the columns and the `contentFile` hash/size. It deletes the inserted mixer and `contentFile` rows, and bumps `AnalysisUpdated` once (counters only move forward). The previous `KeyID` comes back; when the analysis's orphan cleanup removed its row, a row with the old `ScaleName` is found or created (as an undone key edit does), the analysis's key row goes if nothing uses it, and `TrackInfoUpdated` is bumped.
+- **Analysis settings.** Normal mode only (BALib v1); high precision and Dynamic are not ported (`analysis-beats.md` § 9). The BPM range is the 70–180 preset. `AutoGain` from `rekordbox3.settings` decides the mixer row; `enableKeyAnalysis` (on when missing, *hypothesis*) the key block; `trackAnalysisSettingsSongStruct` the phrase pass.
 - **Not done:**
   - the embedded-artwork extraction of a first analysis (`ImagePath`, `artwork.jpg`);
   - `.3EX` embeddings;

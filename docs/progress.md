@@ -9,8 +9,37 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | M3 | export done; **CDJ check pending** (studio) | 1faf385 |
 | M4 | done: deletes (both DBs + files + sync files), old-stick conversion, `playlists3*.sync`, foreign My Tags kept, row paths stay taken, ≥ 4 GiB on FAT32 planned as failed copy; export onto a reference-stick clone keeps every row and file ; My Settings editor (466caa5) | 5abe8e9, 22d7451, d846f4a, eb85e3d, 1729250, 466caa5 |
 | M5 | built from the binary (no trace has a cue write): cue/grid ops with undo, deck UI; device cues built from `djmdCue` (410/410 reference-stick cue sets byte-exact). rekordbox check passed; grid edit byte-exact vs rekordbox | 0d0d509, b3e4840 |
-| M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact 169/169 (AAC fixed: the decode depended on the stack alignment at `AudioConverterFillComplexBuffer`, `decode.md` § 6); Normal-mode beat grid: BPM 161/161, grids identical 140/161, the other 21 moved by the phrase pass (not ported) | 617fc5f, 8def9c4 |
+| M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact 169/169 (AAC fixed: the decode depended on the stack alignment at `AudioConverterFillComplexBuffer`, `decode.md` § 6); Normal-mode beat grid: BPM 161/161, grids identical 160/161 with the phrase pass's downbeat shift; phrase analysis **paused after stage C / partial D** (no PSSI yet); key 169/169 (oracle-a, uncommitted) | 617fc5f, 8def9c4, 9e29e7d |
 | M7 | smart lists (rules, editor, XML, USB export); import from device (tracks, playlists, histories); app bundle (`tools/bundle/bundle.sh`); key display follows `ShowOriginalKey`/`KeyStringSetting`. rekordbox.xml export (byte-exact vs oracle-a) and import. **rekordbox checks pending** (`m7_check`, device import, XML) | 0d0d509, 88593cc, d0babf3, e93d3a4, 3997b37, 53af01b, 35c036c |
+
+**M6 key (done; awaiting commit):**
+- **Result:** the key rekordbox stored, from both rekordbox's grid and our own pass:
+  - oracle-a: 169/169 tracks.
+  - oracle-b: 169/169 from its own grid, 160/169 from ours. The 9 misses come only from oracle-b's high-precision grids; for all 9, our Normal-mode key equals oracle-a's.
+- **Scope:** the key buffer collected during the decode pass, `CutBeats`, `PitchDetect`, `KeyCodeScale` (constant-Q profile, candidate rules, 30 s window votes) and `Key_judge_with_keys` over the beat segments.
+- **Where:**
+  - Code: `crates/mb-analysis/src/key/`; `Options.key` (on by default) and `Analysis.key` (0–11 major, 12–23 minor; `key::scale_name`).
+  - Spec: `docs/re/analysis-key.md`. Scorecard: `docs/scorecards/key.json`.
+- **Validation:** every stage was also compared with rekordbox's own routines, run natively in a harness outside the repo. Segment pairs 6339/6339, window choices 1018/1018, judgement 400k/400k random inputs.
+- **Commands:**
+  - `cargo run --release -p mb-analysis --example key_score` (`MB_ORACLE=oracle-b` for the second fixture)
+  - `cargo test --release -p mb-analysis --test key` (`MB_ORACLE_FULL=1` for all tracks)
+- **Library and app:**
+  - `analyse_track` returns the key's `ScaleName`; `ApplyAnalysis` replays the traced key block: the `djmdKey` row by name (inserted when missing), `KeyID`, orphaned key rows removed, `TrackInfoUpdated`. Undo restores the old key (re-creating a removed tag key by name).
+  - `AnalysisSettings.key` comes from the `enableKeyAnalysis` preference (on when missing, *hypothesis*).
+  - `tests/analyse_ops.rs` now checks the key on every oracle track (161/161 with `MB_ORACLE_FULL=1`, phrase on as rekordbox had it) and the key block's rows, counters and undo.
+- **Open questions:** spec § 10.
+
+**M6 phrase (paused after stage C / partial D; awaiting commit):**
+- **Spec:** `docs/re/analysis-phrase.md`: stages A–D, the grid-shift hook, a function map with port status (145 functions), the remaining list, and handoff notes (§ 9).
+- **Stages A/B and the grid shift are done and on by default** (`Options.phrase`). Against oracle-a: grids identical 160/161 (was 140), bars 161/161, beats within 1 ms 99.87 %. Scorecard: `docs/scorecards/beats.json`.
+  - The one miss is `wav_96k32f/click_128_offset1234`: we move it, rekordbox did not (open question, `analysis-phrase.md` § 6).
+- **Stage C** (per-beat features in ~35 s blocks) is ported but unverified. It runs only through `phrase::stage_c` (example `phrase_debug`); `analyze` does not call it.
+- **Stage D** is about 30 % ported (feature post-processing and the genre decision), but not wired in.
+  - Remaining: 42 functions, about 101 KB of code. Largest: `IntroEndJudge` (25.8 KB), `Sub_Main_D` (8.7 KB), `SongStructureJudge` (5.4 KB).
+  - PSSI is not produced; `analyse_track` keeps an existing PSSI as before.
+- **Open:** `analyse_track` now always shifts the grid. rekordbox does this only with phrase analysis on (thread flag +0x3908, setter not found). Check whether a preference should gate it.
+- **Tools** for continuing are in `~/re-work/phrase/` (outside the repo).
 
 **M7 rekordbox.xml (done and committed in 35c036c; user check pending):**
 - **Export** (`mb_library::xml::export_document`, app **File → Export Collection in xml format…**): rebuilds rekordbox's own oracle-a export byte for byte (161 tracks). POSITION_MARKs come from `djmdCue` via the USB export's `checked_cues` with the pad-colour tables. Preferences used: `language`, `HotCueColorType`, `bridgeExportBeatGrid`. musicbox names itself in `PRODUCT`; rekordbox's import ignores that node.
@@ -61,7 +90,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 **Open, not assigned**
 - Export log language: rekordbox writes it in the UI language (`language` preference; only the German column titles are known, from the oracle log). The app uses English.
 - ~~AAC decode parity~~ done (7ec372e): Apple's AAC decoder gives ±1 in a few samples when `AudioConverterFillComplexBuffer` is entered at SP ≡ 48 (mod 64). `mb-audio` now enters it through a trampoline at a fixed alignment matching rekordbox. Auto-gain 169/169 and all waveform tags 19/19 AAC, both oracles, stable under concurrent runs. Test: `cargo test -p mb-audio --test aac_stack`.
-- M6 after Normal-mode beats: phrase (`SongStructureAnalyze`, also moves 21/161 oracle-a grids, `analysis-beats.md` § 8), key (`KeyJudge2`), vocal (TF), Dynamic and high-precision beats (TF + downbeat HMM), auto-cue/embeddings (ORT); an analysis queue in the app.
+- M6 after Normal-mode beats: phrase stages C/D and PSSI (paused, `analysis-phrase.md` § 9), key (`KeyJudge2`), vocal (TF), Dynamic and high-precision beats (TF + downbeat HMM), auto-cue/embeddings (ORT); an analysis queue in the app.
 
 **Housekeeping:** the disk is tight (≈ 20 GB free after deleting `target/debug`). Workers share one target dir; testing a staged snapshot in a scratch copy doubles the build artifacts, so prefer testing in the repo when the tree is coherent.
 

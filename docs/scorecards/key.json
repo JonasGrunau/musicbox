@@ -1,0 +1,29 @@
+{
+  "scorecard": "key",
+  "date": "2026-10-12",
+  "rekordbox": "7.2.19.0342",
+  "macos": "27.0",
+  "code": "crates/mb-analysis/src/key/",
+  "spec": "docs/re/analysis-key.md",
+  "command": "cargo run --release -p mb-analysis --example key_score  (MB_ORACLE=oracle-b for the second fixture)",
+  "reference": "djmdContent.KeyID -> djmdKey.ScaleName of each fixture",
+  "tracks_with_stored_key": 169,
+  "oracle_a": {
+    "rekordbox_grid_exact": 169,
+    "own_analysis_exact": 169
+  },
+  "oracle_b": {
+    "rekordbox_grid_exact": 169,
+    "own_analysis_exact": 160,
+    "note": "oracle-b was analysed with high-precision beat analysis; on the 9 misses our Normal-mode grid gives the key rekordbox stored in oracle-a"
+  },
+  "stages_vs_rekordbox_routines": {
+    "tracks": 25,
+    "set": "oracle-a mp3_cbr320 (our key buffer, rekordbox's PQTZ and BPM)",
+    "whole_track_pairs": "25/25",
+    "segment_pairs": "6339/6339",
+    "window_choices": "1018/1018",
+    "window_votes": "25/25",
+    "judgement_random_inputs": "400000/400000 (result and internal state)"
+  }
+}

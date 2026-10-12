@@ -2,7 +2,7 @@
 //! `LowPowerAnalyze16_b` @0x101bbce64 and `LowPowerAnalyze16forBarCorr` @0x101365734
 //! (`analysis-phrase.md` § 4.3).
 
-use super::filter::{prewarp, CFilter, SQRT2, TWO_PI};
+use super::filter::{CFilter, SQRT2, TWO_PI, prewarp};
 use super::mat;
 
 fn lowpass(x: &[f64], w: f64, fs: f64) -> Vec<f64> {
@@ -12,7 +12,7 @@ fn lowpass(x: &[f64], w: f64, fs: f64) -> Vec<f64> {
 }
 
 /// `square_sum` of `y[lo .. lo + n]`; `None` where `link_from` fails (`n < 0`).
-fn energy(y: &[f64], lo: i64, n: i32) -> Option<f64> {
+pub(super) fn energy(y: &[f64], lo: i64, n: i32) -> Option<f64> {
     if n < 0 || lo < 0 {
         return None;
     }
@@ -22,7 +22,12 @@ fn energy(y: &[f64], lo: i64, n: i32) -> Option<f64> {
 }
 
 /// The four quarter energies of each beat, from 1-based beat starts (`LowPowerAnalyze16*`).
-fn per_beat(y: &[f64], beats: &[i32], q: i32, last: impl Fn(usize) -> i32) -> Option<Vec<f64>> {
+pub(super) fn per_beat(
+    y: &[f64],
+    beats: &[i32],
+    q: i32,
+    last: impl Fn(usize) -> i32,
+) -> Option<Vec<f64>> {
     let mut out = Vec::with_capacity(beats.len() * 4);
     for (i, &b) in beats.iter().enumerate() {
         let next = last(i);
@@ -37,27 +42,53 @@ fn per_beat(y: &[f64], beats: &[i32], q: i32, last: impl Fn(usize) -> i32) -> Op
     Some(out)
 }
 
-/// `LowPowerAnalyze16(x, bpm, fb, fs, beats)`: 100 Hz low-pass quarter energies (×4 unless
-/// `fs ≈ 5512.5`) and their per-bar sums (+0x3f0).
-pub fn low_power16(x: &[f64], bpm: f64, fs: f64, beats: &[i32]) -> Option<Vec<f64>> {
-    let y = lowpass(x, 628.3185307179587, fs);
-    let p = (fs * 60.0) / bpm;
-    let q = p.mul_add(0.25, 0.5) as i32;
-    let n = beats.len();
-    let mut e = per_beat(&y, beats, q, |i| {
-        if i + 2 < n { beats[i + 1] } else { (p + 0.5) as i32 - 1 + beats[i] }
-    })?;
-    if fs <= 5512.45 || 5512.55 <= fs {
-        for v in &mut e {
-            *v *= 4.0;
+/// `LowPowerAnalyze16` with its 100 Hz low-pass (+0x398, `LowPowerAnalyze16_init`), whose
+/// state runs on across `Sub_Main_C`'s blocks.
+#[derive(Debug, Clone)]
+pub struct LowPower16 {
+    lp: CFilter,
+}
+
+impl LowPower16 {
+    pub fn new(fs: f64) -> Self {
+        Self {
+            lp: CFilter::low2(prewarp(628.3185307179587, fs), SQRT2, fs),
         }
     }
-    let bars = (n as i32 / 4) as usize;
-    Some(
-        (0..bars)
+
+    /// `LowPowerAnalyze16(x, bpm, fb, fs, beats, n)`: quarter energies of the first `n` beats
+    /// (×4 unless `fs ≈ 5512.5`; +0x3d0) and their per-bar sums (+0x3f0). The fourth quarter
+    /// of beat `i` ends at `beats[i + 1]` only while `i + 2 < n`.
+    pub fn analyze(
+        &mut self,
+        x: &[f64],
+        bpm: f64,
+        fs: f64,
+        beats: &[i32],
+        n: usize,
+    ) -> Option<(Vec<f64>, Vec<f64>)> {
+        let mut y = x.to_vec();
+        self.lp.filter2(&mut y);
+        let p = (fs * 60.0) / bpm;
+        let q = p.mul_add(0.25, 0.5) as i32;
+        let mut e = per_beat(&y, &beats[..n], q, |i| {
+            if i + 2 < n {
+                beats[i + 1]
+            } else {
+                (p + 0.5) as i32 - 1 + beats[i]
+            }
+        })?;
+        if fs <= 5512.45 || 5512.55 <= fs {
+            for v in &mut e {
+                *v *= 4.0;
+            }
+        }
+        let bars = (n as i32 / 4) as usize;
+        let sums = (0..bars)
             .map(|j| e[j * 16..j * 16 + 16].iter().fold(0.0, |acc, &v| acc + v))
-            .collect(),
-    )
+            .collect();
+        Some((e, sums))
+    }
 }
 
 /// `LowPowerAnalyze16_b(x, bpm, ms, fs)` after `…_b_init(fs, fc)`: quarter energies on the
@@ -91,7 +122,11 @@ pub fn low_power16_bar(x: &[f64], bpm: f64, fs: f64, beats: &[i32]) -> Option<Ve
     let q = p.mul_add(0.25, 0.5) as i32;
     let n = beats.len();
     let mut e = per_beat(&y, beats, q, |i| {
-        if i + 1 < n { beats[i + 1] } else { (p + 0.5) as i32 - 1 + beats[i] }
+        if i + 1 < n {
+            beats[i + 1]
+        } else {
+            (p + 0.5) as i32 - 1 + beats[i]
+        }
     })?;
     for v in &mut e {
         *v *= 4.0;

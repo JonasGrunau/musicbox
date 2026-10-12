@@ -3,9 +3,9 @@
 Status: **verified** for BALib's own output. `mb_analysis::analyze(…, Options { beats: true, .. })` returns `BeatGrid { bpm, beats }`, i.e. `djmdContent.BPM` and the PQTZ/PQT2 beats. Against `fixtures/oracle-a` (Normal mode, high precision off, BPM range 70–180), on all 161 tracks rekordbox analysed itself (those with a PQT2):
 - BPM × 100 is exact on 161/161;
 - the beat count is exact on 161/161;
-- PQTZ and PQT2 are identical on 140/161, every beat to the millisecond and every µs remainder.
+- PQTZ and PQT2 are identical on 160/161, every beat to the millisecond and every µs remainder.
 
-In the other 21, the beats are exact relative to each other: same tempo, spacing, µs remainders and count. rekordbox's **phrase pass** then moved the whole grid or renumbered its bars (§ 8). That pass is not ported.
+BALib's own output matches on 140/161. In the other 21, rekordbox's **phrase pass** then moved the whole grid or renumbered its bars (§ 8). That pass's downbeat stages are ported (`analysis-phrase.md`, `Options.phrase`, on by default), and 20 of those 21 now match. The one miss is `wav_96k32f/click_128_offset1234`: we move it, rekordbox did not (`analysis-phrase.md` § 6).
 
 - Scorecard: `docs/scorecards/beats.json`.
 - Code: `crates/mb-analysis/src/beats/` (`sensor.rs`, `info.rs`, `envelope.rs`, `adjust.rs`, `filters.rs`, `mod.rs`).
@@ -161,7 +161,7 @@ The two `operate` functions are instruction-identical.
    - PQT2 with type 1 (`analysis_type` 1 for modes 0 and 3; 2 for modes 1 and 4, and for mode 2 with +0x3940). The PQT2 per-beat u16 is the µs remainder `sub` (now verified, `anlz.md` § PQT2). Header first/last/checksum as `ExtBeatGrid::from_beats`.
 3. **DB BPM.** `djmdContent.BPM` is `BA_GetBpm` (BPM × 100). In oracle-a it equals every beat's PQTZ tempo on all 169 tracks, and ours do the same.
 
-## 8. The phrase pass moves the grid (not ported; hook for the phrase/PSSI port)
+## 8. The phrase pass moves the grid (ported; full spec in `analysis-phrase.md`)
 In oracle-a, phrase analysis was on. After the beat job, `CBeatAnalyzeThread::analyze` @0x1001528c4 (around 0x100155xxx, decompile lines ~1890–2150) does the following.
 
 1. **Inputs from the job result** (`AnalyzeJobController::GetResult(…, 3)`, an `AnalyzeJobBeatDetectResult`):
@@ -183,7 +183,7 @@ In oracle-a, phrase analysis was on. After the beat job, `CBeatAnalyzeThread::an
    - `Oliver Schories – Circles` (m4a): −366 ms.
    - `Aura Vortex – Futura` (flac): renumbered only.
    The 5 `click_128_offset1234` copies rekordbox did not move equal ours exactly: the three MP3s, the AAC m4a and the 96 kHz WAV. So this pass is the only remaining difference. Why it left those five alone is part of the phrase analyser.
-5. **For the port.** Run `SongStructureAnalyze` (~198 KB of code, `Sub_Main_*`, `IntroEndJudge`, `BeatposCorrection2016`, …; it also produces PSSI) with `(bpm, fb, fbar)` from `BeatGrid` and the decoded audio. Apply its `(first ms, first bar)` to `BeatGrid::beats` before writing PQTZ/PQT2.
+5. **Port.** `mb_analysis::phrase` runs `SongStructureAnalyze` stages A/B on the decoded audio with `(bpm, fb, fbar)` from `BeatGrid` and applies `(first ms, first bar)` to `BeatGrid::beats` (`phrase::run`). With it, 160/161 grids are identical. Our port also leaves the three MP3 copies and the AAC copy of the click probe alone, but moves the 96 kHz WAV, which rekordbox left. The rest of the analyser (stages C/D, PSSI) is paused; see `analysis-phrase.md` § 9.
 
 ## 9. Not covered: Dynamic mode and high precision
 - **Dynamic (modes 1/4, "varied").** `BA_CreateVaried44k/48k` with `Analyzer::create(…, varied = true)`:

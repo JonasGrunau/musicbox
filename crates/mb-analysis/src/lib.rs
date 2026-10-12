@@ -1,7 +1,8 @@
 //! rekordbox 7.2.19's track analysis, ported. So far: the waveform tags (PWAV, PWV2, PWV3, PWV4,
 //! PWV5, PWV6, PWV7, PWVC; `docs/re/analysis-waveforms.md`), the auto-gain loudness
-//! (`docs/re/analysis-loudness.md`) and the Normal-mode beat grid with its BPM
-//! (`docs/re/analysis-beats.md`).
+//! (`docs/re/analysis-loudness.md`), the Normal-mode beat grid with its BPM
+//! (`docs/re/analysis-beats.md`), the phrase pass's downbeat shift (`docs/re/analysis-phrase.md`)
+//! and the key (`docs/re/analysis-key.md`).
 //!
 //! The analysis reads the decoded track (`mb-audio`, rekordbox's timeline) at positions
 //! `0 .. L − 1`, quantised to 16 bit (`mb_audio::analysis_i16`), in blocks of two seconds, and
@@ -9,6 +10,7 @@
 //! loudness meter.
 
 pub mod beats;
+pub mod key;
 pub mod loud;
 pub mod loudness;
 pub mod phrase;
@@ -67,6 +69,8 @@ pub struct Options {
     /// Phrase analysis; with `beats` it moves the grid onto the first downbeat
     /// (`analysis-phrase.md`).
     pub phrase: bool,
+    /// Key (`enableKeyAnalysis`); needs `beats` (`analysis-key.md`).
+    pub key: bool,
 }
 
 impl Default for Options {
@@ -76,6 +80,7 @@ impl Default for Options {
             loudness: true,
             beats: true,
             phrase: true,
+            key: true,
         }
     }
 }
@@ -86,6 +91,8 @@ pub struct Analysis {
     pub waveforms: Option<Waveforms>,
     pub loudness: Option<Loudness>,
     pub beats: Option<beats::BeatGrid>,
+    /// Key code: 0–11 major, 12–23 minor, root `code % 12` with 0 = A ([`key::scale_name`]).
+    pub key: Option<u8>,
 }
 
 /// Analyses the waveforms of the audio file at `path`.
@@ -97,6 +104,7 @@ pub fn analyze_waveforms(path: impl AsRef<Path>) -> Result<Waveforms> {
             loudness: false,
             beats: false,
             phrase: false,
+            key: false,
         },
     )?;
     Ok(a.waveforms.unwrap_or_default())
@@ -125,6 +133,8 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
         .then(|| loudness::LoudnessAnalyzer::new(rate, total));
     let mut beat = opts.beats.then(|| beats::BeatAnalyzer::new(rate, total));
     let mut phrase = (opts.beats && opts.phrase).then(|| phrase::PhraseAnalyzer::new(rate, total));
+    let mut keys =
+        (opts.beats && opts.key).then(|| key::KeyCollector::new(rate, total, info.channels));
     let block = block_len(rate);
     let mut frames = vec![[0.0f32; 2]; block];
     let mut pcm = vec![[0i16; 2]; block];
@@ -156,6 +166,9 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
         if let Some(p) = &mut phrase {
             p.put(pcm);
         }
+        if let Some(k) = &mut keys {
+            k.put(pcm);
+        }
         pos += got as u64;
     }
     let waveforms = waves.map(|(zoom, wave, loud)| {
@@ -176,9 +189,19 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
     if let (Some(g), Some(p)) = (&mut grid, &phrase) {
         phrase::run(p, g, rate, total);
     }
+    // The key job runs on the finished grid; `getKey` takes BPM × 100 · 0.01. Without a grid
+    // only the whole-track estimate counts (no segments).
+    let key = keys.map(|k| {
+        let (beats, bpm) = grid.as_ref().map_or((Vec::new(), 0.0), |g| {
+            let beats = g.beats.iter().map(|b| (b.beat_in_bar, b.time_ms)).collect();
+            (beats, g.bpm as f32 * 0.01)
+        });
+        key::detect(k.buffer(), rate, total, bpm, &beats) as u8
+    });
     Ok(Analysis {
         waveforms,
         loudness: meter.map(loudness::LoudnessAnalyzer::finish),
         beats: grid,
+        key,
     })
 }

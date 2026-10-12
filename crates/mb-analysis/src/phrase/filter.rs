@@ -75,7 +75,8 @@ impl CFilter {
         Self::make2(0.0, 0.0, w2, 1.0, w * k, w2, fs)
     }
 
-    /// `c_filter::clear`.
+    /// `c_filter::clear` (stage D's per-line smoothing).
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.s1 = 0.0;
         self.s2 = 0.0;
@@ -108,35 +109,49 @@ impl CFilter {
     }
 }
 
-/// `SongStructureAnalyze_resample2`: four low-pass sections at `0.4 · fs/8` (an 8th-order
-/// Butterworth) and 8:1 decimation.
+/// The four Butterworth `k` of an 8th-order design.
+const K8: [f64; 4] = [
+    1.9615705608064609,
+    1.6629392246050905,
+    1.1111404660392046,
+    0.39018064403225666,
+];
+
+/// `SongStructureAnalyze_resample2` (four low-pass sections at `fc`) or `resample_hpf` (four
+/// high-pass sections), then `filter_8th_ds::downsample` by `ratio`.
 #[derive(Debug, Clone)]
-pub struct Resample8 {
+pub struct Decimator {
     sections: [CFilter; 4],
+    ratio: usize,
 }
 
-impl Resample8 {
-    /// `resample2::init(fs/8 · 0.4, fs, 8)`.
-    pub fn new(rate: f64) -> Self {
-        let w = prewarp((rate * 0.125 * 0.4) * TWO_PI, rate);
-        let k = [
-            1.9615705608064609,
-            1.6629392246050905,
-            1.1111404660392046,
-            0.39018064403225666,
-        ];
+impl Decimator {
+    /// `resample2::init(fc, rate, ratio)`.
+    pub fn low(fc: f64, rate: f64, ratio: usize) -> Self {
+        let w = prewarp(fc * TWO_PI, rate);
         Self {
-            sections: k.map(|k| CFilter::low2(w, k, rate)),
+            sections: K8.map(|k| CFilter::low2(w, k, rate)),
+            ratio,
         }
     }
 
-    /// `filter_8th_ds::downsample`: filters one chunk and keeps samples `8k + 7` for
-    /// `k < n / 8`, so each chunk restarts the decimation phase.
-    pub fn downsample(&mut self, chunk: &[f64], out: &mut Vec<f64>) {
+    /// `resample_hpf::init(fc, rate, ratio)`.
+    pub fn high(fc: f64, rate: f64, ratio: usize) -> Self {
+        let w = prewarp(fc * TWO_PI, rate);
+        Self {
+            sections: K8.map(|k| CFilter::make2(1.0, 0.0, 0.0, 1.0, w * k, w * w, rate)),
+            ratio,
+        }
+    }
+
+    /// `filter_8th_ds::downsample`: filters one chunk and keeps samples `ratio·(k + 1) − 1` for
+    /// `k < n / ratio`, so each chunk restarts the decimation phase.
+    pub fn downsample(&mut self, chunk: &[f64]) -> Vec<f64> {
         let mut y = chunk.to_vec();
         for s in &mut self.sections {
             s.filter2(&mut y);
         }
-        out.extend((0..y.len() / 8).map(|k| y[k * 8 + 7]));
+        let r = self.ratio;
+        (0..y.len() / r).map(|k| y[(k + 1) * r - 1]).collect()
     }
 }

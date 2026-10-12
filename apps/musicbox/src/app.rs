@@ -171,10 +171,12 @@ impl App {
                         pref("ShowOriginalKey").map(|v| v.trim() != "0"),
                         pref("KeyStringSetting").and_then(|v| v.trim().parse().ok()),
                     );
-                    // Analysis preferences: `AutoGain` (default on), `AutoAnalysis`.
+                    // Analysis preferences: `AutoGain` and `enableKeyAnalysis` (default on),
+                    // `trackAnalysisSettingsSongStruct`, `AutoAnalysis`.
                     self.analysis_settings = mb_library::AnalysisSettings {
                         auto_gain: pref("AutoGain").is_none_or(|v| v.trim() != "0"),
                         phrase: pref("trackAnalysisSettingsSongStruct").is_some_and(|v| v.trim() == "1"),
+                        key: pref("enableKeyAnalysis").is_none_or(|v| v.trim() != "0"),
                     };
                     self.auto_analysis = pref("AutoAnalysis").is_some_and(|v| v.trim() == "1");
                     self.export_source = Some(export::Source {

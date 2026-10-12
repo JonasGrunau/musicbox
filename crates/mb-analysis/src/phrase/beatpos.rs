@@ -21,11 +21,15 @@ pub struct BeatPos {
 
 /// `is_equal(p, pat, n)`.
 fn starts_with(p: &[u8], at: usize, pat: &[u8]) -> bool {
-    pat.iter().enumerate().all(|(i, &b)| p.get(at + i).copied().unwrap_or(0) == b)
+    pat.iter()
+        .enumerate()
+        .all(|(i, &b)| p.get(at + i).copied().unwrap_or(0) == b)
 }
 
 const P7: [u8; 7] = [1, 0, 0, 0, 0, 0, 1];
-const P24: [u8; 24] = [1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0];
+const P24: [u8; 24] = [
+    1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0,
+];
 
 /// `BeatposCorrection2016(x, fs, bpm, fb, 1, pattern, beats, snares)`.
 pub fn beatpos_correction(
@@ -37,7 +41,12 @@ pub fn beatpos_correction(
     nbeats: i32,
     snares: &Snares,
 ) -> Option<BeatPos> {
-    let mut out = BeatPos { fb_ms: fb, moved: 0, kick6: false, steady: false };
+    let mut out = BeatPos {
+        fb_ms: fb,
+        moved: 0,
+        kick6: false,
+        steady: false,
+    };
     if nbeats < 16 || ((pattern.len() as i64 as f64 * 0.03125) as i32) < 2 {
         return Some(out);
     }
@@ -59,7 +68,11 @@ pub fn beatpos_correction(
         if starts_with(pattern, u, &P24) {
             c.push(u as i32);
         }
-        if at(u) == 1 && at(u + 1) == 0 && (at(u + 3) == 1 || at(u + 7) == 1) && (at(u + 6) == 1 || at(u + 10) == 1) {
+        if at(u) == 1
+            && at(u + 1) == 0
+            && (at(u + 3) == 1 || at(u + 7) == 1)
+            && (at(u + 6) == 1 || at(u + 10) == 1)
+        {
             d.push(u as i32);
         }
     }
@@ -74,7 +87,11 @@ pub fn beatpos_correction(
         let mut offbeat = false;
         if d.len() >= 17 {
             let t = if d.len() > 25 {
-                if d.len() > 60 { 0.30000001192092896 } else { 0.4099999964237213 }
+                if d.len() > 60 {
+                    0.30000001192092896
+                } else {
+                    0.4099999964237213
+                }
             } else {
                 0.6499999761581421
             };
@@ -96,7 +113,11 @@ pub fn beatpos_correction(
             (None, 0.5)
         }
     };
-    let step = if bpm == 0.0 { 125 } else { (beat_s * 250.0) as i32 };
+    let step = if bpm == 0.0 {
+        125
+    } else {
+        (beat_s * 250.0) as i32
+    };
     let mut x0 = step + fb;
     loop {
         x0 -= step;
@@ -257,7 +278,11 @@ pub fn bar_start_correction(
     let mut s: Vec<f64> = snares.pos.iter().map(|&v| v as f64).collect();
     if snares.first <= first0 + snares.count {
         let d = (fs * 0.001) * (fb - fb2) as f64;
-        for v in s.iter_mut().skip(first0 as usize).take(snares.count as usize) {
+        for v in s
+            .iter_mut()
+            .skip(first0 as usize)
+            .take(snares.count as usize)
+        {
             *v += d;
         }
     }
@@ -292,7 +317,11 @@ pub fn bar_start_correction(
     let e = power::low_power16_bar(x, bpm, fs, beats)?;
     let m = mat::max_val(&e);
     let ne = e.len() as i32;
-    let avg = if ne < 1 { 0.0 } else { (mat::sum(&e) * 0.6) / ne as i64 as f64 };
+    let avg = if ne < 1 {
+        0.0
+    } else {
+        (mat::sum(&e) * 0.6) / ne as i64 as f64
+    };
     let thr = m.mul_add(0.4, avg);
     let mut add = 0;
     if ne > 4 {
@@ -318,4 +347,29 @@ pub fn bar_start_correction(
         fbar
     };
     Some(bar)
+}
+
+/// `BarPositionJudge(x[..30 s], bpm, fb, fs)` (+0x258): beats from the first beat to the first
+/// audible sample (|x| > 0.0005), rounded, plus 1.
+pub fn bar_position(x: &[f64], bpm: f64, fb: i32, fs: f64) -> i32 {
+    let beat = if bpm != 0.0 { 60.0 / bpm } else { 0.5 };
+    let p = beat.mul_add(fs, 0.5) as i32;
+    let len = x.len() as i32;
+    let mut t = 0.0f64;
+    if len > 1 {
+        let off = (f64::from(fb) * 0.001).mul_add(fs, 0.5) as i32;
+        for i in 0..len - 1 {
+            let k = off + i;
+            if k < len && k >= 0 && 0.0005 < x[k as usize].abs() {
+                t = f64::from(i + 1);
+                break;
+            }
+        }
+    }
+    let r = if p != 0 {
+        t / f64::from(p)
+    } else {
+        t * 0.00036281179138321996
+    };
+    (r + 0.5) as i32 + 1
 }

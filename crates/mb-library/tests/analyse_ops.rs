@@ -2,14 +2,15 @@
 //! of the corpus (`fixtures/oracle-a`). Skipped without the fixtures or the corpus audio.
 //!
 //! 1. `analysis_files_match_rekordbox`: the `.DAT`/`.EXT`/`.2EX` built by `analyse_track` equal
-//!    rekordbox's local files section by section (tag order, headers, bodies), except PSSI and
-//!    PVDI (not computed yet) and the grids rekordbox's phrase pass moved afterwards
-//!    (`analysis-beats.md` § 8: same BPM and beat count, shifted). The `djmdContent` columns and
-//!    the `djmdMixerParam` row equal rekordbox's. Probes by default, every track with
-//!    `MB_ORACLE_FULL=1`.
+//!    rekordbox's local files section by section (tag order, headers, bodies), with phrase
+//!    analysis on as rekordbox had it, except PSSI and PVDI (not computed yet) and a grid the
+//!    two phrase passes place differently (same BPM and beat count, shifted; the 96 kHz click
+//!    probe, `analysis-phrase.md`). The `djmdContent` columns, the `djmdMixerParam` row and the
+//!    key equal rekordbox's. Probes by default, every track with `MB_ORACLE_FULL=1`.
 //! 2. `apply_and_undo`: on a temp copy of the library, a first analysis (track reset to the
 //!    imported state) and a re-analysis (rekordbox's files present) write the files, rows and
-//!    `contentFile` rows the spec lists; undo restores everything.
+//!    `contentFile` rows the spec lists, and the key (replacing a tag key, whose row goes); undo
+//!    restores everything.
 
 mod common;
 use common::*;
@@ -25,6 +26,8 @@ struct Track {
     rel: String,
     columns: [i64; 5],
     mixer: Option<[i64; 4]>,
+    /// `djmdKey.ScaleName` of the stored key.
+    key: Option<String>,
 }
 
 fn tracks() -> Option<(PathBuf, Vec<Track>)> {
@@ -34,8 +37,9 @@ fn tracks() -> Option<(PathBuf, Vec<Track>)> {
         .connection()
         .prepare(
             "SELECT c.ID, c.FolderPath, c.FileNameL, c.AnalysisDataPath, c.BPM, c.SampleRate, c.BitRate, c.BitDepth, c.Length, \
-             m.GainHigh, m.GainLow, m.PeakHigh, m.PeakLow \
+             m.GainHigh, m.GainLow, m.PeakHigh, m.PeakLow, k.ScaleName \
              FROM djmdContent c LEFT JOIN djmdMixerParam m ON m.ContentID = c.ID AND m.rb_local_deleted = 0 \
+             LEFT JOIN djmdKey k ON k.ID = c.KeyID AND k.rb_local_deleted = 0 \
              WHERE c.rb_local_deleted = 0 ORDER BY c.FolderPath",
         )
         .unwrap();
@@ -50,6 +54,7 @@ fn tracks() -> Option<(PathBuf, Vec<Track>)> {
                 rel: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 columns: [int(4)?, int(5)?, int(6)?, int(7)?, int(8)?],
                 mixer: m.iter().all(Option::is_some).then(|| m.map(|v| v.unwrap_or(0))),
+                key: r.get(13)?,
             })
         })
         .unwrap()
@@ -103,7 +108,7 @@ fn analysis_files_match_rekordbox() {
     }
     let identical = results.iter().filter(|(_, p, s)| p.is_empty() && !s).count();
     eprintln!(
-        "{} tracks: {identical} identical apart from PSSI/PVDI, {shifted} with a phrase-shifted grid, {} failures",
+        "{} tracks: {identical} identical apart from PSSI/PVDI, {shifted} with a shifted grid, {} failures",
         results.len(),
         failures.len()
     );
@@ -114,7 +119,9 @@ fn analysis_files_match_rekordbox() {
 fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
     let name = t.path.file_name().unwrap().to_string_lossy().into_owned();
     let mut problems = Vec::new();
-    let a = match analyse_track(&t.path, &t.file_name, &AnalysisSettings::default()) {
+    // oracle-a was analysed with phrase analysis on (the key follows the shifted grid).
+    let settings = AnalysisSettings { phrase: true, ..AnalysisSettings::default() };
+    let a = match analyse_track(&t.path, &t.file_name, &settings) {
         Ok(a) => a,
         Err(e) => return (name, vec![e.to_string()], false),
     };
@@ -161,6 +168,9 @@ fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
     if a.mixer != t.mixer {
         problems.push(format!("mixer {:?} vs {:?}", a.mixer, t.mixer));
     }
+    if a.key != t.key {
+        problems.push(format!("key {:?} vs {:?}", a.key, t.key));
+    }
     (name, problems, grid_shift)
 }
 
@@ -204,20 +214,37 @@ fn apply_and_undo() {
     let mut lib = Library::open_unguarded(&dir.db, &dir.passphrase).unwrap();
     lib.set_analysis_root(&root);
     lib.set_anlz_backup(dir.dir.join("backup"));
-    // Test setup (not an op): the first track back to the state after import.
+    // Test setup (not an op): the first track back to the state after import, with a key from
+    // its tags that no other track uses.
     lib.connection()
         .execute_batch(&format!(
-            "UPDATE djmdContent SET Analysed = 0, ContentLink = 14, AnalysisDataPath = NULL WHERE ID = '{0}';
+            "UPDATE djmdContent SET Analysed = 0, ContentLink = 14, AnalysisDataPath = NULL, KeyID = '4242424242' WHERE ID = '{0}';
              DELETE FROM djmdMixerParam WHERE ContentID = '{0}';
-             DELETE FROM contentFile WHERE ContentID = '{0}';",
+             DELETE FROM contentFile WHERE ContentID = '{0}';
+             INSERT INTO djmdKey (ID, ScaleName, UUID, rb_data_status, rb_local_deleted, rb_local_synced, rb_local_usn, created_at, updated_at)
+               VALUES ('4242424242', 'Dmin', 'test-tag-key', 0, 0, 0, 0, '2026-10-12 00:00:00.000 +00:00', '2026-10-12 00:00:00.000 +00:00');",
             first.id
         ))
         .unwrap();
+    let key_name = |lib: &Library, id: &str| -> Option<String> {
+        lib.connection()
+            .query_row("SELECT k.ScaleName FROM djmdContent c JOIN djmdKey k ON k.ID = c.KeyID AND k.rb_local_deleted = 0 WHERE c.ID = ?1", [id], |r| r.get(0))
+            .ok()
+    };
+    let live_keys = |lib: &Library, name: &str| {
+        count(lib.connection(), &format!("SELECT count(*) FROM djmdKey WHERE rb_local_deleted = 0 AND ScaleName = '{name}'"))
+    };
     let mut history = History::default();
 
     // First analysis.
     let a = analyse_track(&first.path, &first.file_name, &AnalysisSettings::default()).unwrap();
+    let detected = a.key.clone().expect("a key");
+    let keys_before = live_keys(&lib, &detected);
     let before_counter: Value = get(&lib, "AnalysisUpdated", &first.id);
+    let info_before = match get(&lib, "TrackInfoUpdated", &first.id) {
+        Value::Text(t) => t.parse::<i64>().unwrap(),
+        _ => 0,
+    };
     history.run(&mut lib, Command::ApplyAnalysis { content: DbId(first.id.clone()), analysis: Box::new(a.clone()) }).unwrap();
     let rel = format!("/PIONEER/USBANLZ/{}/ANLZ0000.DAT", mb_anlz::usb::local_anlz_folder(&match get(&lib, "UUID", &first.id) {
         Value::Text(u) => u,
@@ -233,6 +260,11 @@ fn apply_and_undo() {
     assert_eq!(get(&lib, "BPM", &first.id), Value::Integer(a.bpm_x100.unwrap()));
     assert_eq!(get(&lib, "Length", &first.id), Value::Integer(a.length));
     assert_ne!(get(&lib, "AnalysisUpdated", &first.id), before_counter);
+    // The key: its row (reused or created), the tag key's row gone, two TrackInfoUpdated bumps.
+    assert_eq!(key_name(&lib, &first.id), Some(detected.clone()));
+    assert_eq!(live_keys(&lib, &detected), keys_before.max(1));
+    assert_eq!(live_keys(&lib, "Dmin"), 0);
+    assert_eq!(get(&lib, "TrackInfoUpdated", &first.id), Value::Text((info_before + 2).to_string()));
     let mixer: (i64, i64, i64, i64) = lib
         .connection()
         .query_row("SELECT GainHigh, GainLow, PeakHigh, PeakLow FROM djmdMixerParam WHERE ContentID = ?1 AND rb_local_deleted = 0", [&first.id], |r| {
@@ -278,6 +310,9 @@ fn apply_and_undo() {
     assert_eq!(get(&lib, "Analysed", &first.id), Value::Integer(0));
     assert_eq!(get(&lib, "ContentLink", &first.id), Value::Integer(14));
     assert_eq!(get(&lib, "AnalysisDataPath", &first.id), Value::Null);
+    // The tag key is back (a new row with its name); the analysis's key row only if it existed before.
+    assert_eq!(key_name(&lib, &first.id).as_deref(), Some("Dmin"));
+    assert_eq!(live_keys(&lib, &detected), keys_before);
     assert_eq!(count(lib.connection(), &format!("SELECT count(*) FROM djmdMixerParam WHERE ContentID = '{}'", first.id)), 0);
     assert!(content_files(&lib, &first.id).is_empty());
     drop(lib);

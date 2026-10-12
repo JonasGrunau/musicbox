@@ -15,3 +15,12 @@ thiserror = "2"
 eframe = "0.36"
 egui = "0.36"
 egui_extras = "0.36"
+
+# The analysis ports (FFT/CQT/filters) are far too slow unoptimised; keep debug builds and tests
+# usable without changing their results (the ports reproduce rekordbox's float order explicitly).
+[profile.dev.package.mb-analysis]
+opt-level = 3
+[profile.dev.package.mb-dsp]
+opt-level = 3
+[profile.dev.package.mb-audio]
+opt-level = 3

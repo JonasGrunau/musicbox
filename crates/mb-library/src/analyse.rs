@@ -3,24 +3,25 @@
 //!
 //! Two steps, so the slow part never holds the database:
 //! 1. [`analyse_track`] (pure, CPU-bound, no database): decodes the file, runs `mb-analysis`
-//!    (waveforms, auto-gain, Normal-mode beat grid) and builds the local `.DAT`/`.EXT`/`.2EX` in
-//!    rekordbox's tag order (`CMusicAnalyzeFile::write_pmai*`), plus the `djmdContent` values.
+//!    (waveforms, auto-gain, Normal-mode beat grid, key) and builds the local `.DAT`/`.EXT`/`.2EX`
+//!    in rekordbox's tag order (`CMusicAnalyzeFile::write_pmai*`), plus the `djmdContent` values.
 //! 2. [`Command::ApplyAnalysis`](crate::Command::ApplyAnalysis) writes the files and replays the
 //!    traced statement sequence (start, completion, the agent's `contentFile` rows). Its inverse,
 //!    [`Command::RestoreAnalysis`](crate::Command::RestoreAnalysis), puts the previous files and
 //!    columns back.
 //!
-//! Sections musicbox does not compute yet (PSSI phrase, PVDI vocal, the key) are carried over from
-//! the previous analysis files when the track had them, and left out otherwise, as
+//! Sections musicbox does not compute yet (PSSI phrase, PVDI vocal) are carried over from the
+//! previous analysis files when the track had them, and left out otherwise, as
 //! `write_pmai_ext`/`write_pmai_ex2` leave out a section whose data is missing.
 
+use crate::lookup::{NameTable, find_or_create, name_of};
 use crate::{Command, DbId, Effect, Error, Library, Result, xml_sync};
 use mb_anlz::tags::{
     BeatGrid, CueKind, CueList, CueListExt, ExtBeatGrid, Path as PathTag, SeekPoint, SeekTable, TypedSection, Vbr, Wave3Band,
     WaveColorPreview, WaveColorScroll, WaveNormalize, WavePreview, WaveScroll,
 };
 use mb_anlz::{AnlzFile, FileHeader, Section, Tag};
-use mb_masterdb::CounterColumn;
+use mb_masterdb::{CounterColumn, OrphanTable};
 use mb_masterdb::rusqlite::OptionalExtension;
 use mb_masterdb::rusqlite::types::Value;
 use std::path::{Path, PathBuf};
@@ -35,11 +36,13 @@ pub struct AnalysisSettings {
     /// thread flag +0x3908 that gates the shift in `CBeatAnalyzeThread::analyze`; a fresh
     /// install has it off (`fixtures/manifest.toml`, sandbox-initial).
     pub phrase: bool,
+    /// `enableKeyAnalysis`: detect the key (`docs/re/analysis-key.md`) and write `KeyID`.
+    pub key: bool,
 }
 
 impl Default for AnalysisSettings {
     fn default() -> Self {
-        Self { auto_gain: true, phrase: false }
+        Self { auto_gain: true, phrase: false, key: true }
     }
 }
 
@@ -58,6 +61,9 @@ pub struct TrackAnalysis {
     pub length: i64,
     /// `djmdMixerParam` (GainHigh, GainLow, PeakHigh, PeakLow), when auto-gain ran.
     pub mixer: Option<[i64; 4]>,
+    /// The detected key as rekordbox names it (`djmdKey.ScaleName`, e.g. `Am`), when key
+    /// analysis ran.
+    pub key: Option<String>,
 }
 
 /// Analyses the audio file at `audio`. `file_name` is the name rekordbox puts into PPTH
@@ -65,7 +71,12 @@ pub struct TrackAnalysis {
 pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings) -> Result<TrackAnalysis> {
     let fail = |e: &dyn std::fmt::Display| Error::Invalid(format!("{}: {e}", audio.display()));
     let info = *mb_audio::open(audio).map_err(|e| fail(&e))?.info();
-    let opts = mb_analysis::Options { loudness: settings.auto_gain, phrase: settings.phrase, ..mb_analysis::Options::default() };
+    let opts = mb_analysis::Options {
+        loudness: settings.auto_gain,
+        phrase: settings.phrase,
+        key: settings.key,
+        ..mb_analysis::Options::default()
+    };
     let a = mb_analysis::analyze(audio, opts).map_err(|e| fail(&e))?;
     let waves = a.waveforms.unwrap_or_default();
     let grid = a.beats;
@@ -158,6 +169,7 @@ pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings)
             let (gh, gl, ph, pl) = l.mixer_param();
             [i64::from(gh), i64::from(gl), i64::from(ph), i64::from(pl)]
         }),
+        key: a.key.map(|k| mb_analysis::key::scale_name(k).to_owned()),
     })
 }
 
@@ -235,6 +247,8 @@ pub struct AnalysisSnapshot {
     pub mixer_inserted: Option<String>,
     /// `contentFile` rows: (ID, previous (Hash, Size), or `None` when the analysis inserted it).
     pub content_files: Vec<(String, Option<(String, i64)>)>,
+    /// When the analysis wrote `KeyID`: the previous `KeyID` and the `ScaleName` it pointed to.
+    pub key: Option<(Value, Option<String>)>,
 }
 
 /// `Analysed` states (`analyse-track.md` § Values): bit 0x01 done, 0x02 in progress, 0x80 the
@@ -295,13 +309,14 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     let row = lib
         .connection()
         .query_row(
-            "SELECT UUID, AnalysisDataPath, BPM, SampleRate, BitRate, BitDepth, Length, Analysed, ContentLink \
+            "SELECT UUID, AnalysisDataPath, BPM, SampleRate, BitRate, BitDepth, Length, Analysed, ContentLink, KeyID \
              FROM djmdContent WHERE ID = ?1 AND rb_local_deleted = 0",
             [content.as_str()],
-            |r| Ok((r.get::<_, Option<String>>(0)?, (1..9).map(|i| r.get::<_, Value>(i)).collect::<std::result::Result<Vec<_>, _>>()?)),
+            |r| Ok((r.get::<_, Option<String>>(0)?, (1..10).map(|i| r.get::<_, Value>(i)).collect::<std::result::Result<Vec<_>, _>>()?)),
         )
         .optional()?;
     let (uuid, cols) = row.ok_or_else(|| Error::NotFound { what: "track", id: content.0.clone() })?;
+    let old_key_id = cols[8].clone();
     let uuid = uuid.filter(|u| !u.is_empty()).ok_or_else(|| Error::Invalid("track has no UUID".into()))?;
     let old = AnalysisColumns {
         analysis_data_path: cols[0].clone(),
@@ -396,6 +411,22 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
             mixer_inserted = Some(id);
         }
     }
+    // The key: the `djmdKey` row by `ScaleName` (inserted when missing), `KeyID` written on every
+    // pass, key rows no track uses any more removed (e.g. the tag key the analysis replaced),
+    // then `TrackInfoUpdated`.
+    let mut key_snapshot = None;
+    if let Some(name) = &analysis.key {
+        let old_name = match &old_key_id {
+            Value::Text(id) if !id.is_empty() => name_of(&tx, "djmdKey", id)?,
+            Value::Integer(n) => name_of(&tx, "djmdKey", &n.to_string())?,
+            _ => None,
+        };
+        let id = find_or_create(&tx, NameTable::Key, name)?;
+        col(&tx, "KeyID", Value::Text(id))?;
+        tx.cleanup_orphan_table(OrphanTable::Key)?;
+        tx.increment_counter(content.as_str(), CounterColumn::TrackInfoUpdated)?;
+        key_snapshot = Some((old_key_id.clone(), old_name));
+    }
     // Phrase and vocal: only what the files still carry (here: kept from an earlier analysis).
     let mut final_link = ((link | LINK_QUEUED) & !LINK_STATUS_MASK) | 0xE | LINK_DONE;
     final_link &= !(LINK_PHRASE | LINK_VOCAL);
@@ -453,7 +484,14 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     sync_playlists(lib, content)?;
 
     let inverse = Command::RestoreAnalysis {
-        snapshot: Box::new(AnalysisSnapshot { content: content.clone(), files: previous, columns: old, mixer_inserted, content_files }),
+        snapshot: Box::new(AnalysisSnapshot {
+            content: content.clone(),
+            files: previous,
+            columns: old,
+            mixer_inserted,
+            content_files,
+            key: key_snapshot,
+        }),
     };
     Ok((Effect::Analysed { content: content.clone() }, Some(inverse)))
 }
@@ -497,6 +535,24 @@ pub(crate) fn restore(lib: &mut Library, s: &AnalysisSnapshot) -> Result<(Effect
         ("ContentLink", &c.content_link),
     ] {
         tx.update("djmdContent", "ID", key(), &[(name, v.clone())])?;
+    }
+    // The previous key: its row, or a new row with its name when the analysis's orphan cleanup
+    // removed it; then the analysis's key row goes if nothing uses it any more.
+    if let Some((old_id, old_name)) = &s.key {
+        let value = match (old_id, old_name) {
+            (Value::Text(id), Some(name)) => {
+                let live = tx
+                    .connection()
+                    .query_row("SELECT 1 FROM djmdKey WHERE ID = ?1 AND rb_local_deleted = 0", [id], |_| Ok(()))
+                    .optional()?
+                    .is_some();
+                if live { old_id.clone() } else { Value::Text(find_or_create(&tx, NameTable::Key, name)?) }
+            }
+            _ => old_id.clone(),
+        };
+        tx.update("djmdContent", "ID", key(), &[("KeyID", value)])?;
+        tx.cleanup_orphan_table(OrphanTable::Key)?;
+        tx.increment_counter(s.content.as_str(), CounterColumn::TrackInfoUpdated)?;
     }
     // Counters only move forward: the restored state is a new change for exports.
     tx.increment_counter(s.content.as_str(), CounterColumn::AnalysisUpdated)?;

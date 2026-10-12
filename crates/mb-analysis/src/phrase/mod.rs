@@ -7,14 +7,29 @@
 //! (`BarStartCorrection`); the thread then moves the beat grid onto that downbeat.
 
 // Float tests are written as the binary branches, so `!(a > b)` and `a <= b` differ here.
-#![allow(clippy::neg_cmp_op_on_partial_ord)]
+#![allow(clippy::neg_cmp_op_on_partial_ord, clippy::nonminimal_bool)]
+// Ported loops index several parallel arrays the way the binary does.
+#![allow(clippy::needless_range_loop)]
 
 mod beatpos;
+// Stage D, paused (`analysis-phrase.md` § 7): ported pieces not wired in yet.
+#[allow(dead_code)]
+mod blocks;
+// Stage D, paused (`analysis-phrase.md` § 7): ported pieces not wired in yet.
+#[allow(dead_code)]
+mod d_feat;
+mod feat;
 mod filter;
+mod hp;
+mod spec;
+// Stage D, paused (`analysis-phrase.md` § 7): ported pieces not wired in yet.
+#[allow(dead_code)]
+mod genre;
 mod mat;
 mod power;
 mod rhythm;
 mod snare;
+pub mod stage_c;
 
 use crate::beats::BeatGrid;
 
@@ -23,8 +38,8 @@ const CONV_FIRST_BAR: [i32; 4] = [1, 4, 3, 2];
 
 /// The mono mix `Analyze_AB` builds from the int16 stream: `0.99·L + 0.01·R`, scaled by
 /// 1/32768 (0x3effae147ae147ae, 0x3e947ae147ae147b), as one fused multiply-add.
-const GAIN_L: f64 = f64::from_bits(0x3eff_ae14_7ae1_47ae);
-const GAIN_R: f64 = f64::from_bits(0x3e94_7ae1_47ae_147b);
+pub(crate) const GAIN_L: f64 = f64::from_bits(0x3eff_ae14_7ae1_47ae);
+pub(crate) const GAIN_R: f64 = f64::from_bits(0x3e94_7ae1_47ae_147b);
 
 /// Stage A: collects the decimated mono signal while the track is decoded.
 pub struct PhraseAnalyzer {
@@ -34,7 +49,7 @@ pub struct PhraseAnalyzer {
     chunk: usize,
     fed: i64,
     buf: Vec<f64>,
-    res: filter::Resample8,
+    res: filter::Decimator,
     /// +0x1e0.
     dec: Vec<f64>,
     /// +0x1d4: `min(210 s, total / 8)` decimated samples.
@@ -63,7 +78,7 @@ impl PhraseAnalyzer {
             chunk: (rate as f64 * 1.7066666666666668 + 0.5) as usize,
             fed: 0,
             buf: Vec::new(),
-            res: filter::Resample8::new(rate as f64),
+            res: filter::Decimator::low(fs8 * 0.4, rate as f64, 8),
             dec: Vec::new(),
             target,
             done: false,
@@ -100,7 +115,8 @@ impl PhraseAnalyzer {
     fn step(&mut self) {
         let n = self.buf.len().min(self.chunk);
         let chunk: Vec<f64> = self.buf.drain(..n).collect();
-        self.res.downsample(&chunk, &mut self.dec);
+        let d = self.res.downsample(&chunk);
+        self.dec.extend_from_slice(&d);
         let consumed = self.fed - self.buf.len() as i64;
         if self.target <= self.dec.len() || self.total <= consumed {
             self.dec.resize(self.target, 0.0);
@@ -109,8 +125,19 @@ impl PhraseAnalyzer {
         }
     }
 
-    /// Stage B for the grid's `(bpm, fb, fbar)`; `None` where `Sub_Main_B` fails.
+    /// Stage B for the grid's `(bpm, fb, fbar)`; `None` where `Sub_Main_B` fails. Only the
+    /// parts the downbeat depends on.
     pub fn downbeat(&self, bpm100: i32, fb_ms: i32, fbar: i32) -> Option<Downbeat> {
+        self.sub_main_b(bpm100, fb_ms, fbar, false).map(|b| b.down)
+    }
+
+    /// `Sub_Main_B` (@0x100b80b04) with the outputs stage D reads (development aid; stage D
+    /// is not finished, `analysis-phrase.md` § 7).
+    pub fn stage_b(&self, bpm100: i32, fb_ms: i32, fbar: i32) -> Option<BOut> {
+        self.sub_main_b(bpm100, fb_ms, fbar, true)
+    }
+
+    fn sub_main_b(&self, bpm100: i32, fb_ms: i32, fbar: i32, for_d: bool) -> Option<BOut> {
         if !self.done {
             return None;
         }
@@ -120,21 +147,67 @@ impl PhraseAnalyzer {
         let x = &self.dec[..n];
         let beats = rhythm::beats_samples(n, fs, bpm, fb_ms);
         let pattern = rhythm::RhythmPattern::new(fs).analyze(x, bpm, fb_ms, fs)?;
+        let k4 = if for_d {
+            let (_, bar_energy) =
+                power::LowPower16::new(fs).analyze(&self.dec, bpm, fs, &beats, beats.len())?;
+            genre::four_kicks(&pattern, bpm, &bar_energy).0
+        } else {
+            0
+        };
         let env = snare::envelope(x, fs);
         let (snares, bars) = snare::detect(&env, fs, bpm, fb_ms, &beats)?;
+        let genre_snares = if for_d {
+            snare::detect_for_genre(&bars, fs, bpm, fb_ms, &beats, k4, &pattern)
+        } else {
+            snare::GenreSnares::default()
+        };
         let bar_snares = snare::detect_for_bar(&bars, fs, bpm, fb_ms, &beats, &pattern);
-        let bp = beatpos::beatpos_correction(x, fs, bpm, fb_ms, &pattern, beats.len() as i32, &snares)?;
+        let bp =
+            beatpos::beatpos_correction(x, fs, bpm, fb_ms, &pattern, beats.len() as i32, &snares)?;
         // +0xc2 is clear when the thread's phrase flag (+0x3908) is set, as it is here.
         let fb2 = bp.fb_ms;
         let beats2 = rhythm::beats_samples(n, fs, bpm, fb2);
         rhythm::RhythmPattern::new(fs).analyze(x, bpm, fb2, fs)?;
+        let bar_pos = if for_d {
+            let n30 = ((fs * 30.0) as usize).min(self.dec.len());
+            beatpos::bar_position(&self.dec[..n30], bpm, fb2, fs)
+        } else {
+            0
+        };
         let bar = if bar_snares.count < 1 || bp.steady {
             fbar
         } else {
-            beatpos::bar_start_correction(x, fs, bpm, fb_ms, fb2, &beats2, &bar_snares, fbar, bp.moved)?
+            beatpos::bar_start_correction(
+                x,
+                fs,
+                bpm,
+                fb_ms,
+                fb2,
+                &beats2,
+                &bar_snares,
+                fbar,
+                bp.moved,
+            )?
         };
-        Some(Downbeat { fb_ms: fb2, bar })
+        Some(BOut {
+            down: Downbeat { fb_ms: fb2, bar },
+            kick6: bp.kick6,
+            snares: genre_snares,
+            bar_pos,
+        })
     }
+}
+
+/// `Sub_Main_B`'s outputs (+0x200 … +0x258).
+#[derive(Debug, Clone)]
+pub struct BOut {
+    pub down: Downbeat,
+    /// +0x208: `BeatposCorrection2016`'s kick-on-6 pattern flag.
+    pub kick6: bool,
+    /// +0x210 / +0x250 / +0x254: `DetectSnarePositionsForGenre`.
+    pub snares: snare::GenreSnares,
+    /// +0x258: `BarPositionJudge`.
+    pub bar_pos: i32,
 }
 
 /// The thread's inputs to `Initialize`: BPM × 100, first beat (ms) and its bar, adjusted when
@@ -164,7 +237,10 @@ pub fn runs(rate: u32, total: u64, bpm100: i32, fb: i64, fbar: i32) -> bool {
         return false;
     }
     let r = rate as f64;
-    let after = (bpm100 as i64 as f64 * 0.00016666666666666666 * ((total as f64 - 32.0) + r * -0.001 * fb as f64)) / r;
+    let after = (bpm100 as i64 as f64
+        * 0.00016666666666666666
+        * ((total as f64 - 32.0) + r * -0.001 * fb as f64))
+        / r;
     (after as i32) > 7 && fb as f64 <= 6_000_000.0 / bpm100 as f64 && total / u64::from(rate) < 7201
 }
 
@@ -215,4 +291,39 @@ pub fn run(p: &PhraseAnalyzer, grid: &mut BeatGrid, rate: u32, total: u64) {
     }
     let down = p.downbeat(bpm100, fb as i32, fbar);
     apply(grid, fb, fbar, down);
+}
+
+/// Stage C on a second read of the track (as the thread re-reads it for `Analyze_CD`).
+pub fn stage_c(path: &std::path::Path, bpm100: i32, down: Downbeat) -> Option<stage_c::COut> {
+    let mut dec = mb_audio::open(path).ok()?;
+    let info = *dec.info();
+    let len = info.total_samples;
+    if len < 2 {
+        return None;
+    }
+    let total = len - 1;
+    let mut c = stage_c::StageC::new(info.sample_rate, total, bpm100, down.fb_ms, down.bar)?;
+    if !c.enough_beats() {
+        return None;
+    }
+    let block = 2 * info.sample_rate as usize;
+    let mut frames = vec![[0.0f32; 2]; block];
+    let mut pcm = vec![[0i16; 2]; block];
+    let mut pos = 0u64;
+    while pos < total && !c.finished && !c.failed {
+        let n = ((total - pos) as usize).min(block);
+        let got = dec.read_frames(&mut frames[..n]);
+        if got == 0 {
+            break;
+        }
+        for (dst, src) in pcm[..got].iter_mut().zip(&frames[..got]) {
+            *dst = [
+                mb_audio::analysis_i16(src[0]),
+                mb_audio::analysis_i16(src[1]),
+            ];
+        }
+        c.put(&pcm[..got]);
+        pos += got as u64;
+    }
+    c.take()
 }
