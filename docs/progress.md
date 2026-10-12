@@ -9,7 +9,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | M3 | export done; **CDJ check pending** (studio) | 1faf385 |
 | M4 | done: deletes (both DBs + files + sync files), old-stick conversion, `playlists3*.sync`, foreign My Tags kept, row paths stay taken, ≥ 4 GiB on FAT32 planned as failed copy; export onto a reference-stick clone keeps every row and file ; My Settings editor (466caa5) | 5abe8e9, 22d7451, d846f4a, eb85e3d, 1729250, 466caa5 |
 | M5 | built from the binary (no trace has a cue write): cue/grid ops with undo, deck UI; device cues built from `djmdCue` (410/410 reference-stick cue sets byte-exact). rekordbox check passed; grid edit byte-exact vs rekordbox | 0d0d509, b3e4840 |
-| M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact 169/169 (AAC fixed: the decode depended on the stack alignment at `AudioConverterFillComplexBuffer`, `decode.md` § 6); Normal-mode beat grid: BPM 161/161, grids identical 160/161 with the phrase pass's downbeat shift; phrase analysis **paused after stage C / partial D** (no PSSI yet); key 169/169 (oracle-a, uncommitted) | 617fc5f, 8def9c4, 9e29e7d |
+| M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact 169/169 (AAC fixed: the decode depended on the stack alignment at `AudioConverterFillComplexBuffer`, `decode.md` § 6); Normal-mode beat grid: BPM 161/161, grids identical 160/161 with the phrase pass's downbeat shift; phrase analysis **paused after stage C / partial D** (no PSSI yet); key 169/169 (oracle-a, commit b9d0a53; was uncommitted) | 617fc5f, 8def9c4, 9e29e7d |
 | M7 | smart lists (rules, editor, XML, USB export); import from device (tracks, playlists, histories); app bundle (`tools/bundle/bundle.sh`); key display follows `ShowOriginalKey`/`KeyStringSetting`. rekordbox.xml export (byte-exact vs oracle-a) and import. **rekordbox checks pending** (`m7_check`, device import, XML) | 0d0d509, 88593cc, d0babf3, e93d3a4, 3997b37, 53af01b, 35c036c |
 
 **M6 key (done; awaiting commit):**
@@ -90,7 +90,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 **Open, not assigned**
 - Export log language: rekordbox writes it in the UI language (`language` preference; only the German column titles are known, from the oracle log). The app uses English.
 - ~~AAC decode parity~~ done (7ec372e): Apple's AAC decoder gives ±1 in a few samples when `AudioConverterFillComplexBuffer` is entered at SP ≡ 48 (mod 64). `mb-audio` now enters it through a trampoline at a fixed alignment matching rekordbox. Auto-gain 169/169 and all waveform tags 19/19 AAC, both oracles, stable under concurrent runs. Test: `cargo test -p mb-audio --test aac_stack`.
-- M6 after Normal-mode beats: phrase stages C/D and PSSI (paused, `analysis-phrase.md` § 9), key (`KeyJudge2`), vocal (TF), Dynamic and high-precision beats (TF + downbeat HMM), auto-cue/embeddings (ORT); an analysis queue in the app.
+- M6 left: phrase stages C/D and PSSI (paused, `analysis-phrase.md` § 9), vocal/PVDI (TF), Dynamic and high-precision beats (TF + downbeat HMM; the user's rekordbox has high precision on, so musicbox's own grids differ from what that rekordbox would write), auto-cue/embeddings. Key is done (b9d0a53) (ORT); an analysis queue in the app.
 
 **Housekeeping:** the disk is tight (≈ 20 GB free after deleting `target/debug`). Workers share one target dir; testing a staged snapshot in a scratch copy doubles the build artifacts, so prefer testing in the repo when the tree is coherent.
 
