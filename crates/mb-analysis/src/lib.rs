@@ -11,6 +11,7 @@
 pub mod beats;
 pub mod loud;
 pub mod loudness;
+pub mod phrase;
 pub mod wavecreator;
 pub mod zoom;
 
@@ -63,6 +64,9 @@ pub struct Options {
     pub loudness: bool,
     /// Beat grid and BPM (Normal mode).
     pub beats: bool,
+    /// Phrase analysis; with `beats` it moves the grid onto the first downbeat
+    /// (`analysis-phrase.md`).
+    pub phrase: bool,
 }
 
 impl Default for Options {
@@ -71,6 +75,7 @@ impl Default for Options {
             waveforms: true,
             loudness: true,
             beats: true,
+            phrase: true,
         }
     }
 }
@@ -91,6 +96,7 @@ pub fn analyze_waveforms(path: impl AsRef<Path>) -> Result<Waveforms> {
             waveforms: true,
             loudness: false,
             beats: false,
+            phrase: false,
         },
     )?;
     Ok(a.waveforms.unwrap_or_default())
@@ -118,6 +124,7 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
         .loudness
         .then(|| loudness::LoudnessAnalyzer::new(rate, total));
     let mut beat = opts.beats.then(|| beats::BeatAnalyzer::new(rate, total));
+    let mut phrase = (opts.beats && opts.phrase).then(|| phrase::PhraseAnalyzer::new(rate, total));
     let block = block_len(rate);
     let mut frames = vec![[0.0f32; 2]; block];
     let mut pcm = vec![[0i16; 2]; block];
@@ -146,6 +153,9 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
         if let Some(b) = &mut beat {
             b.put(pcm);
         }
+        if let Some(p) = &mut phrase {
+            p.put(pcm);
+        }
         pos += got as u64;
     }
     let waveforms = waves.map(|(zoom, wave, loud)| {
@@ -162,9 +172,13 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
             pwvc: w.pwvc,
         }
     });
+    let mut grid = beat.and_then(beats::BeatAnalyzer::finish);
+    if let (Some(g), Some(p)) = (&mut grid, &phrase) {
+        phrase::run(p, g, rate, total);
+    }
     Ok(Analysis {
         waveforms,
         loudness: meter.map(loudness::LoudnessAnalyzer::finish),
-        beats: beat.and_then(beats::BeatAnalyzer::finish),
+        beats: grid,
     })
 }

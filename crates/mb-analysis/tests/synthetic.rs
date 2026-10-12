@@ -116,6 +116,7 @@ fn sine_loudness() {
         waveforms: false,
         loudness: true,
         beats: false,
+        phrase: false,
     };
     let l = mb_analysis::analyze(&*p, opts).unwrap().loudness.unwrap();
     assert!((l.lufs - -20.0).abs() < 0.1, "{l:?}");
@@ -176,6 +177,7 @@ fn click_track_grid() {
         waveforms: false,
         loudness: false,
         beats: true,
+        phrase: true,
     };
     let g = mb_analysis::analyze(&*p, opts).unwrap().beats.unwrap();
     assert_eq!(g.bpm, 12800);

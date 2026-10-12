@@ -177,6 +177,7 @@ fn loudness_matches_rekordbox() {
                         waveforms: false,
                         loudness: true,
                         beats: false,
+                        phrase: false,
                     };
                     let l = mb_analysis::analyze(&t.path, opts)
                         .unwrap()
@@ -209,17 +210,10 @@ fn loudness_matches_rekordbox() {
     );
 }
 
-/// Tracks whose oracle-a grid the phrase pass moved after BALib (`analysis-beats.md` § 8):
-/// rekordbox shifted the whole grid (or renumbered its bars) to `SongStructureAnalyze`'s first
-/// downbeat. Their BPM, beat count, spacing and µs remainders still have to match.
-const PHRASE_SHIFTED: &[&str] = &[
-    "click_128_offset1234",
-    "sweep_20_20k",
-    "tempo_120_to_126",
-    "bands_100_1k_8k",
-    "Oliver Schories - Circles",
-    "Aura Vortex - Futura",
-];
+/// Grids the phrase pass (`analysis-phrase.md`) leaves elsewhere than rekordbox did. The
+/// 96 kHz click: rekordbox kept BALib's first beat, we move it onto the first kick like the
+/// other rates do (`analysis-phrase.md` § 9). The whole grid still has to move by one amount.
+const PHRASE_SHIFTED: &[&str] = &["wav_96k32f/click_128_offset1234"];
 
 /// Normal-mode beat grids (oracle-a: high precision off, BPM range 70–180): BPM × 100 and the
 /// PQTZ/PQT2 beats, for the probes (all tracks with `MB_ORACLE_FULL`).
@@ -251,6 +245,7 @@ fn beats_match_rekordbox() {
                         waveforms: false,
                         loudness: false,
                         beats: true,
+                        phrase: true,
                     };
                     let g = mb_analysis::analyze(&t.path, opts).unwrap().beats.unwrap();
                     let rb = t.dat.as_ref().unwrap().beat_grid().unwrap();
