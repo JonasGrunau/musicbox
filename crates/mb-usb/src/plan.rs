@@ -1179,12 +1179,9 @@ impl<'a> Planner<'a> {
             .playlist(id)
             .ok_or_else(|| Error::Selection(format!("no playlist with ID {id}")))?
             .clone();
-        if node.attribute == 4 {
-            return Err(Error::Plan(format!(
-                "{:?} is an intelligent playlist; exporting those is not supported",
-                node.name
-            )));
-        }
+        // An intelligent playlist (attribute 4) is exported like a playlist: its tracks were
+        // evaluated into `src.entries` when the source was read, and the device list is a plain
+        // playlist (`createNewList(2, 0, …)`, export.md § 1.7).
         let folder = node.is_folder();
         let wanted = self.exportable_entries(id);
 

@@ -5,6 +5,7 @@
 //! `docs/re/ops/export-usb.md` (the reads rekordbox does), `docs/re/ops/export-devlib.md`.
 
 use crate::{Error, Result};
+use mb_core::smartlist;
 use mb_devlib::schema::{MasterMenuItem, MasterMenuSetting};
 use mb_devlib::{ListAttribute, MenuSeed, MyTagRow};
 use rusqlite::types::Value;
@@ -275,6 +276,12 @@ pub struct SourceLibrary {
     pub tracks: HashMap<String, SourceTrack>,
     /// Content IDs by device master content ID, for mapping device rows back to the library.
     pub by_master_content_id: HashMap<u32, String>,
+    /// Rule XML of every intelligent playlist (`Attribute` 4) by playlist ID
+    /// (`docs/re/smartlist.md`).
+    pub smart_lists: HashMap<String, String>,
+    /// Every live content ID in `djmdContent` rowid order (rekordbox's `getAllCollection`
+    /// order, the order a smart list's tracks come out in).
+    pub collection_order: Vec<String>,
 }
 
 /// A library directory as captured in fixtures: `options.json` + `rekordbox/master.db` (with
@@ -389,7 +396,8 @@ LEFT JOIN djmdArtist aa ON aa.ID = al.AlbumArtistID
 LEFT JOIN djmdGenre ge ON ge.ID = c.GenreID
 LEFT JOIN djmdLabel la ON la.ID = c.LabelID
 LEFT JOIN djmdKey k ON k.ID = c.KeyID
-WHERE c.rb_local_deleted = 0";
+WHERE c.rb_local_deleted = 0
+ORDER BY c.rowid";
 
 fn track_row(r: &Row) -> rusqlite::Result<SourceTrack> {
     Ok(SourceTrack {
@@ -505,6 +513,17 @@ impl SourceLibrary {
         analysis_root: &Path,
         selection: &[SelectionItem],
     ) -> Result<Self> {
+        Self::load_at(master, analysis_root, selection, local_clock())
+    }
+
+    /// [`SourceLibrary::load`] with an explicit time for the smart lists' "in the last N
+    /// days/months" conditions.
+    pub fn load_at(
+        master: &Connection,
+        analysis_root: &Path,
+        selection: &[SelectionItem],
+        clock: smartlist::Clock,
+    ) -> Result<Self> {
         let dbid = master.query_row("select DBID from djmdProperty", [], |r| int(r, 0))? as u32;
         let cloud: Option<i64> = master
             .query_row(
@@ -524,6 +543,7 @@ impl SourceLibrary {
             menus: load_menus(master)?,
             my_tags: load_my_tags(master)?,
             playlists: load_playlists(master)?,
+            smart_lists: load_smart_lists(master)?,
             ..Default::default()
         };
 
@@ -541,20 +561,9 @@ impl SourceLibrary {
                 SelectionItem::Tracks(ids) => needed_tracks.extend(ids.iter().cloned()),
             }
         }
-        let mut stmt = master.prepare(
-            "select ContentID from djmdSongPlaylist where PlaylistID = ?1 and rb_local_deleted = 0 \
-             order by TrackNo",
-        )?;
-        for list in &needed_lists {
-            let ids = stmt
-                .query_map([list], |r| text(r, 0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            needed_tracks.extend(ids.iter().cloned());
-            lib.entries.insert(list.clone(), ids);
-        }
-
         // Every live track: the selection's tracks get their files checked; all of them are
-        // needed to map device rows back (My Tag relink, playlist comparison).
+        // needed to map device rows back (My Tag relink, playlist comparison) and to evaluate
+        // smart lists.
         let mut song_tags: HashMap<String, Vec<u32>> = HashMap::new();
         let mut stmt = master.prepare(
             "select ContentID, MyTagID from djmdSongMyTag where rb_local_deleted = 0 \
@@ -564,15 +573,41 @@ impl SourceLibrary {
             let (content, tag) = row?;
             song_tags.entry(content).or_default().push(tag as u32);
         }
-        let needed: HashSet<&String> = needed_tracks.iter().collect();
         let mut cues = load_cues(master)?;
         let mut stmt = master.prepare(TRACK_SQL)?;
-        let rows = stmt
+        let mut rows = stmt
             .query_map([], track_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for mut t in rows {
+        for t in &mut rows {
             t.my_tags = song_tags.remove(&t.id).unwrap_or_default();
             t.cues = cues.remove(&t.id).unwrap_or_default();
+        }
+        lib.collection_order = rows.iter().map(|t| t.id.clone()).collect();
+
+        // Entries of the lists to export. A smart list's tracks are evaluated now, as
+        // `exportPlaylist` does (`getSmartPlaylistTrack`, export.md § 1.7).
+        let mut stmt = master.prepare(
+            "select ContentID from djmdSongPlaylist where PlaylistID = ?1 and rb_local_deleted = 0 \
+             order by TrackNo",
+        )?;
+        let core: Vec<mb_core::Track> = if needed_lists.iter().any(|l| lib.smart_lists.contains_key(l)) {
+            rows.iter().map(core_track).collect()
+        } else {
+            Vec::new()
+        };
+        for list in &needed_lists {
+            let ids = match lib.smart_lists.get(list) {
+                Some(xml) => evaluate(xml, &core, &rows, clock),
+                None => stmt
+                    .query_map([list], |r| text(r, 0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?,
+            };
+            needed_tracks.extend(ids.iter().cloned());
+            lib.entries.insert(list.clone(), ids);
+        }
+
+        let needed: HashSet<&String> = needed_tracks.iter().collect();
+        for mut t in rows {
             if needed.contains(&t.id) {
                 resolve_files(&mut t, analysis_root);
             }
@@ -587,6 +622,19 @@ impl SourceLibrary {
             }
         }
         Ok(lib)
+    }
+
+    /// The tracks of smart list `id` over this library's tracks in [`Self::collection_order`]
+    /// (for sources built without master.db, e.g. tests). `None` when `id` is not a smart list.
+    pub fn smart_list_entries(&self, id: &str, clock: smartlist::Clock) -> Option<Vec<String>> {
+        let xml = self.smart_lists.get(id)?;
+        let rows: Vec<SourceTrack> = self
+            .collection_order
+            .iter()
+            .filter_map(|c| self.tracks.get(c).cloned())
+            .collect();
+        let core: Vec<mb_core::Track> = rows.iter().map(core_track).collect();
+        Some(evaluate(xml, &core, &rows, clock))
     }
 
     fn collect_lists(&self, id: &str, out: &mut Vec<String>) {
@@ -800,6 +848,82 @@ fn load_my_tags(master: &Connection) -> Result<Vec<SourceMyTag>> {
         out.extend(all.iter().filter(|t| t.4 == gid).map(node));
     }
     Ok(out)
+}
+
+/// `SmartList` of every live `Attribute` 4 row.
+fn load_smart_lists(master: &Connection) -> Result<HashMap<String, String>> {
+    let mut stmt = master.prepare(
+        "select ID, SmartList from djmdPlaylist where rb_local_deleted = 0 and Attribute = 4",
+    )?;
+    let rows = stmt
+        .query_map([], |r| Ok((text(r, 0)?, text(r, 1)?)))?
+        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+    Ok(rows)
+}
+
+/// The content IDs a smart list's rules select from `rows` (collection order); no rules (or
+/// unreadable XML) select nothing, as in rekordbox.
+fn evaluate(xml: &str, core: &[mb_core::Track], rows: &[SourceTrack], clock: smartlist::Clock) -> Vec<String> {
+    let Some(list) = smartlist::SmartList::parse(xml) else {
+        return Vec::new();
+    };
+    let tags: HashMap<mb_core::DbId, Vec<i64>> = rows
+        .iter()
+        .filter(|t| !t.my_tags.is_empty())
+        .map(|t| (mb_core::DbId(t.id.clone()), t.my_tags.iter().map(|&x| i64::from(x)).collect()))
+        .collect();
+    list.evaluate(core, &tags, clock).into_iter().map(|id| id.0.clone()).collect()
+}
+
+/// The fields `mb_core::smartlist` reads (`RowDataTrack` as `db::operate` sees it).
+fn core_track(t: &SourceTrack) -> mb_core::Track {
+    let pos = |v: i64| (v > 0).then_some(v as u32);
+    mb_core::Track {
+        id: mb_core::DbId(t.id.clone()),
+        title: t.title.clone(),
+        artist: t.artist.clone(),
+        album: t.album.clone(),
+        genre: t.genre.clone(),
+        label: t.label.clone(),
+        remixer: t.remixer.clone(),
+        composer: t.composer.clone(),
+        original_artist: t.original_artist.clone(),
+        album_artist: t.album_artist.clone(),
+        mix_name: t.subtitle.clone(),
+        file_name: t.file_name.clone(),
+        key: t.key.clone(),
+        color: u8::try_from(t.color_id).ok().filter(|c| (1..=8).contains(c)),
+        bpm_x100: pos(t.bpm_x100),
+        length_seconds: pos(t.length),
+        track_no: pos(t.track_no),
+        disc_no: pos(t.disc_no),
+        release_year: pos(t.release_year),
+        rating: t.rating.clamp(0, 255) as u8,
+        comment: t.comment.clone(),
+        play_count: t.play_count.max(0) as u32,
+        bitrate: pos(t.bitrate),
+        sample_rate: pos(t.sample_rate),
+        bit_depth: pos(t.bit_depth),
+        file_size: (t.file_size > 0).then_some(t.file_size as u64),
+        file_type: mb_core::FileType::from_code(t.file_type),
+        path: PathBuf::from(&t.folder_path),
+        date_added: t.stock_date.clone(),
+        date_created: t.date_created.clone(),
+        release_date: t.release_date.clone(),
+        analysis_path: None,
+        artwork_path: None,
+        analysed: t.analysed.max(0) as u32,
+    }
+}
+
+/// Now with the local UTC offset (`localtime_r`), for "in the last N days/months".
+pub fn local_clock() -> smartlist::Clock {
+    let clock = smartlist::Clock::utc_now();
+    let t = clock.unix as libc::time_t;
+    // SAFETY: `tm` is plain data; `localtime_r` only writes into it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
+    smartlist::Clock { unix: clock.unix, utc_offset: if ok { tm.tm_gmtoff } else { 0 } }
 }
 
 fn load_playlists(master: &Connection) -> Result<Vec<SourcePlaylist>> {

@@ -287,6 +287,20 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
 - **Playlist artwork** (Plus `playlist.image_id`): `write_artwork_file(…, 4, …)` / `delete_artwork_file` for lists that have an image.
 - **Entry order:** entries are appended one by one as each track finishes, so a list's order is the master order. Entry `sequenceNo` is 1-based (`devlib.md`, `pdb.md`).
 - **iTunes lists:** browse type 3 → `exportiTunesPlaylist`, with marker file `sync.itunes.temp`.
+- **Intelligent playlists** (master `Attribute` 4; `smartlist.md`). Verified from code: `exportPlaylist` @0x1009c5c74, list-type switch on `ListDataPlaylist+0x94`.
+  - **Tracks are evaluated at export time:**
+    - A plain list (attribute 0) reads its entries with `getPlaylistTrack`.
+    - A smart list calls the main controller's `getSmartPlaylistTrack` (vtable +0xa8), which evaluates the rules over the collection now (`db::getSmartlistContentData`).
+  - **Track order:**
+    - `SmartListSortSetting::getSortSetting` @0x100087fec returns the sort of the intelligent-playlist track view. It reads the open list view, or else the saved `TableHeader-IntelligentPlaylistTracks` header in `browseSetting.xml`.
+    - With sort column 0 the evaluated (collection) order is kept. Any other column sorts the tracks with `TrackListSorter` first.
+    - So the device order follows how the user last sorted that view. *Hypothesis:* column 0 is the default.
+  - **Device list:** created with `createNewList(2, 0, name, parent, seq)` (vtable +0x328, attribute **0**). On the device a smart list is an ordinary playlist with a snapshot of its tracks, in both export.pdb and exportLibrary.db.
+  - **Re-export:** matched by parent and name, and compared exactly like a playlist, against the *current* evaluation.
+    - The same tracks in the same order → skipped.
+    - Otherwise → emptied and refilled.
+    - A rule or library change that alters the result therefore refreshes the device list on the next export.
+  - **Sync Manager** always re-exports smart lists, whatever their timestamp (§ 4.4 phase 2).
 
 ### 1.8 Export log (verified: code + `fixtures/oracle-a/export-log.txt`, reproduced byte for byte)
 When a job finishes, `exportProcessChange` @0x1009bf758 writes the log, and the browser shows "One or more files were not exported. Check the log file saved in the "Documents" folder." (message 10).
@@ -727,7 +741,12 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
   - My Tags: one sync on a new stick, two on an existing one (mount + export, as on the oracle stick). After the tree rewrite, the links of every device track from this library are re-added (*hypothesis*: the trace shows `select content_id, masterContentId from content where masterDbId = …` right after `delete from myTag_content`).
   - My Tags are written only when the stick's `myTagMasterDBID` (exportExt.pdb `DJDBEXDBPROPERTYOPTION`, else the Plus `property` row) is 0 or this library's value, as `syncMyTag` @0x100c51eec decides (verified: device value via vtable +0x508; 0 → write; equal → controller +0x40 set, sync). For any other value rekordbox asks whether to overwrite; musicbox answers "no" unless `PlanOptions::overwrite_foreign_my_tags` is set: no tree rewrite and no My Tag links for the exported tracks (controller +0x40 stays 0, so `replaceMyTagOnTrack` does not run). Checked by `tests/foreign_stick.rs` on a copy of the reference stick.
   - A `/Contents` path that a track row of either database still points at counts as taken even when the file is missing. rekordbox tests only the file (§ 1.4), so on such a stick it would give the path to the new track and purge the old row's ANLZ set (§ 1.6). musicbox picks the next `-n` name instead. This only differs on a stick whose rows point at missing files.
-  - Folders: a selected folder is created (attribute 1) and its children are appended inside it in master order (not moved to position 0; *hypothesis*). Intelligent playlists are refused.
+  - Folders: a selected folder is created (attribute 1) and its children are appended inside it in master order (not moved to position 0; *hypothesis*).
+  - Intelligent playlists are exported as in § 1.7.
+    - `SourceLibrary::load` evaluates each selected smart list with `mb_core::smartlist` in collection (rowid) order, at the local time of the load (`load_at` takes an explicit clock).
+    - Its tracks go into `entries`, and the planner treats the list as a plain playlist (attribute 0 on the device; skipped when identical, refilled otherwise).
+    - Unlike rekordbox, musicbox does not apply a view sort. *Hypothesis:* sort column 0 matches rekordbox's default.
+    - `tests/smartlist.rs` covers it: a new stick, an unchanged result (skipped), a library edit that changes the result (refilled in collection order, new track copied), and a rule change that empties the list. A second test evaluates a smart list on an oracle-a copy and checks the result against SQL.
   - Missing `_s`/`_m` artwork is generated from the base image with the `image` crate (letterboxed on black, q85); those files are not byte-identical to rekordbox's JUCE encoder. Every fixture track has both variants.
   - macOS tags every file a process creates with `com.apple.provenance`; on FAT the OS stores it in an AppleDouble `._` file. The oracle stick has such files next to what rekordbox wrote (`PIONEER/._*`; that they come from this attribute is a *hypothesis*). The copy itself carries no attribute of the source (quarantine, last-used date).
   - Device Library Plus conversion: a stick with export.pdb but no exportLibrary.db is converted first (`convert.rs`, § 6.4; verified against the reference stick), then exported. Converting over an existing exportLibrary.db is not implemented.

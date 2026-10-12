@@ -133,16 +133,19 @@ Stored values (the dialog's code):
 - *Hypothesis:* the creation flow is insert first and criteria after the dialog. The stored rows do not depend on that order.
 - *Hypothesis:* the criteria update sets the list's `masterPlaylists6.xml` timestamp to now, like a rename.
 
-## USB export
-- Sync Manager's `playlists3*.sync` files list smart lists (`Attribute="4"`) with a `Dev_ID`. On the reference stick they exist on the device as ordinary playlists of their tracks.
-- `mb-usb` still refuses smart lists (`export.md` § 8). Exporting the evaluated tracks as a plain list is the follow-up.
+## USB export (`export.md` § 1.7)
+- `exportPlaylist` evaluates a smart list when the export starts (`getSmartPlaylistTrack`). It sorts the tracks by the intelligent-playlist view's current sort, if one is set.
+- The device list is created as a plain playlist (attribute 0) and holds a snapshot of the tracks.
+- A re-export compares the device list with the current result: identical → skipped, otherwise emptied and refilled.
+- Sync Manager's `playlists3*.sync` files list smart lists (`Attribute="4"`) with a `Dev_ID` and always re-export them. On the reference stick they exist as ordinary playlists.
+- `mb-usb` does the same (`SourceLibrary::load`), keeping collection order (no view sort).
 
 ## musicbox
 | Area | Behaviour |
 |---|---|
 | `mb_core::smartlist` | Parse, serialise (byte-compatible with the JUCE writer above) and evaluate |
 | Text matching | Approximation of ICU primary strength: NFKD, combining marks removed, lower case, `ß` → `ss` |
-| Time zone | The app passes the local UTC offset (`localtime_r`); `mb-xml` uses UTC |
+| Time zone | The app and `mb-usb` pass the local UTC offset (`localtime_r`); `mb-xml` uses UTC |
 | Snapshot | `LibrarySnapshot::smart_lists` holds each smart list's XML; `Track` gained `album_artist`, `mix_name`, `file_name` and `date_created` for the evaluator |
 | `mb-library` | `Command::CreateSmartList` runs the create statements, then the criteria update. `Command::SetSmartList` runs one builder update, with undo |
 | Allowed on smart lists | Rename, move and delete (with restore) |
@@ -153,4 +156,4 @@ Stored values (the dialog's code):
 - [ ] What "Update automatically" does, given that `createNode` always gets `false`.
 - [ ] `DatabaseMediator::fixMyTagIdsInSmartlistCriteria` @0x101942a5c (My Tag ID remapping; probably cloud or import).
 - [ ] How close the NFKD approximation is to ICU primary strength for non-Latin scripts (kana, ligatures).
-- [ ] How rekordbox exports a smart list to a device: as a snapshot of its tracks at export time, presumably via `getTrackList`.
+- [ ] Which sort column the intelligent-playlist view has by default (0 = collection order is assumed for exports).
