@@ -176,6 +176,7 @@ fn loudness_matches_rekordbox() {
                     let opts = mb_analysis::Options {
                         waveforms: false,
                         loudness: true,
+                        beats: false,
                     };
                     let l = mb_analysis::analyze(&t.path, opts)
                         .unwrap()
@@ -200,6 +201,107 @@ fn loudness_matches_rekordbox() {
     });
     let failures = failures.into_inner().unwrap();
     eprintln!("checked {} tracks", tracks.len());
+    assert!(
+        failures.is_empty(),
+        "{} mismatches:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Tracks whose oracle-a grid the phrase pass moved after BALib (`analysis-beats.md` § 8):
+/// rekordbox shifted the whole grid (or renumbered its bars) to `SongStructureAnalyze`'s first
+/// downbeat. Their BPM, beat count, spacing and µs remainders still have to match.
+const PHRASE_SHIFTED: &[&str] = &[
+    "click_128_offset1234",
+    "sweep_20_20k",
+    "tempo_120_to_126",
+    "bands_100_1k_8k",
+    "Oliver Schories - Circles",
+    "Aura Vortex - Futura",
+];
+
+/// Normal-mode beat grids (oracle-a: high precision off, BPM range 70–180): BPM × 100 and the
+/// PQTZ/PQT2 beats, for the probes (all tracks with `MB_ORACLE_FULL`).
+#[test]
+fn beats_match_rekordbox() {
+    let Some(tracks) = common::oracle_tracks("oracle-a") else {
+        eprintln!("fixtures/oracle-a missing, skipping");
+        return;
+    };
+    let full = std::env::var_os("MB_ORACLE_FULL").is_some();
+    let tracks: Vec<_> = tracks
+        .into_iter()
+        .filter(|t| t.ext.as_ref().and_then(|e| e.ext_beat_grid()).is_some())
+        .filter(|t| full || t.path.to_string_lossy().contains("/re-work/corpus/probes/"))
+        .collect();
+    if tracks.is_empty() || !mb_audio::mpg123::available() {
+        eprintln!("corpus or libmpg123 missing, skipping");
+        return;
+    }
+    let failures = std::sync::Mutex::new(Vec::new());
+    let identical = std::sync::atomic::AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    std::thread::scope(|s| {
+        for chunk in tracks.chunks(tracks.len().div_ceil(threads)) {
+            let (failures, identical) = (&failures, &identical);
+            s.spawn(move || {
+                for t in chunk {
+                    let opts = mb_analysis::Options {
+                        waveforms: false,
+                        loudness: false,
+                        beats: true,
+                    };
+                    let g = mb_analysis::analyze(&t.path, opts).unwrap().beats.unwrap();
+                    let rb = t.dat.as_ref().unwrap().beat_grid().unwrap();
+                    let x = t.ext.as_ref().unwrap().ext_beat_grid().unwrap();
+                    let name = t.path.display().to_string();
+                    let mut bad = Vec::new();
+                    if Some(i64::from(g.bpm)) != t.bpm {
+                        bad.push(format!("bpm {} vs {:?}", g.bpm, t.bpm));
+                    }
+                    if g.beats.len() != rb.beats.len() {
+                        bad.push(format!("{} beats vs {}", g.beats.len(), rb.beats.len()));
+                    }
+                    let ours: Vec<u16> = g.beats.iter().map(|b| b.sub_ms).collect();
+                    if ours != x.entries {
+                        bad.push("PQT2 µs entries differ".into());
+                    }
+                    let same = g.beats.iter().zip(&rb.beats).all(|(a, b)| {
+                        (a.beat_in_bar, a.tempo, a.time_ms) == (b.beat_in_bar, b.tempo, b.time_ms)
+                    });
+                    if same && bad.is_empty() {
+                        identical.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    } else if !PHRASE_SHIFTED.iter().any(|p| name.contains(p)) {
+                        bad.push("grid differs".into());
+                    } else {
+                        // The phrase pass moves every beat by the same number of ms.
+                        let d: Vec<i64> = g
+                            .beats
+                            .iter()
+                            .zip(&rb.beats)
+                            .map(|(a, b)| i64::from(b.time_ms) - i64::from(a.time_ms))
+                            .collect();
+                        if d.windows(2).any(|w| w[0] != w[1]) {
+                            bad.push("not a uniform shift".into());
+                        }
+                    }
+                    if !bad.is_empty() {
+                        failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("{name}: {}", bad.join(", ")));
+                    }
+                }
+            });
+        }
+    });
+    let failures = failures.into_inner().unwrap();
+    eprintln!(
+        "checked {} tracks, {} identical",
+        tracks.len(),
+        identical.into_inner()
+    );
     assert!(
         failures.is_empty(),
         "{} mismatches:\n{}",

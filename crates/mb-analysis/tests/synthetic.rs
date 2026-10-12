@@ -115,6 +115,7 @@ fn sine_loudness() {
     let opts = mb_analysis::Options {
         waveforms: false,
         loudness: true,
+        beats: false,
     };
     let l = mb_analysis::analyze(&*p, opts).unwrap().loudness.unwrap();
     assert!((l.lufs - -20.0).abs() < 0.1, "{l:?}");
@@ -122,4 +123,73 @@ fn sine_loudness() {
     assert!((f64::from(l.peak) - amp / 32768.0).abs() < 1e-3, "{l:?}");
     let (gh, gl, _, _) = l.mixer_param();
     assert_eq!(f32::from_bits(u32::from(gh) << 16 | u32::from(gl)), l.gain);
+}
+
+/// Kicks on every beat (accented downbeats) and offbeat hats at 128 BPM after 1.234 s of
+/// silence, synthesised like the `click_128_offset1234` probe: BALib's grid is 128.00 BPM, steps
+/// 468.75 ms and has a beat on the first kick.
+#[test]
+fn click_track_grid() {
+    let rate = 44100u32;
+    let (first, period, secs) = (1.234, 60.0 / 128.0, 40.0);
+    let n = (secs * f64::from(rate)) as usize;
+    let mut buf = vec![0f64; n];
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut white = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+    };
+    let idx = |t: f64| (t * f64::from(rate)).round() as usize;
+    let mut beat = 0u64;
+    loop {
+        let t = first + beat as f64 * period;
+        if t >= secs {
+            break;
+        }
+        let amp = 0.6 * if beat.is_multiple_of(4) { 1.41 } else { 1.0 };
+        let mut phase = 0.0;
+        for i in 0..idx(0.25) {
+            let x = i as f64 / f64::from(rate);
+            phase += std::f64::consts::TAU * (50.0 + 100.0 * (-x * 40.0).exp()) / f64::from(rate);
+            if let Some(s) = buf.get_mut(idx(t) + i) {
+                *s += amp * phase.sin() * (-x * 18.0).exp();
+            }
+        }
+        let mut prev = 0.0;
+        for i in 0..idx(0.04) {
+            let w = white();
+            let x = i as f64 / f64::from(rate);
+            if let Some(s) = buf.get_mut(idx(t + period / 2.0) + i) {
+                *s += 0.15 * (w - prev) * (-x * 90.0).exp();
+            }
+            prev = w;
+        }
+        beat += 1;
+    }
+    let p = wav("click128.wav", rate, secs, |i| {
+        let v = (buf[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
+        (v, v)
+    });
+    let opts = mb_analysis::Options {
+        waveforms: false,
+        loudness: false,
+        beats: true,
+    };
+    let g = mb_analysis::analyze(&*p, opts).unwrap().beats.unwrap();
+    assert_eq!(g.bpm, 12800);
+    assert!(g.beats.iter().all(|b| b.tempo == 12800));
+    for w in g.beats.windows(2) {
+        let d = w[1].time_ms - w[0].time_ms;
+        assert!((468..=469).contains(&d), "gap {d}");
+        assert_eq!(w[1].beat_in_bar, w[0].beat_in_bar % 4 + 1);
+    }
+    assert!(
+        g.beats
+            .iter()
+            .any(|b| (i64::from(b.time_ms) - 1234).abs() <= 15),
+        "no beat near the first kick: {:?}",
+        &g.beats[..4]
+    );
 }

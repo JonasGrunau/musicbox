@@ -15,7 +15,8 @@ Status values: **verified** (checked against real files or a trace), **hypothesi
 | [smartlist.md](smartlist.md) | intelligent playlists: `SmartList` XML, properties/operators, evaluation, write path | binary-derived (format, evaluator, serialiser, writes); no trace or rekordbox-written sample yet |
 | [analysis-waveforms.md](analysis-waveforms.md) | waveform tags PWAV, PWV2, PWV3 (BALib) and PWV4–PWV7, PWVC (WaveCreator) | verified: all 8 tags byte-exact on 169/169 tracks vs oracle-b; in some runs AAC came out ±1 because AudioToolbox's decode varies (§ 6) |
 | [analysis-loudness.md](analysis-loudness.md) | auto-gain: libebur128 integrated loudness and sample peak → `djmdMixerParam` | verified: gain float bit-exact on 162/169 tracks (all non-AAC; 7 AAC tracks 1 ulp off), peak 169/169 |
-| analysis.md | analysis pipeline beyond waveforms and loudness: BALib beats/key, phrase, vocal | open |
+| [analysis-beats.md](analysis-beats.md) | beat grid + BPM, Normal mode: BALib v1 (BeatSensor, BeatInfoAnalyzer, UnitEnvelopeMaker, UnitBeatAdjust) → `djmdContent.BPM`, PQTZ, PQT2 | verified vs oracle-a: BPM × 100 161/161, beat count 161/161, PQTZ+PQT2 identical 140/161; the other 21 were moved afterwards by the phrase pass (§ 8, not ported) |
+| analysis.md | analysis pipeline beyond waveforms, loudness and Normal-mode beats: key, phrase (moves the grid, `analysis-beats.md` § 8), vocal, high-precision/Dynamic beats | open |
 | [decode.md](decode.md) | per-format decoding, analysis rate, 16-bit analysis input, resampler, PVBR | verified: lengths 169/169, PVBR 37/37 byte-exact, PVB2 23/23, per-format onset columns match rekordbox; MP3 and SRC sample identity confirmed through waveform parity; AAC decode varies between runs (analysis-waveforms.md § 6) |
 
 ## Binary landmarks (rekordbox 7.2.19, arm64 slice)

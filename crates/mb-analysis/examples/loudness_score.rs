@@ -41,6 +41,7 @@ fn main() {
                     let opts = mb_analysis::Options {
                         waveforms: false,
                         loudness: true,
+                        beats: false,
                     };
                     let r = mb_analysis::analyze(&t.path, opts).map(|a| a.loudness.unwrap());
                     rows.lock().unwrap().push((t, r));

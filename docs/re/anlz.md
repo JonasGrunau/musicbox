@@ -219,7 +219,7 @@ Writer `write_pmai_ext_quantize_ext` @0x1013d09a0, setters `set_pmai_ext_ext_bea
 | 0x2c | u32 | checksum: wrapping sum over all beats of `beat_in_bar + tempo + time_ms` | V (681/681) |
 | 0x30 | u32 | beat number offset (`set_pmai_ext_beat_num_offset`); written only when the header is 0x38 long; 0 in fixtures | C |
 | 0x34 | u32 | 0 | C |
-| 0x38 | u16 × count | per-beat value: the setter copies the u16 at offset 8 of each 12-byte `DetailedBeatInfo`. Range 0..997 in fixtures: sub-millisecond part of the beat time in µs | H |
+| 0x38 | u16 × count | per-beat value: the setter copies the u16 at offset 8 of each 12-byte `DetailedBeatInfo`, the µs remainder of the beat time (`µs = pos·10⁶/rate`, `ms = µs/1000`, value `µs − 1000·ms`; `analysis-beats.md` § 7). Range 0..997 in fixtures | V (identical on all 161 grids rekordbox analysed in oracle-a) |
 
 ### PWV5: colour scrolling waveform (.EXT)
 Writer `write_pmai_ext_new_zoom_wave` @0x1013d0c40, init `init_pmai_ext_new_zoom_wave` @0x1013cd5d8. View: `tags::WaveColorScroll`.
@@ -370,7 +370,7 @@ Code: `mb_anlz::usb::scramble_vocal_detect`, unit-tested for involution and the 
 ## Open questions
 - PMAI header values 0x0e/0x10/0x14 (version numbers?) and the one EXT with 0x0e = 0.
 - PQTZ entries with `beat_in_bar` = 0 (8 stick files, near the end).
-- PQT2 per-beat u16 and PCP2 0x1e/0x20: µs remainders? Needs a track with known sub-ms positions.
+- PCP2 0x1e/0x20: µs remainders like PQT2's per-beat value (now verified, `analysis-beats.md` § 7)? Needs a cue at a known sub-ms position.
 - PCP2 0x1d and the 44-byte extension tail; the raw buffers after PWV3 and in PCP2.
 - PCOB 0x14/0x16 and PCPT prev/next semantics (need a library with several memory cues).
 - PWV4 byte meaning (b0..b2): confirm with the analysis writer or a rendering diff.

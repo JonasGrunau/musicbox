@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Track analysis matching rekordbox 7.2.19: waveforms (spec: docs/re/analysis-waveforms.md)"
+description = "Track analysis matching rekordbox 7.2.19: waveforms, auto-gain, Normal-mode beat grid (specs: docs/re/analysis-*.md)"
 
 [dependencies]
 thiserror.workspace = true

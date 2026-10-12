@@ -1,12 +1,14 @@
 //! rekordbox 7.2.19's track analysis, ported. So far: the waveform tags (PWAV, PWV2, PWV3, PWV4,
-//! PWV5, PWV6, PWV7, PWVC; `docs/re/analysis-waveforms.md`) and the auto-gain loudness
-//! (`docs/re/analysis-loudness.md`).
+//! PWV5, PWV6, PWV7, PWVC; `docs/re/analysis-waveforms.md`), the auto-gain loudness
+//! (`docs/re/analysis-loudness.md`) and the Normal-mode beat grid with its BPM
+//! (`docs/re/analysis-beats.md`).
 //!
 //! The analysis reads the decoded track (`mb-audio`, rekordbox's timeline) at positions
 //! `0 .. L − 1`, quantised to 16 bit (`mb_audio::analysis_i16`), in blocks of two seconds, and
-//! feeds the same samples to BALib (PWAV/PWV2/PWV3), WaveCreator (PWV4–7, PWVC) and the
+//! feeds the same samples to BALib (PWAV/PWV2/PWV3, beats), WaveCreator (PWV4–7, PWVC) and the
 //! loudness meter.
 
+pub mod beats;
 pub mod loud;
 pub mod loudness;
 pub mod wavecreator;
@@ -59,6 +61,8 @@ pub struct Options {
     pub waveforms: bool,
     /// Auto-gain (`AutoGain` preference).
     pub loudness: bool,
+    /// Beat grid and BPM (Normal mode).
+    pub beats: bool,
 }
 
 impl Default for Options {
@@ -66,6 +70,7 @@ impl Default for Options {
         Self {
             waveforms: true,
             loudness: true,
+            beats: true,
         }
     }
 }
@@ -75,6 +80,7 @@ impl Default for Options {
 pub struct Analysis {
     pub waveforms: Option<Waveforms>,
     pub loudness: Option<Loudness>,
+    pub beats: Option<beats::BeatGrid>,
 }
 
 /// Analyses the waveforms of the audio file at `path`.
@@ -84,6 +90,7 @@ pub fn analyze_waveforms(path: impl AsRef<Path>) -> Result<Waveforms> {
         Options {
             waveforms: true,
             loudness: false,
+            beats: false,
         },
     )?;
     Ok(a.waveforms.unwrap_or_default())
@@ -110,6 +117,7 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
     let mut meter = opts
         .loudness
         .then(|| loudness::LoudnessAnalyzer::new(rate, total));
+    let mut beat = opts.beats.then(|| beats::BeatAnalyzer::new(rate, total));
     let block = block_len(rate);
     let mut frames = vec![[0.0f32; 2]; block];
     let mut pcm = vec![[0i16; 2]; block];
@@ -135,6 +143,9 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
         if let Some(m) = &mut meter {
             m.put(pcm);
         }
+        if let Some(b) = &mut beat {
+            b.put(pcm);
+        }
         pos += got as u64;
     }
     let waveforms = waves.map(|(zoom, wave, loud)| {
@@ -154,5 +165,6 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
     Ok(Analysis {
         waveforms,
         loudness: meter.map(loudness::LoudnessAnalyzer::finish),
+        beats: beat.and_then(beats::BeatAnalyzer::finish),
     })
 }

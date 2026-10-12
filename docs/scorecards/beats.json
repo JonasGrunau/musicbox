@@ -1,0 +1,58 @@
+{
+  "scorecard": "beat grid + BPM (Normal mode, BALib v1)",
+  "date": "2026-10-12",
+  "rekordbox": "7.2.19.0342",
+  "macos": "27.0",
+  "code": "crates/mb-analysis/src/beats/",
+  "spec": "docs/re/analysis-beats.md",
+  "command": "cargo run --release -p mb-analysis --example beat_score  (--verbose lists every track; --dump prints beats)",
+  "test": "cargo test --release -p mb-analysis --test oracle beats_match_rekordbox  (probes; MB_ORACLE_FULL=1 for all 161)",
+  "fixture": "oracle-a (Normal mode, BPM range 70-180, high precision off, phrase analysis on)",
+  "tracks": 161,
+  "tracks_note": "the 161 oracle-a tracks with a PQT2 (analysed by rekordbox itself); the 8 shipped sampler loops carry preset grids",
+  "bpm_x100_exact": 161,
+  "beat_count_exact": 161,
+  "pqtz_pqt2_identical": 140,
+  "bar_numbers_match": 151,
+  "beats": {
+    "total": 94897,
+    "exact_ms": 92502,
+    "within_1ms": 92502,
+    "share_within_1ms": 0.975
+  },
+  "targets": {
+    "bpm_x100_exact": ">= 99%: met (100%)",
+    "beats_within_1ms": ">= 99.5%: not met (97.5%); every miss is the phrase pass's whole-grid shift",
+    "downbeat": ">= 99%: not met (151/161 = 93.8%); every miss is the phrase pass's renumbering"
+  },
+  "phrase_pass_moved": {
+    "cause": "CBeatAnalyzeThread::analyze moves the grid to SongStructureAnalyze's first downbeat (spec § 8); not ported",
+    "invariant": "BPM, beat count, spacing, per-beat tempo and PQT2 µs remainders still match on all 21",
+    "tracks": [
+      {"path": "probes/aiff_44k16/click_128_offset1234.aiff", "shift_ms": 936},
+      {"path": "probes/flac_44k16/click_128_offset1234.flac", "shift_ms": 936},
+      {"path": "probes/flac_48k24/click_128_offset1234.flac", "shift_ms": 936},
+      {"path": "probes/m4a_alac/click_128_offset1234.m4a", "shift_ms": 936},
+      {"path": "probes/wav_22k16_mono/click_128_offset1234.wav", "shift_ms": 936},
+      {"path": "probes/wav_44k16/click_128_offset1234.wav", "shift_ms": 936},
+      {"path": "probes/wav_48k24/click_128_offset1234.wav", "shift_ms": 936},
+      {"path": "probes/aiff_44k16/sweep_20_20k.aiff", "shift_ms": -438, "bars_renumbered": true},
+      {"path": "probes/flac_44k16/sweep_20_20k.flac", "shift_ms": -438, "bars_renumbered": true},
+      {"path": "probes/flac_48k24/sweep_20_20k.flac", "shift_ms": -438, "bars_renumbered": true},
+      {"path": "probes/m4a_alac/sweep_20_20k.m4a", "shift_ms": -438, "bars_renumbered": true},
+      {"path": "probes/mp3_cbr320/sweep_20_20k.mp3", "shift_ms": -438, "bars_renumbered": true},
+      {"path": "probes/mp3_vbr_v0/sweep_20_20k.mp3", "shift_ms": -438, "bars_renumbered": true},
+      {"path": "probes/wav_22k16_mono/sweep_20_20k.wav", "shift_ms": -438},
+      {"path": "probes/wav_44k16/sweep_20_20k.wav", "shift_ms": -438, "bars_renumbered": true},
+      {"path": "probes/wav_48k24/sweep_20_20k.wav", "shift_ms": -438, "bars_renumbered": true},
+      {"path": "probes/wav_96k32f/sweep_20_20k.wav", "shift_ms": -438, "bars_renumbered": true},
+      {"path": "probes/wav_22k16_mono/tempo_120_to_126.wav", "shift_ms": 236},
+      {"path": "probes/wav_44k16/bands_100_1k_8k.wav", "shift_ms": -320},
+      {"path": "real/m4a_aac256/Oliver Schories - Circles (Original Mix).m4a", "shift_ms": -366},
+      {"path": "real/flac/Aura Vortex - Futura (Original Mix).flac", "shift_ms": 0, "bars_renumbered": true}
+    ]
+  },
+  "unmoved_copies_identical": "the 5 click_128_offset1234 copies without the phrase shift (mp3 x3, m4a aac, one wav) equal rekordbox's grid exactly, starting at 296/320/343 ms",
+  "oracle_b": "not applicable: high precision on (BALib v2 + madmom), see spec § 9",
+  "runtime": "about 0.9 s CPU per track including decode (161 tracks in 12 s on 12 threads)"
+}

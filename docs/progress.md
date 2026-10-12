@@ -9,7 +9,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | M3 | export done; **CDJ check pending** (studio) | 1faf385 |
 | M4 | done: deletes (both DBs + files + sync files), old-stick conversion, `playlists3*.sync`, foreign My Tags kept, row paths stay taken, ≥ 4 GiB on FAT32 planned as failed copy; export onto a reference-stick clone keeps every row and file | 5abe8e9, 22d7451, d846f4a, eb85e3d, 1729250 |
 | M5 | built from the binary (no trace has a cue write): cue/grid ops with undo, deck UI; device cues built from `djmdCue` (410/410 reference-stick cue sets byte-exact). **rekordbox check pending** (`m5_check`) | 0d0d509, b3e4840 |
-| M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact except 7 AAC tracks (1 ulp); **beat grid (BALib v1 Normal mode) in progress** | 617fc5f, 8def9c4 |
+| M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact except 7 AAC tracks (1 ulp); Normal-mode beat grid: BPM 161/161, grids identical 140/161, the other 21 moved by the phrase pass (not ported) | 617fc5f, 8def9c4 |
 | M7 | smart lists (rules, editor, XML, USB export); import from device (tracks, playlists, histories); app bundle (`tools/bundle/bundle.sh`); key display follows `ShowOriginalKey`/`KeyStringSetting`. rekordbox.xml export (byte-exact vs oracle-a) and import. **rekordbox checks pending** (`m7_check`, device import, XML) | 0d0d509, 88593cc, d0babf3, e93d3a4, 3997b37, 53af01b, 35c036c |
 
 **M7 rekordbox.xml (done and committed in 35c036c; user check pending):**
@@ -36,7 +36,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 **Open, not assigned**
 - Export log language: rekordbox writes it in the UI language (`language` preference; only the German column titles are known, from the oracle log). The app uses English.
 - AAC: our AudioToolbox decode differs from rekordbox's by a few samples on some tracks (caps AAC parity of every analysis).
-- M6 after beats: key (`KeyJudge2`), phrase (`SongStructureAnalyze`), vocal (TF), high-precision beats (TF + downbeat HMM), auto-cue/embeddings (ORT); an analysis queue in the app.
+- M6 after Normal-mode beats: phrase (`SongStructureAnalyze`, also moves 21/161 oracle-a grids, `analysis-beats.md` § 8), key (`KeyJudge2`), vocal (TF), Dynamic and high-precision beats (TF + downbeat HMM), auto-cue/embeddings (ORT); an analysis queue in the app.
 - MySetting editor (M4 plan item).
 
 **Housekeeping:** the disk is tight (≈ 20 GB free after deleting `target/debug`). Workers share one target dir; testing a staged snapshot in a scratch copy doubles the build artifacts, so prefer testing in the repo when the tree is coherent.
@@ -77,10 +77,15 @@ Newest entry first. Each entry records what changed, what is verified, and the n
   - How it is computed: rekordbox's statically linked libebur128, ported operation by operation. The gain is `(float)exp10((−10 − LUFS)/20)`. Only every `min(seconds/30 + 1, 16)`-th 2-second block is measured.
   - The gain float is bit-exact on all 150 non-AAC tracks and on 12 of 19 AAC tracks; the other 7 AAC tracks are one ulp off. The sample peak is bit-exact on 169/169. Results are identical against oracle-a and oracle-b.
   - rekordbox's own AAC values are identical in both sessions, so our AudioToolbox decode differs from its decode slightly. Next for `mb-audio`.
-- **M6 beat grid (in progress; findings):**
-  - Normal mode (oracle-a: high precision off, BPM range 70–180) runs `BeatAnalyzer_1_0` and `AnalyzeJobBeatDetector::legacyBeatAnalyze`.
-  - Analysis modes 2–4 (high precision) run `BeatAnalyzer_2_0` plus `madmom::analyze`, which is TensorFlow and a downbeat HMM.
-  - The v1 beat path is roughly 50 KB of machine code (BeatSensor, UnitEnvelopeMaker, UnitBeatAdjust, BeatInfoAnalyzer, and the job's µs conversion).
+- **M6 beat grid, Normal mode (done; awaiting commit):** `mb_analysis::analyze(path, Options { beats: true, .. })` → `BeatGrid { bpm, beats }` (`djmdContent.BPM` and the PQTZ/PQT2 beats with µs remainders). It is a port of BALib v1's constant-tempo Analyzer (`BeatAnalyzer_1_0`) plus `legacyBeatAnalyze`/`convertToMicrosec`. Spec: `docs/re/analysis-beats.md`; scorecard: `docs/scorecards/beats.json`; code: `crates/mb-analysis/src/beats/`.
+  - **Against oracle-a** (161 tracks rekordbox analysed): BPM × 100 exact 161/161 and beat count 161/161. PQTZ and PQT2 are identical on 140/161, every beat to the ms; 92502/94897 beats match exactly and none is off by 1 ms.
+  - **The other 21** (`click_128_offset1234` ×7, `sweep_20_20k` ×9, three more probes, two real tracks) have the same tempo, spacing, count and PQT2 µs values. After BALib, rekordbox's **phrase pass** (`SongStructureAnalyze` in `CBeatAnalyzeThread::analyze`) moved the whole grid to its own first downbeat, or renumbered the bars. Hook point and data: spec § 8. That pass needs the phrase/PSSI analyser.
+  - PQT2's per-beat u16 is now verified as the µs remainder (`anlz.md`).
+  - **Tests:**
+    - `cargo test --release -p mb-analysis --test oracle beats_match_rekordbox`: probes; `MB_ORACLE_FULL=1` for all 161; phrase-moved tracks must be uniform shifts.
+    - `--test synthetic click_track_grid`: synthetic 128 BPM click after 1.234 s.
+    - Scorer: `cargo run --release -p mb-analysis --example beat_score -- [--verbose] [filter]`.
+  - **Not covered:** Dynamic mode (varied analyzer) and high precision (BALib v2 + madmom TF + downbeat HMM); spec § 9.
 
 ## 2026-10-12 — M2 accepted by rekordbox
 - **M2 user check passed ("all ok").** rekordbox 7.2.19 opened the sandbox library after musicbox edits (`mb-library` example `m2_check`) with no warning or repair dialog. All of these were shown correctly:
