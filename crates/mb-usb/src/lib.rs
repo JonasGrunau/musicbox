@@ -23,6 +23,7 @@ pub mod naming;
 pub mod plan;
 pub mod settings;
 pub mod source;
+pub mod syncfile;
 
 pub use device::DeviceState;
 pub use exec::{CancelToken, ExportOptions, ExportReport, Phase, Progress, execute};

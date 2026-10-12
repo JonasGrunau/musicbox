@@ -812,7 +812,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Writes `bytes` next to `path`, `fsync`s and renames it into place.
-fn write_replace(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_replace(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     mkdirs(dir)?;
     let name = path
