@@ -210,6 +210,11 @@ pub fn execute(
     ) {
         write_replace(&path, &bytes)?;
     }
+    // Device Library Plus conversion: `a` artwork copied to `b` (§ 6.4; the database itself is
+    // built with the others at the end).
+    if let Some(conv) = &plan.devlib_convert {
+        crate::convert::copy_artwork(root, conv)?;
+    }
 
     // Tracks.
     let mut report = ExportReport {
@@ -451,8 +456,8 @@ fn write_devlib(plan: &ExportPlan, rb: &Path, completed: Option<usize>) -> Resul
     let target = rb.join("exportLibrary.db");
     let tmp = rb.join(".exportLibrary.db.musicbox");
     remove_db_files(&tmp);
-    let mut writer = match &plan.devlib_create {
-        Some(create) => DevLibWriter::create(
+    let mut writer = match (&plan.devlib_create, &plan.devlib_convert) {
+        (Some(create), _) => DevLibWriter::create(
             &tmp,
             &CreateOptions {
                 created_date: Some(create.created_date.clone()),
@@ -460,7 +465,24 @@ fn write_devlib(plan: &ExportPlan, rb: &Path, completed: Option<usize>) -> Resul
                 ..CreateOptions::default()
             },
         )?,
-        None => {
+        // Device Library Plus conversion of an old stick (§ 6.4), then the export's operations.
+        (None, Some(conv)) => {
+            let w = DevLibWriter::create_for_conversion(
+                &tmp,
+                &CreateOptions {
+                    created_date: Some(conv.today.clone()),
+                    menus: conv.menus.clone(),
+                    ..CreateOptions::default()
+                },
+            )?;
+            if let Err(e) = conv.write(&w) {
+                drop(w);
+                remove_db_files(&tmp);
+                return Err(e);
+            }
+            w
+        }
+        (None, None) => {
             std::fs::copy(&target, &tmp).map_err(|e| Error::io(&target, e))?;
             DevLibWriter::open(&tmp)?
         }

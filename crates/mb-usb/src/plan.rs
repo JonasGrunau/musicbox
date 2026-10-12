@@ -451,6 +451,9 @@ pub struct ExportPlan {
     /// New exportExt.pdb: its DBPROPERTYOPTION row.
     pub ext_create: Option<ExtDb>,
     pub devlib_create: Option<DevlibCreate>,
+    /// Old stick with export.pdb only: exportLibrary.db is built by the Device Library Plus
+    /// conversion first (`docs/re/export.md` § 6.4), then the operations below run on it.
+    pub devlib_convert: Option<crate::convert::Conversion>,
     /// Operations before the jobs (My Tag syncs).
     pub ext_preamble: Vec<ExtOp>,
     pub devlib_preamble: Vec<DevlibOp>,
@@ -850,6 +853,27 @@ pub fn plan_export(
     selection: &[SelectionItem],
     opts: &PlanOptions,
 ) -> Result<ExportPlan> {
+    // A stick with export.pdb but no exportLibrary.db is converted first (§ 6.4); the export is
+    // then planned against the converted database.
+    let devlib_convert = match (&dev.pdb, &dev.devlib) {
+        (Some(pdb), None) => Some(crate::convert::plan_conversion(
+            pdb,
+            src.menus.devlib_seed(),
+            &opts.today,
+        )),
+        _ => None,
+    };
+    let converted;
+    let dev = match &devlib_convert {
+        Some(conv) => {
+            converted = DeviceState {
+                devlib: Some(conv.devlib_state()?),
+                ..dev.clone()
+            };
+            &converted
+        }
+        None => dev,
+    };
     let mut p = Planner::new(src, dev, opts);
     let mut plan = ExportPlan {
         root: dev.root.clone(),
@@ -860,6 +884,7 @@ pub fn plan_export(
         pdb_create: None,
         ext_create: None,
         devlib_create: None,
+        devlib_convert,
         ext_preamble: Vec::new(),
         devlib_preamble: Vec::new(),
         jobs: Vec::new(),
@@ -881,13 +906,7 @@ pub fn plan_export(
                 plan.ext_create = Some(mb_pdb::defaults::ext_db(src.my_tag_master_db_id));
             }
         }
-        (Some(_), None) => {
-            return Err(Error::Device(
-                "the stick has export.pdb but no exportLibrary.db; rekordbox's Device Library \
-                 Plus conversion is not implemented"
-                    .into(),
-            ));
-        }
+        (Some(_), None) => unreachable!("converted above"),
         (None, Some(_)) => {
             return Err(Error::Device(
                 "the stick has exportLibrary.db but no export.pdb".into(),

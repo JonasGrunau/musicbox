@@ -349,7 +349,12 @@ fn as_int(v: Value) -> i64 {
 
 fn load_devlib(path: &Path) -> Result<DevlibState> {
     let db = mb_devlib::DevLibDb::open_immutable(path)?;
-    let c = db.connection();
+    load_devlib_from(db.connection())
+}
+
+/// [`DevlibState`] from an open exportLibrary.db (or an in-memory copy of its tables, as the
+/// Device Library Plus conversion builds for planning, [`crate::convert`]).
+pub(crate) fn load_devlib_from(c: &rusqlite::Connection) -> Result<DevlibState> {
     let mut state = DevlibState::default();
     let mut stmt = c.prepare(
         "select c.content_id, c.path, c.analysisDataFilePath, c.masterDbId, c.masterContentId, \

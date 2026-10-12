@@ -319,6 +319,7 @@ The last three pairs are block-seek information for compressed formats, so a pla
 | Histories (`get_next_seq` from 1), history entries | `add_history`, `add_tracks_to_history` | hypothesis (code only) |
 | Cues (`setHotCue` + `addCueOption2`), hot cue bank lists and cues | `add_cue`, `create_hot_cue_bank_list`, `add_hot_cue_bank_cue` | hypothesis (code only) |
 | `recommendedLike` | `add_recommended_like` | hypothesis (code only) |
+| Device Library Plus conversion of an existing export.pdb: `initPropertyTable` seed, `clearAllData`, then one multi-row insert per table (`insertAllDev*`) | `create_for_conversion`, `insert_all` (rows mapped by `mb_usb::convert`, `export.md` § 6.4) | verified (reference stick, synthetic round trip) |
 | Clean close: checkpoint, no `-wal`/`-shm` | `close` (errors if a side file remains) | verified |
 
 The writer does not implement:

@@ -265,6 +265,29 @@ impl DevLibWriter {
         Ok(writer)
     }
 
+    /// Creates a new database for the Device Library Plus conversion of a stick that has only
+    /// export.pdb (`docs/re/export.md` § 6.4): `startupDeviceDB` creates the file with the
+    /// `initPropertyTable` seed (from `options`), then `execDbConversion` runs `clearAllData`.
+    /// The tables are left empty; the caller inserts the converted rows with
+    /// [`DevLibWriter::insert_all`].
+    pub fn create_for_conversion(path: &Path, options: &CreateOptions) -> Result<Self> {
+        if path.exists() {
+            return Err(Error::Exists(path.display().to_string()));
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| Error::Io(path.display().to_string(), e))?;
+        }
+        let mut writer = Self::open_with_flags(path, OpenFlags::SQLITE_OPEN_CREATE)?;
+        if let Some(date) = &options.created_date {
+            writer.today = date.clone();
+        }
+        writer.create_tables()?;
+        writer.create_indexes()?;
+        writer.seed_initial(options)?;
+        writer.recreate_all()?;
+        Ok(writer)
+    }
+
     /// Opens an existing database read-write (`startupDeviceDB` on a stick that has one). Tables
     /// and indexes are only created if missing, as rekordbox's `createTables(false)` /
     /// `createIndexes(false)` do.
@@ -381,6 +404,18 @@ impl DevLibWriter {
         );
         self.conn
             .execute(&sql, params_from_iter(rows.iter().flatten()))?;
+        Ok(())
+    }
+
+    /// `insertAllDev*` (`DevSqliteDBController`, @0x100729AD0…@0x1007393B8): all rows of one
+    /// table in one `insertIntoMultiple`. rekordbox inlines the values as literals; bound
+    /// parameters store the same values, so the statement is split into chunks that stay below
+    /// SQLite's parameter limit (the rows and their rowids come out the same).
+    pub fn insert_all(&self, table: &str, columns: &[&str], rows: &[Vec<Value>]) -> Result<()> {
+        let per_chunk = (32_000 / columns.len().max(1)).max(1);
+        for chunk in rows.chunks(per_chunk) {
+            self.insert_multiple(table, columns, chunk)?;
+        }
         Ok(())
     }
 

@@ -604,14 +604,60 @@ rekordbox deletes from the database the user is browsing (export.pdb or exportLi
 - **20:00:** all three DBs were stamped when rekordbox closed them (quit, or the unmount before the read-only remount). `exportLibrary.db` carries the index rebuild from step 5; the `.pdb` files get the close header update. No track content needs to change for this.
 - **Ruled out:** Sync Manager (wrong DBID, and it runs only on tree selection; the `.sync` mtimes are unchanged), My Tag writes (foreign owner) and history deletion (all 21 histories are still present).
 
-### 6.4 Device Library Plus conversion (verified)
-`deviceSqliteDbConversion` @0x1010def78 → `execDbConversion` @0x1010e1a38 builds the Plus DB from the classic one:
-1. Stage in `PIONEER/.temp_libplus_conv/`, then move into place.
-2. Clear the Plus tables, then bulk-copy content, genre, artist, album, label, key, colour, playlist, playlist entries, hot cue bank lists and more, **keeping the classic IDs**.
-3. Copy `a<id>.jpg` / `a<id>_m.jpg` to `b<id>.jpg` / `b<id>_m.jpg`.
-4. Handle EXT/2EX per track.
+### 6.4 Device Library Plus conversion (verified: binary + reference stick + synthetic round trip)
+The conversion builds `exportLibrary.db` from `export.pdb` + `exportExt.pdb`, **keeping the classic IDs**. It also runs on every fresh stick (the trace's phase 2 in `ops/export-devlib.md`: a new export.pdb is converted into the new Plus DB before the first track), which is why `DevLibWriter::create` replays it. `mb-usb` reproduces it (`crates/mb-usb/src/convert.rs`) and runs it when an export targets a stick that has export.pdb but no exportLibrary.db.
+
+**Driver: `DatabaseMediator::deviceSqliteDbConversion` @0x1010def78**, per device:
+1. Find the classic and the Plus handle of the device (`getSameDeviceDBList`; the Plus controller has the byte at +0x188 set).
+2. Create `<PIONEER dir>/.temp_libplus_conv/`. It only holds backups for a rollback: a helper lambda (@0x1010e17a8) copies or moves a file into it (relative to the device root or the PIONEER folder, folders created) and records the pair.
+3. **If a Plus DB is already open:** collect its image paths (`getAllImagePath`, vtable +0x970: `select * from image where path is not null and path != ""`), content paths (+0x13b0) and analysis paths (+0xc28); close it (+0x5c8); back up `exportLibrary.db` and its `-shm`/`-wal` (copies); reopen with `startupDeviceDB` (+0x5a0). When there is no Plus DB, `startupDeviceDB` has already created one on mount (`initPropertyTable` seed, § 6.3 step 5).
+4. `execDbConversion(classic, plus)` (below).
+5. **On success:**
+   1. Old Plus image files (`<path>`, `_m`, `_l`) are moved into the temp folder, i.e. removed.
+   2. For every image row of the **new** Plus DB (path not empty): copy `<dir>/a<rest>` → `<dir>/b<rest>` (replacing; `juce::File::copyFileTo`) and, only if that worked, `a<rest>_m` → `b<rest>_m`. No `_l` copy. Written files are recorded for a rollback.
+   3. Old content files that no same-device DB still lists (`isCollectionSong`) are backed up and deleted (`delete_device_song_file`); old analysis sets (DAT/EXT/2EX) that no DB references (`hasTrackFromAnalysisPath`) likewise (`delete_device_analysis_files`).
+6. **On failure:** delete the new `b` files and move every backup back.
+7. Delete the temp folder (`deleteRecursively`, else `moveToTrash`). Then, for every track of the new Plus DB, `CAnalyzerIF::load_exported_info` reads the cues of its ANLZ files and gives them new device cue IDs in the **in-memory** cue cache (`getNewDevCueIdForMultiDb`); nothing is written. This is the "EXT/2EX per track" step.
 - The rekordbox UI checks free space (Artwork folder size) and asks before overwriting an existing Plus DB.
-- **Fixture:** identical content and image IDs and byte-identical `a`/`b` files, and the Plus `property` row (`createdDate` 2020-10-28, `dbVersion` "1000") equals the classic one. That points at this conversion (*hypothesis*), after which both DBs were extended in lock-step by exports.
+
+**`execDbConversion` @0x1010e1a38:** `clearAllData` on the Plus DB (@0x1007284b0 = `createTables(true)` + `createIndexes(true)`: drop and recreate every table and index), then 22 pairs `rekordboxDBController::getAllDev*` (vtable 0x1250…0x12f8, thunks to `db::dsqlGetAllDev*` @0x1019cb0b4…) → `DevSqliteDBController::insertAllDev*` (vtable 0x1300…0x13a8), in this order: content, genre, artist, album, label, key, color, playlist, playlist entries, hot cue bank lists, hot cue bank list cues, histories, history entries, image, cue, menu items, category, sort, property, recommended like, My Tag, My Tag entries. All reads go into one `juce::var` object; a failed read or insert aborts and returns 0.
+- **Reads (`dsqlGetAllDev*`):** `_edb_dyn_SelectMaterialized_` of the whole classic table, sorted by its first column ascending (`_edb_dyn_SortRowSet_`). Numeric columns become integer `var`s (u32 zero-extended; byte columns through `(int)(char)`, i.e. **signed** on Apple arm64); string columns become text. An **empty table sets no key**, so its insert sees no rows and sends no statement.
+- **Inserts (`insertAllDev*`):** one `SQLiteDB::insertIntoMultiple` @0x1010fda98 per table: `insert into T(cols) values (…), (…)` with the values **inlined**: strings escaped and double-quoted (an empty string becomes `""` = `''`), integers as numbers. The column affinity of the Plus schema then decides the storage class (an empty string stays text, a numeric string in an integer column becomes an integer).
+
+| Plus table | From | Mapping (Plus ← classic) |
+|---|---|---|
+| `content` | DJDBCONTENT | `content_id` ← ID; `title`; `titleForSearch` ← SEARCHSTR (text, `''` when empty); `subtitle`; `bpmx100`, `length`, `trackNo`, `discNo`; `artist_id_artist/remixer/originalArtist/composer` ← the four IDs (0 for none, not NULL); `artist_id_lyricist` ← RESERVED8 parsed as an integer; `album_id`, `genre_id`, `label_id`, `key_id`, `color_id`, `image_id` (0 for none); `djComment` ← COMMNT; `rating`, `releaseYear`; `releaseDate`, `dateCreated`; `dateAdded` ← STOCKDATE; `path` ← FOLDERPATH; `fileName` ← FILENAMEL; `fileSize` (`operator int`: 32-bit signed); `fileType`, `bitrate`, `bitDepth`, `samplingRate`; `isrc` ← RESERVED9 when it is the ISRC form `0x03` + exactly 12 bytes, else `''`; `djPlayCount`; `isHotCueAutoLoadOn` ← RESERVED2 == "ON"; `isKuvoDeliverStatusOn` ← RESERVED3 parsed as an integer (so "ON" gives **0**); `kuvoDeliveryComment` ← RESERVED4; `masterDbId`, `masterContentId`; `analysisDataFilePath`; `analysedBits` ← ANALYSED (the classic value, e.g. 41); `contentLink`; `hasModified` ← RESERVED1 non-empty; `cueUpdateCount`, `analysisDataUpdateCount`, `informationUpdateCount` ← RESERVED5/6/7 parsed as integers ("" gives 0). FILENAMES, DISABLEQUANTIZE, TAG and RESERVED10 are read but not used. |
+| `genre`, `label` | DJDBGENRE, DJDBLABEL | id, name |
+| `artist` | DJDBARTIST | id, name, `nameForSearch` ← SEARCHSTR (`''`) |
+| `album` | DJDBALBUM | id, name, `artist_id` ← album artist, `image_id`, `isComplation`, `nameForSearch` ← SEARCHSTR (0/`''`, not NULL) |
+| `key` | DJDBKEY | id, name ← SCALENAME (SEQ dropped) |
+| `color` | DJDBCOLOR | id, name ← COMMNT (code and sort key dropped) |
+| `playlist`, `hotCueBankList` | DJDBPLAYLIST, DJDBHOTCUEBANKLIST | id, `sequenceNo` ← SEQ, name, `image_id` ← IMAGEID (0, not NULL), attribute, parent |
+| `playlist_content` | DJDBSONGPLAYLIST | playlist, content, `sequenceNo` ← TRACKNO |
+| `hotCueBankList_cue` | DJDBSONGHOTCUEBANKLIST | list, `cue_id`, `sequenceNo` ← TRACKNO (CONTENTID dropped) |
+| `history` | DJDBHISTORY + DJDBEXHISTORY | `history_id`, name from the classic row; `sequenceNo`, `attribute`, `history_id_parent` from the exportExt row **at the same index** when its ID matches (the loop indexes the ext array with the outer counter), else 0 |
+| `history_content` | DJDBSONGHISTORY | history, content, `sequenceNo` ← SEQ (ONAIR dropped; DJDBEXSONGHISTORY is read but unused) |
+| `image` | DJDBIMAGE | id; `path` = same folder + `b` + the file name without its first letter when the name starts with `a`, else `''` |
+| `cue` | DJDBHOTCUEBANKPOINT + DJDBEXCUEOPTION | the hot cue bank points (not the tracks' memory cues, which live in ANLZ only), with the cue option at the **same index** when its CUEID matches: `kind` ← KIND, `colorTableIndex` ← option RESERVED1, `cueComment` ← COMMENT, `isActiveLoop` ← option RESERVED2, beat loop = (BEATSIZE >> 16, BEATSIZE & 0xFFFF) unless BEATSIZE < 0x10000 or its low half is 0 (then 0/0), `inUsec` = INMSEC × 1000 + (CUEMICRO & 0xFFFF) as u32, `outUsec` = −1 when OUTMSEC is −1, else OUTMSEC × 1000 + (CUEMICRO >> 16) as u32, the frame/MPEG columns 1:1, the seek columns from INSEEKINFO/OUTSEEKINFO "a,b,c" (decoding start, file offset, samples in block; 0 unless exactly 3 tokens) |
+| `menuItem` | DJDBMENUITEMS | id, `kind` ← CLASS & 0xFF, name re-wrapped in U+FFFA … U+FFFB (`getCategoryItemName` @0x10199c910 strips it) |
+| `category` | DJDBCATEGORY | id, menu item, `sequenceNo` ← SEQ, `isVisible` = !DISABLEBIT & 1 (INFOORDER dropped) |
+| `sort` | DJDBSORT | id, menu item, `sequenceNo`, `isVisible` = !DISABLE & 1, `isSelectedAsSubColumn` = (DISABLE >> 1) & 1 |
+| `property` | DJDBPROPERTY[0] + DJDBEXDBPROPERTYOPTION[0] | `deviceName` ← DEVNAME, `dbVersion` ← DBVERSION, `numberOfContents` ← SONGNUMBER, `createdDate` ← DATECREATED, `backGroundColorType` ← COLORID, `myTagMasterDBID` ← MYTAGMASTERDBID (0 without an exportExt row) |
+| `recommendedLike` | DJDBEXRECOMMENDLIKE | both content IDs, `rating` ← LIKERATE, `createdDate` = `(H << 32) \| H \| L` from DATECREATEDH/L (the extra `\| H` is in the machine code @0x1007385cc–0x1007385dc) |
+| `myTag` | DJDBEXMYTAG | id, `sequenceNo`, name, attribute, parent |
+| `myTag_content` | DJDBEXSONGMYTAG | tag, content (`rating`, `createdDate` stay NULL) |
+
+**Verification.**
+- **Reference stick** (`crates/mb-usb/tests/convert.rs`, `stick_conversion_matches_stick`): export.pdb + exportExt.pdb + the `a` artwork of `fixtures/stick` copied to a temp folder and converted, compared with the stick's own exportLibrary.db (values and storage classes):
+  - **identical:** genre 14, label 209, key 58, color 8, image 702, menuItem 27, category 22, sort 17, myTag 28, and the empty hot cue bank, cue, like and My Tag link tables; all **1404 `b` artwork files byte-identical**;
+  - **content:** 704 rows on both sides. Rows 1–620 (the converted ones) differ only in `analysedBits`, `cueUpdateCount` and `informationUpdateCount`, which later re-exports rewrote in exportLibrary.db alone (§ 4.2: 251 rows now hold 105 and text markers). Rows 621–704 were added later by lock-step exports, whose `insertTrack` writes NULL for `titleForSearch` and missing lookups and the KUVO flag from the source;
+  - **artist/album:** converted rows identical; the later inserts (artists 512–572, albums 529–604) have NULL search names. Album 605 exists only in export.pdb: track 692 has an album and genre in export.pdb only, so the two databases' album numbering diverges from there;
+  - **playlist:** the lists that existed at the conversion (4–7 and TAG LIST 001–005 at 16385–16389) are present with the same name, parent, attribute and image; only their `sequenceNo` moved, because each database got its own later lists. This answers the 12-vs-30 question: export.pdb's other 21 live lists are TAG LIST 006–024 written by players (export.pdb only) and lists exported later, which the two databases number separately (§ 2.3);
+  - **history:** the 21 histories and 160 entries in export.pdb were written by players after the conversion; exportLibrary.db has none;
+  - **property:** equal except `backGroundColorType` (classic 8, Plus 2), presumably set later per database (*hypothesis*: the device backup info keeps `background_color` and `background_color_libplus` apart, § 6.3).
+- **Synthetic round trip** (`synthetic_export_then_conversion`): a musicbox export, exportLibrary.db and the `b` files removed, the classic DBs converted and compared with the removed database: every table has the same rows; the only differing columns are the known insert-vs-conversion ones (`titleForSearch`/`nameForSearch` `''` vs NULL, 0 vs NULL for missing lookups, album artist/image and playlist image 0 vs NULL, the classic update markers vs NULL). A second export onto the old-style stick converts first and then exports: both DBs list the same tracks, paths, ANLZ sets and images, every `b` file is restored byte for byte, export.pdb is lint-clean and no temp file remains.
+- **Hypotheses:** the row order inside a table whose first column repeats (`playlist_content`, `history_content`, `hotCueBankList_cue`, `myTag_content`) assumes `_edb_dyn_SortRowSet_` is stable over the scan order (only the rowids depend on it); the `cue` mapping is from code only (no fixture has hot cue bank points).
+- **`mb-usb` differences from rekordbox:** the database is built next to the target and renamed into place with the export's other operations (rekordbox converts first, in the file, with `.temp_libplus_conv` as rollback); the `b` artwork is copied before the tracks. Converting over an existing Plus DB (step 3, step 5.1 and 5.3) is not implemented: `mb-usb` converts only when exportLibrary.db is missing.
 
 ### 6.5 Files on the stick that rekordbox does not create
 `PIONEER/CDJ`, `PIONEER/MPJ`, `PIONEER/TrashBox`, `PIONEER/.CacheData/*` (fixture mtimes 1979/2014, no player clock), `PIONEER/RBFLTR.DAT`, the contents of `PIONEER/log/`, and `ESOWMPInfo.txt` at the root. None of these names occurs in the rekordbox binary (string scan), so players or other hosts write them (*hypothesis*). A writer must leave them alone.
@@ -655,7 +701,9 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
   - Folders: a selected folder is created (attribute 1) and its children are appended inside it in master order (not moved to position 0; *hypothesis*). Intelligent playlists are refused.
   - Missing `_s`/`_m` artwork is generated from the base image with the `image` crate (letterboxed on black, q85); those files are not byte-identical to rekordbox's JUCE encoder. Every fixture track has both variants.
   - macOS tags every file a process creates with `com.apple.provenance`; on FAT the OS stores it in an AppleDouble `._` file. The oracle stick has such files next to what rekordbox wrote (`PIONEER/._*`; that they come from this attribute is a *hypothesis*). The copy itself carries no attribute of the source (quarantine, last-used date).
-  - Not implemented: the Device Library Plus conversion of an old stick with export.pdb only (§ 6.4; refused), `playlists3*.sync` bookkeeping (§ 4.4; files are left as they are), "like" relations (§ 1.2 step 8), cues from master `djmdCue` (the local ANLZ cues are used, which equals rekordbox's output when the cues were saved to the local files).
+  - Device Library Plus conversion: a stick with export.pdb but no exportLibrary.db is converted first (`convert.rs`, § 6.4; verified against the reference stick), then exported. Converting over an existing exportLibrary.db is not implemented.
+  - `playlists3*.sync` (§ 4.4, `syncfile.rs`): read and written byte for byte (both reference-stick files round-trip). An export leaves them as they are; deleting device lists clears the `Dev_ID` of every node that points at a deleted list, in both files and whatever library owns them, so a later auto-sync cannot delete a list that took over the ID (*hypothesis*: what rekordbox itself does to the files when a list is deleted outside Sync Manager is open).
+  - Not implemented: "like" relations (§ 1.2 step 8), cues from master `djmdCue` (the local ANLZ cues are used, which equals rekordbox's output when the cues were saved to the local files).
 
 **Verification** (`cargo test -p mb-usb`, test `oracle_a_export_matches_rekordbox`): `oracle-small` exported to an empty directory, then `oracle-all` onto it, from `fixtures/oracle-a`; the second session replays the recorded export.pdb history (ten close/open cycles, `oracle-small` emptied and refilled, `oracle-all` inserted at position 1 and moved to the top, one more cycle; `pdb.md` § The oracle stick's history). Compared with `fixtures/oracle-a/rbtest`:
 
@@ -718,7 +766,8 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
   - [x] Written when the device DB is created or updated, as rekordbox does (not per track).
   - [x] Exact header strings, CRC-16/XMODEM (data block; whole file for DJMMYSETTING), sizes 148/148/140/160.
   - [x] Never overwrite a player-written file silently (merge rule; DEVSETTING only when missing); never create `RBFLTR.DAT`.
-- [x] Close both DBs cleanly; no `sync*.temp` left. [ ] `playlists3*.sync` kept consistent (left untouched).
+- [x] Device Library Plus conversion (§ 6.4): a stick with export.pdb only gets exportLibrary.db built from the classic DBs (classic IDs kept, the 22-table mapping, `a` → `b` artwork) before the export. [ ] Re-conversion over an existing exportLibrary.db.
+- [x] Close both DBs cleanly; no `sync*.temp` left. [x] `playlists3*.sync` kept consistent: untouched by exports, `Dev_ID`s of deleted lists cleared.
 - [x] Leave `DeviceLibBackup/`, `log/`, `ImportedHistory.xml`, `RBFLTR.DAT`, `CDJ/`, `MPJ/`, `TrashBox/`, `.CacheData/` and unknown root files untouched.
 
 ## Open questions
@@ -733,7 +782,9 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
 - [ ] No FAT32 4 GiB file-size check was found in the export path. What happens with a larger file?
 - [ ] Whether merely opening or closing the DeviceSQL page manager rewrites the `.pdb` headers when nothing changed. This decides whether § 6.3's explanation of the 20:00 rewrite holds. Test with a before/after diff on a FAT32 image.
 - [ ] For a brand-new stick: does `createDeviceDB` → `needDbConversion` show the conversion dialog, or create the Plus DB silently?
-- [ ] The full table list of `deviceSqliteDbConversion` (history, image, property, My Tag), and why the fixture's exportLibrary.db has 12 playlists against 30 live ones in export.pdb.
+- [x] The full table list of `deviceSqliteDbConversion` and why the fixture's exportLibrary.db has 12 playlists against 30 live ones in export.pdb: all 22 tables (§ 6.4); the other 21 classic lists are player TAG LISTs and lists exported after the conversion, numbered separately in each DB.
+- [ ] Is `_edb_dyn_SortRowSet_` stable? It decides the rowid order of converted tables whose first column repeats (`playlist_content`, `history_content`).
+- [ ] What rekordbox does with an old stick (export.pdb only) when the user declines the conversion dialog: export to export.pdb alone?
 - [ ] Which control writes `djprofile.nxs` on mount (vtable slot 0x240, `exportKuvoProfile`), besides the export-thread copy.
 - [x] Verify the whole flow byte-for-byte against the oracle export (`docs/oracle-session.md`, pass A): done with `mb-usb` (§ 8).
 - [ ] Which list `exportPlaylist` compares with the device list (the master list before or after the format gate), and why the oracle's second session emptied and refilled the unchanged `oracle-small` (`pdb.md` § The oracle stick's history, ids 65–72).
