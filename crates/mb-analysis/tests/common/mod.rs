@@ -14,6 +14,10 @@ pub fn fixtures() -> PathBuf {
 pub struct OracleTrack {
     pub id: String,
     pub path: PathBuf,
+    /// `djmdMixerParam` (GainHigh, GainLow, PeakHigh, PeakLow).
+    pub mixer: Option<[i64; 4]>,
+    /// `djmdContent.BPM` (BPM × 100).
+    pub bpm: Option<i64>,
     pub dat: Option<AnlzFile>,
     pub ext: Option<AnlzFile>,
     pub ex2: Option<AnlzFile>,
@@ -53,7 +57,11 @@ pub fn oracle_tracks(name: &str) -> Option<Vec<OracleTrack>> {
     let db = MasterDb::open_read_only(&db_path, &passphrase).ok()?;
     let mut stmt = db
         .connection()
-        .prepare("SELECT ID, FolderPath, AnalysisDataPath FROM djmdContent WHERE rb_local_deleted = 0 ORDER BY FolderPath")
+        .prepare(
+            "SELECT c.ID, c.FolderPath, c.AnalysisDataPath, m.GainHigh, m.GainLow, m.PeakHigh, m.PeakLow, c.BPM \
+             FROM djmdContent c LEFT JOIN djmdMixerParam m ON m.ContentID = c.ID AND m.rb_local_deleted = 0 \
+             WHERE c.rb_local_deleted = 0 ORDER BY c.FolderPath",
+        )
         .ok()?;
     let share = root.join("rekordbox/share");
     let rows: Vec<OracleTrack> = stmt
@@ -66,9 +74,15 @@ pub fn oracle_tracks(name: &str) -> Option<Vec<OracleTrack>> {
                     .replace(".DAT", ext);
                 AnlzFile::parse(&std::fs::read(share.join(rel)).ok()?).ok()
             };
+            let m: [Option<i64>; 4] = [r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?];
             Ok(OracleTrack {
                 id: r.get(0)?,
                 path: PathBuf::from(r.get::<_, String>(1)?),
+                mixer: m
+                    .iter()
+                    .all(Option::is_some)
+                    .then(|| m.map(|v| v.unwrap_or(0))),
+                bpm: r.get(7)?,
                 dat: load(".DAT"),
                 ext: load(".EXT"),
                 ex2: load(".2EX"),

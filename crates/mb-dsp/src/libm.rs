@@ -12,6 +12,7 @@ mod sys {
     }
     unsafe extern "C" {
         pub fn __sincos_stret(x: f64) -> SinCos;
+        pub fn __exp10(x: f64) -> f64;
     }
 }
 
@@ -32,6 +33,20 @@ pub fn sincos(x: f64) -> (f64, f64) {
 /// `tan` (system libm, like rekordbox).
 pub fn tan(x: f64) -> f64 {
     x.tan()
+}
+
+/// `10^x` through the libm entry rekordbox calls (`__exp10` on macOS; a `powf` fallback
+/// elsewhere, which may differ in the last bit).
+pub fn exp10(x: f64) -> f64 {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: pure libm function, no pointers involved.
+        unsafe { sys::__exp10(x) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        10f64.powf(x)
+    }
 }
 
 #[cfg(test)]

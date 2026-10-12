@@ -33,6 +33,14 @@ Newest entry first. Each entry records what changed, what is verified, and the n
   - In some earlier runs, 4–10 AAC tracks were ±1 off because AudioToolbox returned a different decode (§ 6 there).
   - Scorecard: `docs/scorecards/waveforms.json`. Tests: `cargo test -p mb-analysis`.
   - mb-audio fix: ALAC packets larger than their PCM ("escape" packets) failed to read, and the rest of the track decoded as silence (`decode.md` § 6).
+- **M6 loudness / auto-gain (done, not committed by the worker):** `mb_analysis::analyze(path, Options { loudness: true, .. })` → `Loudness { lufs, gain_db, gain, peak }`. These are the `djmdMixerParam` floats. Spec: `docs/re/analysis-loudness.md`; scorecard: `docs/scorecards/loudness.json`.
+  - How it is computed: rekordbox's statically linked libebur128, ported operation by operation. The gain is `(float)exp10((−10 − LUFS)/20)`. Only every `min(seconds/30 + 1, 16)`-th 2-second block is measured.
+  - The gain float is bit-exact on all 150 non-AAC tracks and on 12 of 19 AAC tracks; the other 7 AAC tracks are one ulp off. The sample peak is bit-exact on 169/169. Results are identical against oracle-a and oracle-b.
+  - rekordbox's own AAC values are identical in both sessions, so our AudioToolbox decode differs from its decode slightly. Next for `mb-audio`.
+- **M6 beat grid (not started; findings):**
+  - Normal mode (oracle-a: high precision off, BPM range 70–180) runs `BeatAnalyzer_1_0` and `AnalyzeJobBeatDetector::legacyBeatAnalyze`.
+  - Analysis modes 2–4 (high precision) run `BeatAnalyzer_2_0` plus `madmom::analyze`, which is TensorFlow and a downbeat HMM.
+  - The v1 beat path is roughly 50 KB of machine code (BeatSensor, UnitEnvelopeMaker, UnitBeatAdjust, BeatInfoAnalyzer, and the job's µs conversion).
 - **Next:** M4 (deletes, old-stick conversion, `playlists3*.sync`, player data kept), with M5 cue/grid editing and M6 waveforms in parallel.
 
 ## 2026-10-12 — M2 accepted by rekordbox

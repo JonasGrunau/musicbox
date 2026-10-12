@@ -4,7 +4,7 @@ use mb_analysis::loud::{dot_class, v_devide};
 use std::path::PathBuf;
 
 /// Writes a 16-bit stereo WAV of `secs` seconds at `rate` with `f(i) -> (l, r)`.
-fn wav(name: &str, rate: u32, secs: f64, f: impl Fn(usize) -> (i16, i16)) -> PathBuf {
+fn wav(name: &str, rate: u32, secs: f64, f: impl Fn(usize) -> (i16, i16)) -> TempWav {
     let n = (secs * f64::from(rate)) as usize;
     let mut data = Vec::with_capacity(n * 4);
     for i in 0..n {
@@ -30,13 +30,31 @@ fn wav(name: &str, rate: u32, secs: f64, f: impl Fn(usize) -> (i16, i16)) -> Pat
     std::fs::create_dir_all(&dir).unwrap();
     let p = dir.join(name);
     std::fs::write(&p, out).unwrap();
-    p
+    TempWav(p)
+}
+
+/// A temporary WAV file, deleted when dropped.
+struct TempWav(PathBuf);
+
+impl std::ops::Deref for TempWav {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempWav {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        // Removes the directory once the last file is gone.
+        let _ = self.0.parent().map(std::fs::remove_dir);
+    }
 }
 
 #[test]
 fn silence_gives_empty_waveforms() {
     let p = wav("silence.wav", 44100, 3.0, |_| (0, 0));
-    let w = mb_analysis::analyze_waveforms(&p).unwrap();
+    let w = mb_analysis::analyze_waveforms(&*p).unwrap();
     // 3 s at 150 columns per second, counted over L − 1 samples.
     assert_eq!(w.pwv3.len(), 450);
     // Height 0, whiteness 7 (no signal at all).
@@ -60,7 +78,7 @@ fn full_scale_tone_reaches_the_top() {
         let v = (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0).sin() * 32400.0;
         (v as i16, v as i16)
     });
-    let w = mb_analysis::analyze_waveforms(&p).unwrap();
+    let w = mb_analysis::analyze_waveforms(&*p).unwrap();
     assert_eq!(w.pwv3.len(), 600);
     // Normalised to the track peak, the steady part of PWV3 is at full height.
     assert!(
@@ -84,4 +102,24 @@ fn quantiser_tables() {
     assert_eq!(dot_class(1.0), 2);
     assert_eq!(dot_class(1304.0), 3);
     assert_eq!(dot_class(20675.0), 15);
+}
+
+#[test]
+fn sine_loudness() {
+    // 997 Hz at -20 dBFS on both channels: about -20 + 3 - 0.691 + 0.69 (K-weighting at 1 kHz) LUFS.
+    let amp = 32768.0 * 10f64.powf(-20.0 / 20.0);
+    let p = wav("sine.wav", 48000, 20.0, |i| {
+        let v = (2.0 * std::f64::consts::PI * 997.0 * i as f64 / 48000.0).sin() * amp;
+        (v as i16, v as i16)
+    });
+    let opts = mb_analysis::Options {
+        waveforms: false,
+        loudness: true,
+    };
+    let l = mb_analysis::analyze(&*p, opts).unwrap().loudness.unwrap();
+    assert!((l.lufs - -20.0).abs() < 0.1, "{l:?}");
+    assert!((l.gain_db - (-10.0 - l.lufs)).abs() < 1e-12);
+    assert!((f64::from(l.peak) - amp / 32768.0).abs() < 1e-3, "{l:?}");
+    let (gh, gl, _, _) = l.mixer_param();
+    assert_eq!(f32::from_bits(u32::from(gh) << 16 | u32::from(gl)), l.gain);
 }

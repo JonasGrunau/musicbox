@@ -14,7 +14,8 @@ Status values: **verified** (checked against real files or a trace), **hypothesi
 | [xml.md](xml.md) | rekordbox.xml import/export format, TEMPO/POSITION_MARK derivation | reader + byte-exact writer verified on oracle-a (161/161 tracks); cues/colours untested |
 | [smartlist.md](smartlist.md) | intelligent playlists: `SmartList` XML, properties/operators, evaluation, write path | binary-derived (format, evaluator, serialiser, writes); no trace or rekordbox-written sample yet |
 | [analysis-waveforms.md](analysis-waveforms.md) | waveform tags PWAV, PWV2, PWV3 (BALib) and PWV4–PWV7, PWVC (WaveCreator) | verified: all 8 tags byte-exact on 169/169 tracks vs oracle-b; in some runs AAC came out ±1 because AudioToolbox's decode varies (§ 6) |
-| analysis.md | analysis pipeline beyond waveforms: BALib beats/key, phrase, loudness, vocal | open |
+| [analysis-loudness.md](analysis-loudness.md) | auto-gain: libebur128 integrated loudness and sample peak → `djmdMixerParam` | verified: gain float bit-exact on 162/169 tracks (all non-AAC; 7 AAC tracks 1 ulp off), peak 169/169 |
+| analysis.md | analysis pipeline beyond waveforms and loudness: BALib beats/key, phrase, vocal | open |
 | [decode.md](decode.md) | per-format decoding, analysis rate, 16-bit analysis input, resampler, PVBR | verified: lengths 169/169, PVBR 37/37 byte-exact, PVB2 23/23, per-format onset columns match rekordbox; MP3 and SRC sample identity confirmed through waveform parity; AAC decode varies between runs (analysis-waveforms.md § 6) |
 
 ## Binary landmarks (rekordbox 7.2.19, arm64 slice)

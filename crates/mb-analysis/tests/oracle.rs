@@ -142,3 +142,68 @@ fn waveforms_match_rekordbox() {
         failures.join("\n")
     );
 }
+
+/// Auto-gain (`djmdMixerParam`): gain and sample peak as rekordbox's float bits. AAC gains may be
+/// one float ulp off (`analysis-loudness.md` § 5).
+#[test]
+fn loudness_matches_rekordbox() {
+    let Some(tracks) = common::oracle_tracks("oracle-b") else {
+        eprintln!("fixtures/oracle-b missing, skipping");
+        return;
+    };
+    let full = std::env::var_os("MB_ORACLE_FULL").is_some();
+    let tracks: Vec<_> = tracks
+        .into_iter()
+        .filter(|t| t.mixer.is_some())
+        .filter(|t| {
+            let p = t.path.to_string_lossy();
+            full || p.contains("/re-work/corpus/probes/") || p.contains("/Sampler/")
+        })
+        .collect();
+    if tracks.is_empty() || !mb_audio::mpg123::available() {
+        eprintln!("corpus or libmpg123 missing, skipping");
+        return;
+    }
+    let failures = std::sync::Mutex::new(Vec::new());
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    std::thread::scope(|s| {
+        for chunk in tracks.chunks(tracks.len().div_ceil(threads)) {
+            let failures = &failures;
+            s.spawn(move || {
+                for t in chunk {
+                    let aac = mb_audio::open(&t.path)
+                        .is_ok_and(|d| d.info().format == mb_audio::Format::Aac);
+                    let opts = mb_analysis::Options {
+                        waveforms: false,
+                        loudness: true,
+                    };
+                    let l = mb_analysis::analyze(&t.path, opts)
+                        .unwrap()
+                        .loudness
+                        .unwrap();
+                    let m = t.mixer.unwrap();
+                    let gain = ((m[0] as u32) << 16) | (m[1] as u32 & 0xffff);
+                    let peak = ((m[2] as u32) << 16) | (m[3] as u32 & 0xffff);
+                    let d = (i64::from(l.gain.to_bits()) - i64::from(gain)).abs();
+                    if (d != 0 && !aac) || d > 1 || l.peak.to_bits() != peak {
+                        let (g, p) = (f32::from_bits(gain), f32::from_bits(peak));
+                        failures.lock().unwrap().push(format!(
+                            "{}: gain {} vs {g}, peak {} vs {p}",
+                            t.path.display(),
+                            l.gain,
+                            l.peak
+                        ));
+                    }
+                }
+            });
+        }
+    });
+    let failures = failures.into_inner().unwrap();
+    eprintln!("checked {} tracks", tracks.len());
+    assert!(
+        failures.is_empty(),
+        "{} mismatches:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
