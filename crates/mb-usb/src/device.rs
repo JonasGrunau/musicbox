@@ -105,6 +105,8 @@ pub struct DevlibState {
     pub keys: Vec<(u32, String)>,
     pub albums: Vec<DevlibAlbum>,
     pub max_image_id: u32,
+    /// `image` rows: ID → path.
+    pub images: HashMap<u32, String>,
     pub playlists: Vec<DevlibList>,
     /// Playlist ID → content IDs in `sequenceNo` order.
     pub entries: HashMap<u32, Vec<u32>>,
@@ -449,6 +451,10 @@ fn load_devlib(path: &Path) -> Result<DevlibState> {
     state.max_image_id = c.query_row("select max(image_id) from image", [], |r| {
         Ok(as_int(r.get(0)?) as u32)
     })?;
+    let mut stmt = c.prepare("select image_id, path from image")?;
+    state.images = stmt
+        .query_map([], |r| Ok((as_int(r.get(0)?) as u32, as_text(r.get(1)?))))?
+        .collect::<rusqlite::Result<_>>()?;
     let mut stmt = c.prepare(
         "select playlist_id, playlist_id_parent, name, sequenceNo, attribute from playlist \
          order by playlist_id",

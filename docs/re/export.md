@@ -374,15 +374,51 @@ When a job finishes, `exportProcessChange` @0x1009bf758 writes the log, and the 
 
 **The two databases diverge here (verified on the oracle stick, reproduced by `mb-usb`):** the export.pdb insert (`DevAddContent_`) stores the three markers (RESERVED5–7), the exportLibrary.db insert does not (NULL). So on the second export of a track, export.pdb compares equal and its row is left alone, while exportLibrary.db sees NULL ≠ source and runs `setTrackUpdated` / `setAnalysisUpdated` / `modifyContentLink` (and the ANLZ set is rewritten with the same bytes). That is why the oracle's export.pdb rows of the five `oracle-small` tracks still carry `ANALYSED` 41 and CONTENTLINK 0xC0700, while their exportLibrary.db rows have 105 and 0x1D0700.
 
-### 4.3 Deleting tracks and playlists from the device (verified)
-- **Delete a device playlist** (`deleteList` / `delete_list` @0x100c4b3f4): removes the list rows and its artwork.
-  - When the preference `DeletePlaylistTracks` is on (`SettingIF::getCurrentDeletePlaylistTracks`), `removePlaylistTrackIfNotUsed` @0x100c4bf68 collects the tracks that no playlist on this DB or any same-device DB still uses (`get_not_used_playlist_tracks[_same_device]`). It then asks "Tracks which no longer exist in playlists will be deleted." and calls `removeFromCollection(tracks, true)`.
-  - With the preference off, orphan tracks stay on the stick.
-- **Remove a track from the device collection** (`removeFromCollection` @0x100c40d98 → `modifyRemove` @0x100c41cd4, which deletes the row and the files):
-  1. `delete_device_song_file` @0x100c44684 deletes the audio file **only if** the path is under `<root>/Contents`, no same-device DB still references the path, and the master library does not reference that on-stick file. The read-only bit is cleared first.
-  2. `delete_device_analysis_files` @0x100c44a54 deletes the ANLZ set unless a same-device DB still references the analysis path.
-  3. The artwork files are removed too (`delete_artwork_file` @0x100c43800).
-- **No automatic orphan sweep was found.** Files under `/Contents` or `/PIONEER/USBANLZ` that no DB references are left alone. The only automatic cleanup is the same-path ANLZ purge in § 1.6.
+### 4.3 Deleting tracks and playlists from the device (verified unless marked)
+rekordbox deletes from the database the user is browsing (export.pdb or exportLibrary.db); the other DB on the same stick is only consulted to decide which files may go. The row rules per DB follow; § 8 says what `mb-usb` does with both.
+
+**Delete a device playlist** (`DatabaseMediator::delete_list` @0x100c4b3f4)
+1. The controller's `deleteList` (vtable +0x330). Both DBs run the same four steps:
+
+   | Step | export.pdb (`dsqlDeleteList` @0x1019b134c) | exportLibrary.db (`DevSqliteDBController::deleteList` @0x100708c04) |
+   |---|---|---|
+   | a. Collect | the list plus every descendant (`dsql_get_all_children`); the list itself is appended last | the same (vtable +0xda8) |
+   | b. Lists | `dsql_delete_lists`: the playlist rows by ID | `delete_lists` @0x10072563c: `delete from playlist where playlist_id in (…)` |
+   | c. Entries | `dsql_delete_listsongs`: DJDBSONGPLAYLIST rows of those lists; their track IDs are returned | `delete_listsongs` @0x100725a30: the content IDs of `playlist_content` rows of those lists are selected, then `delete from playlist_content where playlist_id in (…)` |
+   | d. Siblings | `dsql_renumber_as_delete_children` @0x1019b09d8: the remaining children of the deleted list's parent, sorted by SEQ, get SEQ = 0, 1, 2, …; only rows whose SEQ changes are updated, all in one transaction | `renumber_as_delete_children` @0x10072684c → `renumber_sequence` @0x10070f3b8: a temp table numbers the parent's children by `sequenceNo` (AUTOINCREMENT from 1) and `sequenceNo` = that number + (offset − 1) with offset 0, so also 0, 1, 2, … |
+
+2. For each deleted list with artwork, `delete_artwork_file` (below). Neither DB path deletes a playlist's image row (*hypothesis* for the classic dynamic delete; rekordbox's own device lists have no image).
+3. When the preference `DeletePlaylistTracks` is on (`SettingIF::getCurrentDeletePlaylistTracks`), `removePlaylistTrackIfNotUsed` @0x100c4bf68 keeps those track IDs from step 1c that no playlist on this DB (`get_not_used_playlist_tracks`) or any same-device DB (`get_not_used_playlist_tracks_same_device`) still uses. It asks "Tracks which no longer exist in playlists will be deleted." and calls `removeFromCollection(tracks, true)`. With the preference off, orphan tracks stay on the stick.
+
+**Remove tracks from the device collection** (`removeFromCollection` @0x100c40d98 → `modifyRemove` @0x100c41cd4). Per track, the controller's `removeTrack` (vtable +0x268) deletes the rows, then the files go.
+
+*export.pdb* (`rekordboxDBController::removeTrack` @0x1017e3cfc, device branch). Each step is a DeviceSQL procedure (`DEV_MODULE3_*`) with its own commit:
+1. `DEVDELETECONTENT` @0x101d7dc90: when the track row exists, delete it (commit); delete the DJDBHOTCUEBANKPOINT rows whose CONTENTID is the track (commit); property SONGNUMBER = SONGNUMBER − 1 (commit).
+2. Lookups the track pointed at, each deleted only when no row references it any more:
+   - `DEVDELETEGENRE` @0x101d7c7d0: no track with that GENREID.
+   - `DEVDELETEALBUM` @0x101d7d25c: no track with that ALBUMID. The album's ALBUMARTISTID and IMAGEID are read, the album row deleted, then `DEVDELETEARTIST` and `DEVDELETEIMAGE` run for those two.
+   - `DEVDELETEIMAGE` @0x101d7b684 for the track's IMAGEID: no track, album, playlist or hot cue bank list with that IMAGEID.
+   - `DEVDELETEARTIST` @0x101d7ca58 for each non-zero artist column of the track: no album with that ALBUMARTISTID and no track with that ARTISTID, REMIXERID, ORGARTISTID or COMPOSERID (columns 5, 17, 19, 31, from the filter callbacks).
+   - **Labels and keys are never deleted** in this DB (`removeTrack` calls no `deleteLabel`/`deleteKey`).
+   - The five artist calls come from `RowDataTrack` +0x2e8, +0x278, +0x320, +0x130, +0xb8; which field is which is not mapped, so the order of the artist deletes is a *hypothesis*. The surviving rows do not depend on it.
+3. `DEVTRACKCASCADEDELETEFROMPLAYLISTNOUPDATETRACKNUMBER` @0x101d7b350: every DJDBSONGPLAYLIST row of the track. **The remaining entries keep their TRACKNO**, so lists get gaps.
+4. `DEVTRACKCASCADEDELETEFROMHISTORY` @0x101d7bc4c: every DJDBSONGHISTORY row of the track; for each, the rows of the same history with a higher SEQ get SEQ − 1. One transaction.
+5. exportExt.pdb, when it exists: DJDBEXRECOMMENDLIKE rows with the track as CONTENTID1 or CONTENTID2 (`extDeleteTrackRelation` @0x1019b35a0, two deletes); the track's DJDBEXSONGMYTAG links (`removeMyTagFromTrack`); its DJDBEXSONGHISTORY rows, **not** renumbered (`extTrackCascadeDeleteFromHistoryNoUpdateTrackNumber` @0x1019bd1b4); its DJDBEXCONTENTOPTION rows (`extDeleteContentOption` @0x1019c8f60, CONTENTID). `extDeleteAssociationAll` @0x100bd5490 also selects content-option rows by column 4; what it then changes is **open** (the table is empty on every stick seen).
+
+*exportLibrary.db* (`DevSqliteDBController::removeTrack` @0x100718aec). One transaction for all tracks of the call, then the lookup clean-up:
+1. `delete from content where content_id in (…)`, then `update_property_num_content` (`numberOfContents` = row count).
+2. The track's cue IDs (`select … from cue where content_id in (…)`); `delete from hotCueBankList_cue where cue_id in (…)`; `delete from cue where cue_id in (…)`.
+3. `delete from playlist_content where content_id in (…)` (**not** renumbered), `delete from history_content where content_id in (…)` (**not** renumbered), `delete from myTag_content where content_id in (…)`.
+4. `delete from image where image_id in (…)` with the non-zero `image_id`s of the tracks: **unconditional**, unlike the classic DB.
+5. `delete from recommendedLike where content_id_1 in (…) or content_id_2 in (…)`.
+6. Commit, then `delete_unused_record` @0x100719890 for artist, album, genre, label and key, in that order: rows that no `content` column (artists: the five artist columns and `album.artist_id`; albums: `content.album_id`) references with a value > 0. Because artists are cleaned before albums, an artist used only by an album deleted in the same call stays.
+
+*Files* (`modifyRemove`, device branch, per track after the rows):
+1. `delete_artwork_file` @0x100c43800 with the track's image path from the browsed DB: deletes that file and the `_l.jpg` and `_m.jpg` next to it (the name up to the last `.` + suffix), unconditionally.
+2. `delete_device_analysis_files` @0x100c44a54 deletes the ANLZ set (`.DAT`, `.EXT`, `.2EX`) unless a same-device DB still references the analysis path.
+3. `delete_device_song_file` @0x100c44684 deletes the audio file **only if** the path is under `<root>/Contents`, no same-device DB still references the path, and the master library does not reference that on-stick file. The read-only bit is cleared first.
+
+**No automatic orphan sweep was found.** Files under `/Contents` or `/PIONEER/USBANLZ` that no DB references are left alone. The only automatic cleanup is the same-path ANLZ purge in § 1.6.
 
 ### 4.4 Sync Manager: `playlists3.sync` and `playlists3Plus.sync` (verified: code + fixture)
 **Files and what they map**
@@ -619,7 +655,7 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
   - Folders: a selected folder is created (attribute 1) and its children are appended inside it in master order (not moved to position 0; *hypothesis*). Intelligent playlists are refused.
   - Missing `_s`/`_m` artwork is generated from the base image with the `image` crate (letterboxed on black, q85); those files are not byte-identical to rekordbox's JUCE encoder. Every fixture track has both variants.
   - macOS tags every file a process creates with `com.apple.provenance`; on FAT the OS stores it in an AppleDouble `._` file. The oracle stick has such files next to what rekordbox wrote (`PIONEER/._*`; that they come from this attribute is a *hypothesis*). The copy itself carries no attribute of the source (quarantine, last-used date).
-  - Not implemented: deleting tracks or lists from the device (§ 4.3), the Device Library Plus conversion of an old stick with export.pdb only (§ 6.4; refused), `playlists3*.sync` bookkeeping (§ 4.4; files are left as they are), "like" relations (§ 1.2 step 8), cues from master `djmdCue` (the local ANLZ cues are used, which equals rekordbox's output when the cues were saved to the local files).
+  - Not implemented: the Device Library Plus conversion of an old stick with export.pdb only (§ 6.4; refused), `playlists3*.sync` bookkeeping (§ 4.4; files are left as they are), "like" relations (§ 1.2 step 8), cues from master `djmdCue` (the local ANLZ cues are used, which equals rekordbox's output when the cues were saved to the local files).
 
 **Verification** (`cargo test -p mb-usb`, test `oracle_a_export_matches_rekordbox`): `oracle-small` exported to an empty directory, then `oracle-all` onto it, from `fixtures/oracle-a`; the second session replays the recorded export.pdb history (ten close/open cycles, `oracle-small` emptied and refilled, `oracle-all` inserted at position 1 and moved to the top, one more cycle; `pdb.md` § The oracle stick's history). Compared with `fixtures/oracle-a/rbtest`:
 
@@ -637,6 +673,15 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
 | markers / side files | no `sync*.temp`, `-wal`, `-shm` or temp file left |
 
 `tests/synthetic.rs` (no fixtures) covers an incremental export (identical list skipped, new list on top, file-name clash with a file already on the stick → `-1`, stale ANLZ set deleted and the next number used, metadata and analysis-marker updates in both DBs, artwork generated from a non-square base), a re-export that changes nothing, and cancellation mid-copy (partial file removed, DBs hold the finished track only).
+
+**Deletes** (`remove.rs`: `plan_remove` + `execute_remove`; writers `Exporter::delete_playlist` / `remove_track`, `ExtEditor::remove_track`, `DevLibWriter::delete_playlist` / `remove_tracks`). Each DB gets rekordbox's row rules from § 4.3. Choices that are musicbox's own:
+- **Both DBs at once.** rekordbox deletes from the browsed DB only; musicbox removes the same lists and tracks from export.pdb and exportLibrary.db so the two stay in lock-step. Lists are found by name path from the top level (first match by position, as the export matches lists), tracks by device path. A list that exists in one DB only (e.g. a player's TAG LIST in export.pdb) is deleted there.
+- **Orphans** (`DeletePlaylistTracks`, the UI checkbox, on by default): the deleted lists' tracks that no remaining list of either DB uses.
+- **Files** go only when no remaining row of either DB references them: audio (only below `/Contents`, and never a file the local library points at), the ANLZ set, and the artwork files. rekordbox deletes a track's artwork files unconditionally; musicbox keeps them while another track, album, list or hot cue bank list still names the same image path. Empty folders stay.
+- **Order:** exportLibrary.db (built next to the file and renamed into place), export.pdb, exportExt.pdb, then `syncfile::forget_device_lists` for every deleted list ID, then the files. A crash before the files leaves unreferenced files, never rows pointing at missing files.
+- **Hypotheses:** the order of the four artist deletes, a track played twice in one history (handled from the highest SEQ down so the rest stays contiguous), copying (not in-place) updates for the history and sibling renumbering, `extDeleteAssociationAll` not replayed.
+
+`tests/remove.rs`: a synthetic stick (export, player rows added: a tag list and a history in export.pdb, a "like" and a My Tag link in exportExt.pdb) loses a list with its orphans, then a track, then a track whose audio the local library keeps, and takes a new export afterwards; a folder with two children; and, with fixtures, an APFS clone of the reference stick's `PIONEER` folder loses all six exported lists with 608 orphan tracks (1820 files) while the 24 TAG LISTs, all 21 histories (minus the removed tracks' plays, order kept), the My Tag tree and every remaining track row stay identical. Every step: pdb-lint clean on both files, both DBs hold the same tracks and paths, `SONGNUMBER` / `numberOfContents` match, sibling positions contiguous from 0, no side files.
 
 ## Writer checklist
 `mb-usb` status: [x] implemented, [ ] not.
@@ -666,9 +711,9 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
   - [x] Identify tracks by master IDs + (length, bitrate, bitDepth, fileType, fileSize, sampleRate).
   - [x] Update rows in place; never re-copy existing audio.
   - [x] Rewrite ANLZ only when the analysis or cue marker changed.
-- [ ] Deletes:
-  - [ ] Remove the audio only if no other DB on the stick (and no library on this machine) uses the path.
-  - [ ] Same rule for ANLZ and artwork.
+- [x] Deletes (§ 4.3, § 8 Deletes):
+  - [x] Remove the audio only if no other DB on the stick (and no library on this machine) uses the path.
+  - [x] Same rule for ANLZ and artwork.
 - [x] Settings files:
   - [x] Written when the device DB is created or updated, as rekordbox does (not per track).
   - [x] Exact header strings, CRC-16/XMODEM (data block; whole file for DJMMYSETTING), sizes 148/148/140/160.

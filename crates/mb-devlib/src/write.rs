@@ -1102,6 +1102,180 @@ impl DevLibWriter {
         Ok(())
     }
 
+    /// Runs `f` in a transaction unless the caller already opened one (rekordbox's
+    /// `transactionStart(2)` … `transactionFinish`).
+    fn in_transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let own = self.conn.is_autocommit();
+        if own {
+            self.conn.execute_batch("BEGIN")?;
+        }
+        let result = f();
+        if own {
+            self.conn
+                .execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+        }
+        result
+    }
+
+    /// `deleteList` @0x100708C04 for a playlist or folder (`docs/re/export.md` § 4.3): the list
+    /// and its descendants (`delete_lists` @0x10072563C), their entries (`delete_listsongs`
+    /// @0x100725A30, whose content IDs are returned, list by list in entry order), then the
+    /// remaining children of the parent renumbered `sequenceNo` 0, 1, 2, …
+    /// (`renumber_as_delete_children` @0x10072684C → `renumber_sequence` @0x10070F3B8). Returns
+    /// `(deleted list IDs: descendants depth first, the list itself last; content IDs)`.
+    pub fn delete_playlist(&self, playlist_id: u32) -> Result<(Vec<u32>, Vec<u32>)> {
+        let parent: Option<Option<i64>> = self
+            .conn
+            .query_row(
+                "select playlist_id_parent from playlist where playlist_id = ?1",
+                [playlist_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(parent) = parent else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let parent = parent.unwrap_or(0) as u32;
+        let mut lists = Vec::new();
+        self.collect_child_lists(playlist_id, &mut lists)?;
+        lists.push(playlist_id);
+        let ids = join_ids(&lists);
+        self.conn.execute(
+            &format!("delete from playlist where playlist_id in ({ids})"),
+            [],
+        )?;
+        let mut contents = Vec::new();
+        for l in &lists {
+            let mut stmt = self.conn.prepare(
+                "select content_id from playlist_content where playlist_id = ?1 order by sequenceNo",
+            )?;
+            for c in stmt.query_map([l], |r| r.get::<_, Option<i64>>(0))? {
+                contents.push(c?.unwrap_or(0) as u32);
+            }
+        }
+        self.conn.execute(
+            &format!("delete from playlist_content where playlist_id in ({ids})"),
+            [],
+        )?;
+        self.renumber_children(parent)?;
+        Ok((lists, contents))
+    }
+
+    fn collect_child_lists(&self, parent: u32, out: &mut Vec<u32>) -> Result<()> {
+        let kids: Vec<u32> = {
+            let mut stmt = self.conn.prepare(
+                "select playlist_id from playlist where playlist_id_parent = ?1 and playlist_id != ?1 \
+                 order by sequenceNo, playlist_id",
+            )?;
+            stmt.query_map([parent], |r| r.get::<_, i64>(0))?
+                .map(|r| r.map(|v| v as u32))
+                .collect::<rusqlite::Result<_>>()?
+        };
+        for k in kids {
+            out.push(k);
+            self.collect_child_lists(k, out)?;
+        }
+        Ok(())
+    }
+
+    /// `renumber_sequence` with offset 0: the children of `parent` in `sequenceNo` order get
+    /// 0, 1, 2, … (rekordbox numbers them in a temp table and updates every child).
+    fn renumber_children(&self, parent: u32) -> Result<()> {
+        self.in_transaction(|| {
+            let kids: Vec<u32> = {
+                let mut stmt = self.conn.prepare(&format!(
+                    "select playlist_id from playlist where {} order by sequenceNo, playlist_id",
+                    Self::parent_clause("playlist_id_parent", parent)
+                ))?;
+                stmt.query_map([], |r| r.get::<_, i64>(0))?
+                    .map(|r| r.map(|v| v as u32))
+                    .collect::<rusqlite::Result<_>>()?
+            };
+            for (i, id) in kids.iter().enumerate() {
+                self.conn.execute(
+                    "update playlist set sequenceNo = ?1 where playlist_id = ?2",
+                    params![i as i64, id],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// `DevSqliteDBController::removeTrack` @0x100718AEC (`docs/re/export.md` § 4.3), in one
+    /// transaction: the `content` rows, `numberOfContents`, the tracks' cues (and their hot cue
+    /// bank list links), playlist / history / My Tag links (not renumbered), the tracks' image
+    /// rows (unconditionally), "like" relations; then `delete_unused_record` for artist, album,
+    /// genre, label and key.
+    pub fn remove_tracks(&self, content_ids: &[u32]) -> Result<()> {
+        if content_ids.is_empty() {
+            return Ok(());
+        }
+        let ids = join_ids(content_ids);
+        self.in_transaction(|| {
+            let images: Vec<u32> = {
+                let mut stmt = self.conn.prepare(&format!(
+                    "select image_id from content where content_id in ({ids}) and image_id > 0"
+                ))?;
+                stmt.query_map([], |r| r.get::<_, i64>(0))?
+                    .map(|r| r.map(|v| v as u32))
+                    .collect::<rusqlite::Result<_>>()?
+            };
+            self.conn
+                .execute(&format!("delete from content where content_id in ({ids})"), [])?;
+            self.update_number_of_contents()?;
+            let cues: Vec<u32> = {
+                let mut stmt = self.conn.prepare(&format!(
+                    "select cue_id from cue where content_id in ({ids})"
+                ))?;
+                stmt.query_map([], |r| r.get::<_, i64>(0))?
+                    .map(|r| r.map(|v| v as u32))
+                    .collect::<rusqlite::Result<_>>()?
+            };
+            if !cues.is_empty() {
+                let cue_ids = join_ids(&cues);
+                self.conn.execute(
+                    &format!("delete from hotCueBankList_cue where cue_id in ({cue_ids})"),
+                    [],
+                )?;
+                self.conn
+                    .execute(&format!("delete from cue where cue_id in ({cue_ids})"), [])?;
+            }
+            for table in ["playlist_content", "history_content", "myTag_content"] {
+                self.conn.execute(
+                    &format!("delete from {table} where content_id in ({ids})"),
+                    [],
+                )?;
+            }
+            if !images.is_empty() {
+                self.conn.execute(
+                    &format!("delete from image where image_id in ({})", join_ids(&images)),
+                    [],
+                )?;
+            }
+            self.conn.execute(
+                &format!(
+                    "delete from recommendedLike where content_id_1 in ({ids}) or content_id_2 in ({ids})"
+                ),
+                [],
+            )?;
+            Ok(())
+        })?;
+        self.delete_unused(Lookup::Artist)?;
+        self.delete_unused_albums()?;
+        self.delete_unused(Lookup::Genre)?;
+        self.delete_unused(Lookup::Label)?;
+        self.delete_unused(Lookup::Key)
+    }
+
+    /// `delete_unused_record` @0x100719890 for albums: rows no `content.album_id` > 0 references.
+    pub fn delete_unused_albums(&self) -> Result<()> {
+        self.conn.execute(
+            "delete from album where album_id not in (select album_id from content where album_id > 0)",
+            [],
+        )?;
+        Ok(())
+    }
+
     // ---- My Tag ---------------------------------------------------------------------------
 
     /// `writeMyTag` @0x1007121E4: set `property.myTagMasterDBID` (inserting the property row
@@ -1363,6 +1537,14 @@ impl DevLibWriter {
 }
 
 /// `calc_next_device_image_path` @0x10070A018.
+/// IDs as rekordbox inlines them into `… in (…)`: joined with ", ".
+fn join_ids(ids: &[u32]) -> String {
+    ids.iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub fn device_image_path(image_id: u32, hidden_pioneer: bool) -> String {
     let root = if hidden_pioneer {
         "/.PIONEER"

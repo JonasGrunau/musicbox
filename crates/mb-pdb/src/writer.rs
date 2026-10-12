@@ -155,7 +155,33 @@ pub struct Exporter {
     playlists: HashMap<u32, PlaylistNode>,
     property: Option<(RowRef, Property)>,
     /// Live entry rows per playlist, in insertion order.
-    entries: HashMap<u32, Vec<RowRef>>,
+    entries: HashMap<u32, Vec<(RowRef, PlaylistEntry)>>,
+    /// Album rows by ID (their artist and image IDs decide what a track removal may delete).
+    albums: HashMap<u32, Album>,
+    /// IMAGEID of every hot cue bank list (players create them; musicbox never does).
+    bank_list_images: Vec<u32>,
+    history_entries: Vec<(RowRef, HistoryEntry)>,
+    bank_points: Vec<(RowRef, HotCueBankPoint)>,
+    /// Image row ID → PATH.
+    artwork_paths: HashMap<u32, String>,
+}
+
+/// What [`Exporter::remove_track`] deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedTrack {
+    pub track: Track,
+    /// Path of the track's image row, when the row existed (it is deleted only if nothing else
+    /// uses it).
+    pub artwork_path: Option<String>,
+}
+
+/// What [`Exporter::delete_playlist`] deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DeletedLists {
+    /// The list, its descendants, then the list itself last (`dsql_get_all_children` order).
+    pub lists: Vec<u32>,
+    /// Track IDs of the deleted entries, list by list in entry order (duplicates kept).
+    pub tracks: Vec<u32>,
 }
 
 impl Exporter {
@@ -182,6 +208,11 @@ impl Exporter {
             playlists: HashMap::new(),
             property: prop_ref.zip(property),
             entries: HashMap::new(),
+            albums: HashMap::new(),
+            bank_list_images: Vec::new(),
+            history_entries: Vec::new(),
+            bank_points: Vec::new(),
+            artwork_paths: HashMap::new(),
         })
     }
 
@@ -201,8 +232,10 @@ impl Exporter {
         for (r, x) in locate_rows::<Artist>(&pdb)? {
             rows.insert((2, x.id), r);
         }
+        let mut albums = HashMap::new();
         for (r, x) in locate_rows::<Album>(&pdb)? {
             rows.insert((3, x.id), r);
+            albums.insert(x.id, x);
         }
         for (r, x) in locate_rows::<Label>(&pdb)? {
             rows.insert((4, x.0.id), r);
@@ -210,21 +243,27 @@ impl Exporter {
         for (r, x) in locate_rows::<Key>(&pdb)? {
             rows.insert((5, x.id), r);
         }
+        let mut artwork_paths = HashMap::new();
         for (r, x) in locate_rows::<Artwork>(&pdb)? {
             rows.insert((13, x.id), r);
+            artwork_paths.insert(x.id, x.path);
         }
         let mut playlists = HashMap::new();
         for (r, x) in locate_rows::<PlaylistNode>(&pdb)? {
             rows.insert((7, x.0.id), r);
             playlists.insert(x.0.id, x);
         }
-        let mut entries: HashMap<u32, Vec<RowRef>> = HashMap::new();
+        let mut entries: HashMap<u32, Vec<(RowRef, PlaylistEntry)>> = HashMap::new();
         let mut located = locate_rows::<PlaylistEntry>(&pdb)?;
         located.sort_by_key(|(_, e)| (e.playlist_id, e.entry_index));
         for (r, e) in located {
-            entries.entry(e.playlist_id).or_default().push(r);
+            entries.entry(e.playlist_id).or_default().push((r, e));
         }
         let property = locate_rows::<Property>(&pdb)?.into_iter().next();
+        let bank_list_images = locate_rows::<HotCueBankList>(&pdb)?
+            .into_iter()
+            .map(|(_, l)| l.0.artwork_id)
+            .collect();
         Ok(Self {
             db: Db::load(DbKind::Export, bytes)?,
             rows,
@@ -232,6 +271,11 @@ impl Exporter {
             playlists,
             property,
             entries,
+            albums,
+            bank_list_images,
+            history_entries: locate_rows::<HistoryEntry>(&pdb)?,
+            bank_points: locate_rows::<HotCueBankPoint>(&pdb)?,
+            artwork_paths,
         })
     }
 
@@ -272,6 +316,9 @@ impl Exporter {
         self.ensure(t.artist_id, l.artists.get(&t.artist_id), "artist")?;
         self.ensure(t.genre_id, l.genres.get(&t.genre_id), "genre")?;
         self.ensure(t.album_id, l.albums.get(&t.album_id), "album")?;
+        if let Some(a) = l.albums.get(&t.album_id) {
+            self.albums.entry(a.id).or_insert_with(|| a.clone());
+        }
         self.ensure(t.remixer_id, l.artists.get(&t.remixer_id), "artist")?;
         self.ensure(
             t.original_artist_id,
@@ -328,6 +375,7 @@ impl Exporter {
                 .ok_or_else(|| missing("image", t.artwork_id))?;
             let ar = self.db.txn(|db| insert_row(db, art))?;
             self.rows.insert((Artwork::TABLE_TYPE, art.id), ar);
+            self.artwork_paths.insert(art.id, art.path.clone());
             r = self
                 .db
                 .txn(|db| db.update(Track::TABLE_TYPE, r, &t.to_values()))?;
@@ -444,7 +492,7 @@ impl Exporter {
     /// Appends a track to a playlist (`add_track_to_device_playlist`): one row, one transaction.
     pub fn add_entry(&mut self, e: &PlaylistEntry) -> Result<RowRef> {
         let r = self.db.txn(|db| insert_row(db, e))?;
-        self.entries.entry(e.playlist_id).or_default().push(r);
+        self.entries.entry(e.playlist_id).or_default().push((r, *e));
         Ok(r)
     }
 
@@ -460,11 +508,276 @@ impl Exporter {
             return Ok(());
         }
         self.db.txn(|db| {
-            for r in &refs {
+            for (r, _) in &refs {
                 db.delete(PlaylistEntry::TABLE_TYPE, *r)?;
             }
             Ok(())
         })
+    }
+
+    /// Deletes one keyed row (`rows` index) in its own transaction; a missing row is a no-op.
+    fn delete_keyed(&mut self, table_type: u32, id: u32) -> Result<()> {
+        if let Some(r) = self.rows.remove(&(table_type, id)) {
+            self.db.txn(|db| db.delete(table_type, r))?;
+        }
+        Ok(())
+    }
+
+    /// `DEVDELETEGENRE`: the genre row, unless a track still uses it.
+    fn delete_genre_if_unused(&mut self, id: u32) -> Result<()> {
+        if id == 0 || self.tracks.values().any(|t| t.genre_id == id) {
+            return Ok(());
+        }
+        self.delete_keyed(Genre::TABLE_TYPE, id)
+    }
+
+    /// `DEVDELETEARTIST`: the artist row, unless an album (ALBUMARTISTID) or a track (ARTISTID,
+    /// REMIXERID, ORGARTISTID, COMPOSERID) still uses it.
+    fn delete_artist_if_unused(&mut self, id: u32) -> Result<()> {
+        if id == 0
+            || self.albums.values().any(|a| a.album_artist_id == id)
+            || self.tracks.values().any(|t| {
+                t.artist_id == id
+                    || t.remixer_id == id
+                    || t.original_artist_id == id
+                    || t.composer_id == id
+            })
+        {
+            return Ok(());
+        }
+        self.delete_keyed(Artist::TABLE_TYPE, id)
+    }
+
+    /// `DEVDELETEIMAGE`: the image row, unless a track, album, playlist or hot cue bank list
+    /// still uses it.
+    fn delete_image_if_unused(&mut self, id: u32) -> Result<()> {
+        if id == 0
+            || self.tracks.values().any(|t| t.artwork_id == id)
+            || self.albums.values().any(|a| a.artwork_id == id)
+            || self.playlists.values().any(|p| p.0.artwork_id == id)
+            || self.bank_list_images.contains(&id)
+        {
+            return Ok(());
+        }
+        self.delete_keyed(Artwork::TABLE_TYPE, id)
+    }
+
+    /// `DEVDELETEALBUM`: the album row unless a track still uses it, then its album artist and
+    /// image the same way.
+    fn delete_album_if_unused(&mut self, id: u32) -> Result<()> {
+        if id == 0 || self.tracks.values().any(|t| t.album_id == id) {
+            return Ok(());
+        }
+        let album = self.albums.remove(&id);
+        self.delete_keyed(Album::TABLE_TYPE, id)?;
+        if let Some(a) = album {
+            self.delete_artist_if_unused(a.album_artist_id)?;
+            self.delete_image_if_unused(a.artwork_id)?;
+        }
+        Ok(())
+    }
+
+    /// Removes a track from the device collection the way `rekordboxDBController::removeTrack`
+    /// does on export.pdb (`docs/re/export.md` § 4.3), one DeviceSQL procedure after the other:
+    /// 1. `DEVDELETECONTENT`: the track row, its hot cue bank points, property SONGNUMBER − 1
+    ///    (three transactions);
+    /// 2. genre, album (+ album artist and image), image, then the four artist columns, each
+    ///    only when nothing uses it any more (labels and keys stay);
+    /// 3. its playlist entries (the others keep their TRACKNO);
+    /// 4. its history entries, later entries of the same history moving up by one.
+    ///
+    /// The exportExt.pdb side is [`ExtEditor::remove_track`]. `None` when there is no such track.
+    pub fn remove_track(&mut self, id: u32) -> Result<Option<RemovedTrack>> {
+        let Some(track) = self.tracks.remove(&id) else {
+            return Ok(None);
+        };
+        let artwork_path = self.artwork_paths.get(&track.artwork_id).cloned();
+        // 1. DEVDELETECONTENT.
+        self.delete_keyed(Track::TABLE_TYPE, id)?;
+        let points: Vec<RowRef> = self
+            .bank_points
+            .iter()
+            .filter(|(_, p)| p.track_id == id)
+            .map(|(r, _)| *r)
+            .collect();
+        if !points.is_empty() {
+            self.bank_points.retain(|(_, p)| p.track_id != id);
+            self.db.txn(|db| {
+                for r in &points {
+                    db.delete(HotCueBankPoint::TABLE_TYPE, *r)?;
+                }
+                Ok(())
+            })?;
+        }
+        let mut prop = self.property.take();
+        let r = self.db.txn(|db| {
+            let count = prop.as_ref().map_or(0, |(_, p)| p.track_count);
+            Self::update_property(db, &mut prop, count.saturating_sub(1))
+        });
+        self.property = prop;
+        r?;
+        // 2. Lookups. **Hypothesis**: the order of the artist columns (rekordbox passes
+        // RowDataTrack +0x2e8, +0x278, +0x320, +0x130, +0xb8, not mapped to names).
+        self.delete_genre_if_unused(track.genre_id)?;
+        self.delete_album_if_unused(track.album_id)?;
+        self.delete_image_if_unused(track.artwork_id)?;
+        for a in [
+            track.artist_id,
+            track.remixer_id,
+            track.original_artist_id,
+            track.composer_id,
+        ] {
+            self.delete_artist_if_unused(a)?;
+        }
+        // 3. DEVTRACKCASCADEDELETEFROMPLAYLISTNOUPDATETRACKNUMBER.
+        let mut gone = Vec::new();
+        for list in self.entries.values_mut() {
+            list.retain(|(r, e)| {
+                if e.track_id == id {
+                    gone.push(*r);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if !gone.is_empty() {
+            self.db.txn(|db| {
+                for r in &gone {
+                    db.delete(PlaylistEntry::TABLE_TYPE, *r)?;
+                }
+                Ok(())
+            })?;
+        }
+        // 4. DEVTRACKCASCADEDELETEFROMHISTORY: each entry of the track goes and the later entries
+        // of its history move up. Entries are handled from the highest SEQ down, so a track
+        // played twice in one history leaves the others contiguous (**hypothesis** for that
+        // case; rekordbox walks a sorted cursor).
+        let mut hits: Vec<(u32, u16)> = self
+            .history_entries
+            .iter()
+            .filter(|(_, e)| e.track_id == id)
+            .map(|(_, e)| (e.history_id, e.seq))
+            .collect();
+        if !hits.is_empty() {
+            hits.sort_by(|a, b| b.cmp(a));
+            let mut entries = std::mem::take(&mut self.history_entries);
+            let r = self.db.txn(|db| {
+                for &(history, seq) in &hits {
+                    if let Some(i) = entries.iter().position(|(_, e)| {
+                        e.history_id == history && e.seq == seq && e.track_id == id
+                    }) {
+                        let (r, _) = entries.remove(i);
+                        db.delete(HistoryEntry::TABLE_TYPE, r)?;
+                    }
+                    let mut later: Vec<usize> = (0..entries.len())
+                        .filter(|&i| entries[i].1.history_id == history && entries[i].1.seq > seq)
+                        .collect();
+                    later.sort_by_key(|&i| entries[i].1.seq);
+                    for i in later {
+                        let mut e = entries[i].1;
+                        e.seq -= 1;
+                        let nr =
+                            db.update(HistoryEntry::TABLE_TYPE, entries[i].0, &e.to_values())?;
+                        entries[i] = (nr, e);
+                    }
+                }
+                Ok(())
+            });
+            self.history_entries = entries;
+            r?;
+        }
+        Ok(Some(RemovedTrack {
+            track,
+            artwork_path,
+        }))
+    }
+
+    /// Deletes a playlist or folder with everything below it, the way `dsqlDeleteList` does
+    /// (`docs/re/export.md` § 4.3): the list rows (one transaction), their entries (one
+    /// transaction), then the remaining children of the parent renumbered SEQ 0, 1, 2, … (one
+    /// transaction; only rows whose SEQ changes are rewritten). Image rows are kept.
+    pub fn delete_playlist(&mut self, id: u32) -> Result<DeletedLists> {
+        let node = self
+            .playlists
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| missing("playlist", id))?;
+        let mut lists = Vec::new();
+        self.collect_children(id, &mut lists);
+        lists.push(id);
+        let refs: Vec<RowRef> = lists
+            .iter()
+            .filter_map(|l| self.rows.get(&(PlaylistNode::TABLE_TYPE, *l)).copied())
+            .collect();
+        self.db.txn(|db| {
+            for r in &refs {
+                db.delete(PlaylistNode::TABLE_TYPE, *r)?;
+            }
+            Ok(())
+        })?;
+        for l in &lists {
+            self.rows.remove(&(PlaylistNode::TABLE_TYPE, *l));
+            self.playlists.remove(l);
+        }
+        let mut tracks = Vec::new();
+        let mut gone = Vec::new();
+        for l in &lists {
+            for (r, e) in self.entries.remove(l).unwrap_or_default() {
+                tracks.push(e.track_id);
+                gone.push(r);
+            }
+        }
+        if !gone.is_empty() {
+            self.db.txn(|db| {
+                for r in &gone {
+                    db.delete(PlaylistEntry::TABLE_TYPE, *r)?;
+                }
+                Ok(())
+            })?;
+        }
+        self.renumber_children(node.0.parent_id)?;
+        Ok(DeletedLists { lists, tracks })
+    }
+
+    /// Descendants of `parent`, depth first, siblings by SEQ.
+    fn collect_children(&self, parent: u32, out: &mut Vec<u32>) {
+        let mut kids: Vec<&PlaylistNode> = self
+            .playlists
+            .values()
+            .filter(|p| p.0.parent_id == parent && p.0.id != parent)
+            .collect();
+        kids.sort_by_key(|p| (p.0.seq, p.0.id));
+        let ids: Vec<u32> = kids.iter().map(|p| p.0.id).collect();
+        for k in ids {
+            out.push(k);
+            self.collect_children(k, out);
+        }
+    }
+
+    /// `dsql_renumber_as_delete_children`: the children of `parent` sorted by SEQ get SEQ 0, 1,
+    /// 2, …; rows whose SEQ changes are rewritten in one transaction.
+    fn renumber_children(&mut self, parent: u32) -> Result<()> {
+        let mut kids: Vec<PlaylistNode> = self
+            .playlists
+            .values()
+            .filter(|p| p.0.parent_id == parent)
+            .cloned()
+            .collect();
+        kids.sort_by_key(|p| (p.0.seq, p.0.id));
+        let changed: Vec<PlaylistNode> = kids
+            .into_iter()
+            .enumerate()
+            .filter(|(i, p)| p.0.seq != *i as u32)
+            .map(|(i, mut p)| {
+                p.0.seq = i as u32;
+                p
+            })
+            .collect();
+        if changed.is_empty() {
+            return Ok(());
+        }
+        self.update_playlists(&changed)
     }
 
     /// Place of the live row of a keyed table (tracks, lookups, images, playlists) by ID.
@@ -474,6 +787,82 @@ impl Exporter {
 
     pub fn playlist(&self, id: u32) -> Option<&PlaylistNode> {
         self.playlists.get(&id)
+    }
+
+    /// Live playlist rows.
+    pub fn playlists(&self) -> impl Iterator<Item = &PlaylistNode> {
+        self.playlists.values()
+    }
+}
+
+/// Track removal on an existing exportExt.pdb (`rekordboxDBController::removeTrack`, the
+/// exportExt calls; `docs/re/export.md` § 4.3).
+#[derive(Debug, Clone)]
+pub struct ExtEditor {
+    pub db: Db,
+    history_entries: Vec<(RowRef, ExtHistoryEntry)>,
+    likes: Vec<(RowRef, RecommendLike)>,
+    tag_links: Vec<(RowRef, MyTagTrack)>,
+    content_options: Vec<(RowRef, ContentOption)>,
+}
+
+impl ExtEditor {
+    /// Opens an existing exportExt.pdb for writing.
+    pub fn load(bytes: &[u8]) -> Result<Self> {
+        let pdb = Pdb::parse(bytes.to_vec())?;
+        Ok(Self {
+            history_entries: locate_rows(&pdb)?,
+            likes: locate_rows(&pdb)?,
+            tag_links: locate_rows(&pdb)?,
+            content_options: locate_rows(&pdb)?,
+            db: Db::load(DbKind::ExportExt, bytes)?,
+        })
+    }
+
+    /// Deletes `rows` matching `hit` in one transaction (none: no transaction).
+    fn delete_where<T: TypedRow>(
+        db: &mut Db,
+        rows: &mut Vec<(RowRef, T)>,
+        hit: impl Fn(&T) -> bool,
+    ) -> Result<()> {
+        let gone: Vec<RowRef> = rows
+            .iter()
+            .filter(|(_, r)| hit(r))
+            .map(|(r, _)| *r)
+            .collect();
+        if gone.is_empty() {
+            return Ok(());
+        }
+        rows.retain(|(_, r)| !hit(r));
+        db.txn(|db| {
+            for r in &gone {
+                db.delete(T::TABLE_TYPE, *r)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// The exportExt.pdb rows of a removed track, in `removeTrack`'s order: history entries
+    /// (not renumbered), "like" relations in either column, My Tag links, content options.
+    /// `extDeleteAssociationAll` is not replayed (what it changes is open; the table is empty
+    /// on every stick seen).
+    pub fn remove_track(&mut self, id: u32) -> Result<()> {
+        Self::delete_where(&mut self.db, &mut self.history_entries, |e| {
+            e.track_id == id
+        })?;
+        Self::delete_where(&mut self.db, &mut self.likes, |l| {
+            l.track_id1 == id || l.track_id2 == id
+        })?;
+        Self::delete_where(&mut self.db, &mut self.tag_links, |l| l.track_id == id)?;
+        Self::delete_where(&mut self.db, &mut self.content_options, |o| {
+            o.track_id == id
+        })
+    }
+
+    /// Closes the database and returns the file.
+    pub fn finish(mut self) -> Vec<u8> {
+        self.db.close();
+        self.db.to_bytes()
     }
 }
 

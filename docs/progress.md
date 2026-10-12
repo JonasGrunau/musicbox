@@ -14,6 +14,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
   2. tracks load with title, artist, BPM, key and artwork;
   3. waveforms, beat grid and cues show;
   4. `click_128_offset1234` shows 128.00 BPM.
+- **M4 deletes (done, not committed by the worker):** "Remove from device…" for playlists, folders (tree) and tracks (table), with "Also delete tracks no other playlist uses". `mb-usb::remove` removes from export.pdb, exportExt.pdb and exportLibrary.db in lock-step using rekordbox's per-DB row rules (`docs/re/export.md` § 4.3, from `removeTrack` / `deleteList` and the DeviceSQL procedures), clears the lists' `Dev_ID`s in `playlists3*.sync`, then deletes the files no remaining row uses. Tested on a synthetic stick (`crates/mb-usb/tests/remove.rs`, `apps/musicbox/tests/ui_device_remove.rs`) and on an APFS clone of the reference stick's `PIONEER` folder (6 lists + 608 orphan tracks removed; tag lists, histories, My Tags and every other row intact; lint clean).
 - **Next:** M4 (deletes, old-stick conversion, `playlists3*.sync`, player data kept), with M5 cue/grid editing and M6 waveforms in parallel.
 
 ## 2026-10-12 — M2 accepted by rekordbox

@@ -21,6 +21,7 @@ pub mod exec;
 pub mod log;
 pub mod naming;
 pub mod plan;
+pub mod remove;
 pub mod settings;
 pub mod source;
 pub mod syncfile;
@@ -32,6 +33,7 @@ pub use plan::{
     DevlibChange, DevlibOp, ExportPlan, ExtOp, FileOp, Job, PdbOp, PlanOptions, TrackResult,
     TrackStep, plan_export,
 };
+pub use remove::{RemoveFile, RemovePlan, RemoveReport, RemoveRequest, execute_remove, plan_remove};
 pub use source::{SelectionItem, SourceLibrary};
 
 use std::path::{Path, PathBuf};
