@@ -123,8 +123,8 @@ PCOB header:
 | 0x0e | u16 | list kind: 1 = hot cues, 0 = memory cues (the hot-cue writer fails unless it is 1, the memory writer unless it is 0) | V |
 | 0x10 | u16 | 0 | V |
 | 0x12 | u16 | entry count | V |
-| 0x14 | u16 | 0xffff in hot lists and empty lists. One memory list has `0000 0001`, which looks like the first/last index of the memory-cue linked list maintained by `add_pmai_mem_cue` @0x100f5bd70 | H |
-| 0x16 | u16 | see 0x14 | H |
+| 0x14 | u16 | memory list: index of the first entry (0), 0xffff when empty; hot lists 0xffff (`ExportAnalysisData` @0x1007b7c0c writes 0 / n − 1 for a non-empty memory list) | V |
+| 0x16 | u16 | memory list: index of the last entry (n − 1), 0xffff when empty; hot lists 0xffff | V |
 
 PCPT entry (sub-atom: header 0x1c, total 0x38). Fields are filled by `set_pmai_hot_cue` @0x100f5bbbc / `set_pmai_cue_point` @0x100f5bb64 from a `cue_point_t`:
 
@@ -132,19 +132,19 @@ PCPT entry (sub-atom: header 0x1c, total 0x38). Fields are filled by `set_pmai_h
 |---|---|---|---|
 | 0x0c | u16 | 0 | V |
 | 0x0e | u16 | hot cue number (1 = A …). 0 for memory cues; the .DAT hot list holds A–C only | V |
-| 0x10 | u32 | `cue_point_t`+4; 0 in fixtures | C |
+| 0x10 | u32 | 4 for an active memory loop (cue kind 4), else 0 (`getExportCue` @0x1009bc884) | V (code) |
 | 0x14 | u16 | status: the 7.x setter stores 1. 768 entries have 1, 290 (older stick files) have 0 | V value, H meaning |
 | 0x16 | u16 | 0 | V |
-| 0x18 | u16 | previous entry in the memory-cue list (0xffff = none) | H |
-| 0x1a | u16 | next entry in the memory-cue list (0xffff = none) | H |
+| 0x18 | u16 | previous entry in the memory-cue list (0xffff = none; hot cues 0xffff) | V |
+| 0x1a | u16 | next entry in the memory-cue list (0xffff = none) | V |
 | 0x1c | u8 | cue type: 1 = point, 2 = loop | V |
 | 0x1d | u8 | written as constant 0 | V |
 | 0x1e | u16 | time unit, 1000 (positions are ms; `convertToMsec` @0x100f5bb1c treats 1000 as identity, 0 as "position 0", and any other value as positions per second, rounded up) | V |
 | 0x20 | u32 | position (ms) | V |
 | 0x24 | u32 | loop end (ms), 0xffffffff = none | V |
-| 0x28 | u32 × 4 | 0 when status = 1, 0xffffffff otherwise | V value, O meaning |
+| 0x28 | u32 × 4 | `InMpegFrame`, `OutMpegFrame`, `InMpegAbs`, `OutMpegAbs` of the cue row (0 except for VBR MP3s); 0xffffffff in older files (status 0) | V (code) |
 
-Fixture check: each DAT hot cue reappears in the EXT PCO2 hot list with the same number, position and type.
+Fixture check: each DAT hot cue reappears in the EXT PCO2 hot list with the same number, position and type. On a stick, the `.DAT` hot list holds A–C, the `.EXT` PCOB hot list holds D onwards and the `.EXT` PCOB memory list is always empty; how the export fills them from master.db is in `export.md` § 1.6 "Cues" (410/410 7.x-written stick sets rebuilt byte for byte).
 
 ### PWV3: monochrome scrolling waveform (.EXT)
 Writer `write_pmai_ext_zoom_wave` @0x1013d0554, init `init_pmai_ext_zoom_wave` @0x1013cd59c. View: `tags::WaveScroll`.
@@ -183,10 +183,10 @@ PCP2 entry (sub-atom header 0x10; total = 0x2c + comment bytes + extension bytes
 | 0x12 | u16 | time unit, 1000 | V |
 | 0x14 | u32 | position (ms) | V |
 | 0x18 | u32 | loop end (ms), 0xffffffff = none | V |
-| 0x1c | u8 | memory-cue colour: the builder stores colour index + 1 when the index is 0..7, else 0. 0 in all fixtures | C |
-| 0x1d | u8 | from `cue_ext_data_t`+9. 1 in every 88-byte entry, 0 in 48-byte entries, 3 once | O |
-| 0x1e | u16 | from `cue_ext_data_t`+0x0e. Values 0..995: sub-millisecond part of the position in µs | H |
-| 0x20 | u16 | from `cue_ext_data_t`+0x10. 494 on the only loop with an end: sub-ms part of the loop end | H |
+| 0x1c | u8 | memory-cue colour: `djmdCue.Color` + 1 when it is 0..7, else 0. 0 in all fixtures | V (code) |
+| 0x1d | u8 | 1 in every entry the 7.x export writes (`convert_cue_to_extPointdata` @0x1009bd4b8); 0 in 48-byte entries, 3 once | V value, O meaning |
+| 0x1e | u16 | sub-millisecond part of the position in µs (`djmdCue.CueMicrosec` low half, when < 1000) | V (code) |
+| 0x20 | u16 | sub-millisecond part of the loop end (`CueMicrosec` high half, when < 1000) | V (code) |
 | 0x22 | u16 | 0 | C |
 | 0x24 | u16 | beat-loop numerator (stored only when numerator and denominator are both non-zero; one fixture loop has 8/1 here) | C |
 | 0x26 | u16 | beat-loop denominator | C |
@@ -197,7 +197,7 @@ PCP2 entry (sub-atom header 0x10; total = 0x2c + comment bytes + extension bytes
 
 Extension: the builder writes 44 bytes if `cue_ext_data_t`+0x38 is non-zero, 4 bytes if any of the four colour bytes is non-zero, and none otherwise.
 - First 4 bytes: hot-cue colour code, R, G, B. Fixture pairs: code 8 → 00c4ff, 19 → 00ff30, 23 → 33ff00, 32 → ffe800, 36 → ff8c00, 38 → ff5e00, 43 → ff0017, 60 → 4d00ff. 48-byte entries carry code 0 with an RGB value.
-- The 44-byte form adds four u64 and two u32 after the colour bytes, all zero in fixtures (meaning **O**).
+- The 44-byte form adds four u64 and two u32 after the colour bytes: the FLAC seek points of the in and out point (in-a, out-a, in-b, out-b, in-c, out-c, from `InPointSeekInfo`/`OutPointSeekInfo` "a,b,c"); zero for other formats and in all fixtures. The USB export always writes the 44-byte form.
 - The writer also appends a raw trailing buffer (entry+0x78, length at +0x70) after the extension. The typed view keeps everything after the comment as raw `ext` bytes.
 
 Fixture entry lengths: 849 × 88, 421 × 48, 3 × 44. `ExportAnalysisExtendWithCue` appears to size every exported entry as 0x58 + comment (adds at 0x1007b8918/0x1007b8a74), so the 48- and 44-byte entries probably come from older exports.

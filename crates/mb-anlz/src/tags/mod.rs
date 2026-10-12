@@ -18,7 +18,7 @@ mod vocal;
 mod wave;
 
 pub use beatgrid::{Beat, BeatGrid, ExtBeatGrid};
-pub use cues::{CueEntry, CueEntryExt, CueKind, CueList, CueListExt, CueType};
+pub use cues::{CueEntry, CueEntryExt, CueKind, CueList, CueListExt, CueType, NONE_U16, NONE_U32};
 pub use path::Path;
 pub use phrase::{Phrase, SongStructure};
 pub use seek::{SeekPoint, SeekTable};

@@ -21,4 +21,5 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]
 anyhow.workspace = true
+mb-library = { path = "../mb-library" }
 sha2 = "0.10"

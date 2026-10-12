@@ -340,9 +340,10 @@ fn run_files(ctx: &mut Ctx, files: &[FileOp]) -> std::result::Result<(), StepErr
                 parts,
                 dat,
                 ppth,
+                cues,
             } => {
                 let dest = ctx.fs(dat);
-                write_anlz(local_dat, *parts, &dest, ppth)
+                write_anlz(local_dat, *parts, &dest, ppth, cues)
                     .map_err(|e| StepError::Failed(TrackResult::AnalysisFailed, e))?;
             }
             FileOp::Artwork { from, size, to } => {
@@ -395,9 +396,9 @@ fn copy_audio(ctx: &mut Ctx, from: &Path, dest: &Path) -> std::result::Result<()
 }
 
 /// The USB ANLZ set from the local one (`ExportAnalysisData*`, `docs/re/anlz.md` § Local vs
-/// USB): PPTH = device path, PSSI/PVDI scrambled, everything else unchanged. `.3EX` is never
-/// exported.
-fn write_anlz(local_dat: &Path, parts: [bool; 3], dest_dat: &Path, ppth: &str) -> Result<()> {
+/// USB): PPTH = device path, PSSI/PVDI scrambled, the cue lists from master.db (`.DAT` and
+/// `.EXT`), everything else unchanged. `.3EX` is never exported.
+fn write_anlz(local_dat: &Path, parts: [bool; 3], dest_dat: &Path, ppth: &str, cues: &crate::cues::DeviceCues) -> Result<()> {
     for (ext, present) in ["DAT", "EXT", "2EX"].iter().zip(parts) {
         if !present {
             continue;
@@ -408,7 +409,13 @@ fn write_anlz(local_dat: &Path, parts: [bool; 3], dest_dat: &Path, ppth: &str) -
             path: src.clone(),
             source,
         })?;
-        let usb = mb_anlz::usb::to_usb(&file, ppth).to_bytes();
+        let mut usb = mb_anlz::usb::to_usb(&file, ppth);
+        match *ext {
+            "DAT" => crate::cues::apply_dat(&mut usb, cues),
+            "EXT" => crate::cues::apply_ext(&mut usb, cues),
+            _ => {}
+        }
+        let usb = usb.to_bytes();
         write_replace(&dest_dat.with_extension(ext), &usb)?;
     }
     Ok(())

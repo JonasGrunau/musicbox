@@ -4,7 +4,7 @@ Status: **binary-derived** (rekordbox 7.2.19 arm64, Ghidra). No cue was written 
 
 ## Where collection cues live
 - **Only in master.db.** `rekordboxDBController::setCue` @0x1017deef4 calls `CAnalyzerIF::setDeviceCue` only for device databases (types 1 and 2); the master controller (`AppSyncDBController`, type 3, set in its constructor @0x100a3acf8) writes the database rows and nothing else. The local `ANLZ0000.DAT/.EXT` keep their (empty) PCOB/PCO2 lists.
-- **The USB export builds the device PCOB/PCO2 from these rows** (`getContentCueInfo`, vtable +0x438, then `getExportCue` @0x1009bc884; `../export.md` § 1.6). An exporter that copies the local cue tags instead loses every cue set in rekordbox.
+- **The USB export builds the device PCOB/PCO2 from these rows** (`getContentCueInfo`, vtable +0x438, then `getExportCue` @0x1009bc884; `../export.md` § 1.6). An exporter that copies the local cue tags instead loses every cue set in rekordbox. `mb-usb` builds them from the rows (`crates/mb-usb/src/cues.rs`).
 - `djmdCue` is written through the ORM layer **without the library-sync columns** (`DaoBase<Cue, NoLibrarySyncSql>`): no USN bump, and `rb_data_status`, `rb_local_deleted`, `rb_local_synced`, `usn`, `rb_local_usn` keep their defaults (0/0/0/NULL/NULL).
 - The cloud-sync mirror is `contentCue`: one row per track with the JSON of all its cue rows. It is written through `DaoBase<ContentCue, LibrarySyncSql>` with one USN bump per write.
 

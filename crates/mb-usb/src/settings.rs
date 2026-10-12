@@ -278,6 +278,23 @@ pub fn settings_writes(
     out
 }
 
+/// One preference from rekordbox's `rekordbox3.settings` in `settings_dir` (`<VALUE name="…"
+/// val="…"/>` entries). `None` when the file or the entry is missing.
+pub fn preference(settings_dir: &Path, name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(settings_dir.join("rekordbox3.settings")).ok()?;
+    let key = format!("name=\"{name}\"");
+    let at = text.find(&key)? + key.len();
+    let rest = &text[at..text[at..].find('>').map_or(text.len(), |e| at + e)];
+    let start = rest.find("val=\"")? + 5;
+    Some(rest[start..start + rest[start..].find('"')?].to_owned())
+}
+
+/// The preference `HotCueColorType` (default colours of hot cues without a colour code,
+/// `crate::cues::default_hot_cue_code`).
+pub fn hot_cue_color_type(settings_dir: &Path) -> Option<u8> {
+    preference(settings_dir, "HotCueColorType")?.trim().parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

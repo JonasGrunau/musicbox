@@ -94,6 +94,11 @@ pub struct PlanOptions {
     /// 0 nor ours): rekordbox asks whether to overwrite them. `true` answers yes; default `false`
     /// leaves the stick's My Tags alone and exports no My Tag links (`docs/re/export.md` § 2.5).
     pub overwrite_foreign_my_tags: bool,
+    /// rekordbox's preference `HotCueColorType` (rekordbox3.settings): which default colours
+    /// hot cues without a colour code get in the device PCO2 tags (`crate::cues`). Default 4
+    /// (the value in the reference installation); [`crate::settings::hot_cue_color_type`]
+    /// reads it.
+    pub hot_cue_color_type: u8,
 }
 
 impl Default for PlanOptions {
@@ -104,8 +109,16 @@ impl Default for PlanOptions {
             mount_my_tag_sync: true,
             max_playlist_tracks: 10_000,
             overwrite_foreign_my_tags: false,
+            hot_cue_color_type: 4,
         }
     }
+}
+
+/// `is_need_exporting_cue_ext` @0x1009b8b28: the device row lacks `contentLink` bit 0x100
+/// (no extended cue data on the stick yet) and a master cue has a colour, comment, beat-loop
+/// size, colour code or sub-ms part.
+fn needs_cue_ext(device_content_link: u32, t: &SourceTrack) -> bool {
+    device_content_link & 0x100 == 0 && crate::cues::has_extended_data(&t.cues)
 }
 
 /// One lookup row of export.pdb (`getAndAdd*ID`), inserted in its own transaction.
@@ -375,7 +388,8 @@ pub enum FileOp {
     },
     /// Delete an ANLZ set (`.DAT`, `.EXT`, `.2EX` next to `dat`).
     DeleteAnlz { dat: String },
-    /// Build the USB ANLZ set from the local one (`mb_anlz::usb::to_usb`).
+    /// Build the USB ANLZ set from the local one (`mb_anlz::usb::to_usb`), with the cue tags
+    /// replaced by the ones built from master.db (`crate::cues`, `docs/re/export.md` § 1.6).
     WriteAnlz {
         local_dat: PathBuf,
         /// Which of `.DAT`, `.EXT`, `.2EX` exist locally.
@@ -383,6 +397,7 @@ pub enum FileOp {
         dat: String,
         /// The PPTH value: the track's device path.
         ppth: String,
+        cues: Box<crate::cues::DeviceCues>,
     },
     /// One artwork file: the local variant copied byte for byte, or generated from the base
     /// image when the variant is missing.
@@ -1703,6 +1718,7 @@ impl<'a> Planner<'a> {
                     parts: [t.analysis.dat, t.analysis.ext, t.analysis.ex2],
                     dat: anlz.clone(),
                     ppth: path.clone(),
+                    cues: Box::new(crate::cues::device_cues(&t.cues, self.opts.hot_cue_color_type)),
                 });
                 self.contents.insert(path_key(&path));
                 self.note_anlz(&anlz, &path, &stale);
@@ -1719,8 +1735,11 @@ impl<'a> Planner<'a> {
                 let row = self.pdb.tracks[&tid].clone();
                 let mut new = row.clone();
                 let info = t.info_marker != row.track_info_updated;
-                let analysis =
-                    t.analysis_marker != row.analysis_updated || t.cue_marker != row.cue_updated;
+                // `overwrite_export` @0x1009b8748: a changed analysis or cue marker, or extended
+                // cue data the device row cannot show yet (`is_need_exporting_cue_ext`).
+                let analysis = t.analysis_marker != row.analysis_updated
+                    || t.cue_marker != row.cue_updated
+                    || needs_cue_ext(row.content_link, &t);
                 if info {
                     // `checkAndSetChanges` + `modifyTrack` + `setTrackUpdated`: the metadata is
                     // taken from the source again (**hypothesis**: which fields rekordbox
@@ -1848,7 +1867,10 @@ impl<'a> Planner<'a> {
                     });
                     new.info_marker = t.info_marker.clone();
                 }
-                if t.analysis_marker != row.analysis_marker || t.cue_marker != row.cue_marker {
+                if t.analysis_marker != row.analysis_marker
+                    || t.cue_marker != row.cue_marker
+                    || needs_cue_ext(row.content_link, &t)
+                {
                     step.devlib.push(DevlibOp::SetAnalysisUpdated {
                         content_id: cid,
                         analysed: t.analysed as u8,
@@ -1948,6 +1970,7 @@ impl<'a> Planner<'a> {
                 parts: [t.analysis.dat, t.analysis.ext, t.analysis.ex2],
                 dat: anlz.clone(),
                 ppth: path.clone(),
+                cues: Box::new(crate::cues::device_cues(&t.cues, self.opts.hot_cue_color_type)),
             });
         }
 

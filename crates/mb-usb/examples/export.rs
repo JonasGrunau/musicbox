@@ -76,6 +76,9 @@ fn main() -> anyhow::Result<()> {
             "new export"
         }
     );
+    if let Some(t) = opts.settings_dir.as_deref().and_then(mb_usb::settings::hot_cue_color_type) {
+        plan_opts.hot_cue_color_type = t;
+    }
     let plan = plan_export(&source, &device, &selection, &plan_opts)?;
     for job in &plan.jobs {
         let mut counts = std::collections::BTreeMap::<u32, usize>::new();

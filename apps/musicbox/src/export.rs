@@ -81,7 +81,11 @@ fn run(source: &Source, playlist: &DbId, root: &std::path::Path, cancel: &Cancel
     let selection = vec![SelectionItem::Playlist(playlist.0.clone())];
     let src = SourceLibrary::load(library.connection(), &library.analysis_root, &selection).map_err(|e| e.to_string())?;
     let device = DeviceState::load(root, None).map_err(|e| e.to_string())?;
-    let plan = mb_usb::plan_export(&src, &device, &selection, &PlanOptions::default()).map_err(|e| e.to_string())?;
+    let mut plan_options = PlanOptions::default();
+    if let Some(t) = mb_usb::settings::hot_cue_color_type(&library.settings_root) {
+        plan_options.hot_cue_color_type = t;
+    }
+    let plan = mb_usb::plan_export(&src, &device, &selection, &plan_options).map_err(|e| e.to_string())?;
     let options = ExportOptions { settings_dir: Some(library.settings_root.clone()), log_dir: log_dir(), ..ExportOptions::default() };
     let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let report = mb_usb::execute(&plan, &device, &options, cancel, &mut |p| {

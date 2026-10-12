@@ -239,6 +239,35 @@ Parameters: `(trackId, srcHandle, dstHandle, result&, sameDevDb, syncMgr, map<ha
 - **Local `.3EX` files are not exported.**
 - **Mobile target:** each file is pushed with `requestRBMSendFile`.
 
+**Cues** (verified: binary, and 410/410 reference-stick sets written by a 7.x export rebuilt byte for byte; `crates/mb-usb/src/cues.rs`, `tests/cues.rs`). Collection cues live only in master.db (`ops/edit-cues.md`); the local ANLZ cue lists stay empty. The export builds the device lists from the `djmdCue` rows:
+1. **Read** (`AppSyncDBController::getContentCueInfo` @0x100a5dffc): `select … from djmdCue where rb_local_deleted = 0 and ContentID = <id>` without ORDER BY, so in row order. `set_cueInfo` @0x100a4c304 turns each row into a player cue:
+   - kind via `dsql_conv_cue_kind` @0x1019aa930: 0 → −1 when `OutMsec` ≠ −1 (memory loop), else 0; 1–17 and 101 stay; anything else → −2;
+   - `OutMsec` −1 → no out point (0), and the out MPEG columns 0;
+   - an `ActiveLoop` memory loop becomes kind 4;
+   - `BeatLoopSize` counts only when both u16 halves are set (numerator = high half); `CueMicrosec` = in µs (low half), out µs (high half);
+   - `InPointSeekInfo`/`OutPointSeekInfo` `"a,b,c"` (FLAC) are parsed when they have three parts;
+   - NULL columns read as 0 or "" (`juce::var`).
+2. **Clean up** (`checkCueInfos` @0x101e5610c): a hot cue whose pad appears again later in the list is dropped (the later row wins); a memory cue with the same in and out point as an earlier one is dropped; only the first 10 memory cues are kept; kind −2 is dropped.
+3. **Split** (`getExportCue` @0x1009bc884), walking the list **from the last cue to the first**:
+   | Kind | `.DAT` PCOB | `.EXT` PCOB | `.EXT` PCO2 |
+   |---|---|---|---|
+   | 1–3 (hot A–C) | hot | — | hot |
+   | 5–17 (hot D onwards) | — | hot | hot |
+   | −1, 0, 4 (memory) | memory | — | memory |
+   | 101, other | dropped | | |
+
+   So every list is in reverse row order. The `.EXT` PCOB memory list is always empty.
+4. **PCPT entry** (`.DAT`/`.EXT` PCOB): hot-cue number = kind for 1–3, 4 for kind 5, kind − 1 for 6–17, 0 for memory cues; `unk_10` = 4 for kind 4, else 0; status 1; prev/next 0xffff; type 1 point / 2 loop; time unit 1000; time = `InMsec`; loop end = `OutMsec` or 0xffffffff; the four u32 at 0x28 = `InMpegFrame`, `OutMpegFrame`, `InMpegAbs`, `OutMpegAbs`. The memory list is linked in array order (prev = i − 1, next = i + 1, 0xffff at the ends) and its header holds the first and last index (0, n − 1), or 0xffff/0xffff when empty. Hot lists keep 0xffff/0xffff.
+5. **PCP2 entry** (`.EXT` PCO2, `convert_cue_to_extPointdata` @0x1009bd4b8; `ExportAnalysisExtendWithCue` @0x1007b83fc writes 0x2c fixed bytes, the comment, then 44 bytes):
+   - same number, type, time and loop end as the PCPT; `unk_1d` = 1;
+   - memory colour = `Color` + 1 when `Color` (as a byte) < 8, else 0;
+   - in/out µs from `CueMicrosec` when < 1000; beat-loop numerator/denominator from `BeatLoopSize`;
+   - comment as UTF-16BE with a NUL, length in bytes, when that length is 3–0xffff;
+   - the 44 bytes: colour code, R, G, B, then the FLAC seek points (u64 in-a, u64 out-a, u64 in-b, u64 out-b, u32 in-c, u32 out-c; zero without seek info). Memory cues have code and RGB 0. A hot cue with a `ColorTableIndex` of 1–64 gets that code and its RGB from `djplay::getDevicePadColor` @0x10027e398 (a 65-entry table filled by the `PadColour.cpp` initialiser @0x10027ecc8; code 8 = 00c4ff, 43 = ff0017, …). Without a code it gets code 0 and the RGB of the default code `CAnalyzerIF::getHotCueDefaultColor` @0x10162e784 picks: 0x24 for loops, else by the preference `HotCueColorType` (rekordbox3.settings; 4 = `hcTypeColorFull` @0x1037e58c6: A 43, B 8, C 23, D 60, E 19, F 38, G 1, H 32 …; 3 = `hcTypeCold2`, 2 = `hcTypeCold1`; other values 0x16, or 0x1a above pad 8). That this default goes through the same pad palette is a *hypothesis* consistent with every default-coloured entry on the reference stick.
+6. **No cues:** all six lists are written empty, exactly as the local files carry them (the oracle stick is reproduced byte for byte that way).
+- **`is_need_exporting_cue_ext`** @0x1009b8b28 (§ 4.2): when the device row lacks `contentLink` bit 0x100 and some cue (other than kind 101) has a colour (`Color` ≥ 0 as a signed byte), a comment, a beat-loop size, a colour code or a sub-ms part, the ANLZ set is rewritten even with unchanged markers. Every musicbox and 7.x export sets 0x100, so this only touches older sticks. A device-row type check (`+0x50 == 2`) in front of it is not decoded.
+- **When cue edits reach a stick:** an unchanged device list is skipped as a whole (§ 1.7), so re-exporting the same playlist does not carry new cues. They go out when the track is exported again by itself, when its list changed, or through Sync Manager (§ 4.4), and then only because `CueUpdated` differs (§ 4.2).
+
 ### 1.7 Playlists (verified unless marked)
 - **Matching, not ID reuse.** For each master list, `exportPlaylist` calls `existsListName(2, parentDevId, name, &isFolder, &devId)` (vtable +0x308) on the device DB.
   - **Device list with the same name under the same parent:**
@@ -703,7 +732,8 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
   - macOS tags every file a process creates with `com.apple.provenance`; on FAT the OS stores it in an AppleDouble `._` file. The oracle stick has such files next to what rekordbox wrote (`PIONEER/._*`; that they come from this attribute is a *hypothesis*). The copy itself carries no attribute of the source (quarantine, last-used date).
   - Device Library Plus conversion: a stick with export.pdb but no exportLibrary.db is converted first (`convert.rs`, § 6.4; verified against the reference stick), then exported. Converting over an existing exportLibrary.db is not implemented.
   - `playlists3*.sync` (§ 4.4, `syncfile.rs`): read and written byte for byte (both reference-stick files round-trip). An export leaves them as they are; deleting device lists clears the `Dev_ID` of every node that points at a deleted list, in both files and whatever library owns them, so a later auto-sync cannot delete a list that took over the ID (*hypothesis*: what rekordbox itself does to the files when a list is deleted outside Sync Manager is open).
-  - Not implemented: "like" relations (§ 1.2 step 8), cues from master `djmdCue` (the local ANLZ cues are used, which equals rekordbox's output when the cues were saved to the local files).
+  - Not implemented: "like" relations (§ 1.2 step 8).
+  - Cues: the device PCOB/PCO2 lists are built from master `djmdCue` (§ 1.6 "Cues") and replace the lists `to_usb` carries over from the local files, for new tracks and for re-exports. The hot-cue default colours follow `PlanOptions::hot_cue_color_type` (read from rekordbox3.settings by `settings::hot_cue_color_type`, default 4). MPEG frame columns and FLAC seek points are copied from the rows as they are; musicbox's own cue edits leave them 0/empty (`ops/edit-cues.md`).
 
 **Verification** (`cargo test -p mb-usb`, test `oracle_a_export_matches_rekordbox`): `oracle-small` exported to an empty directory, then `oracle-all` onto it, from `fixtures/oracle-a`; the second session replays the recorded export.pdb history (ten close/open cycles, `oracle-small` emptied and refilled, `oracle-all` inserted at position 1 and moved to the top, one more cycle; `pdb.md` § The oracle stick's history). Compared with `fixtures/oracle-a/rbtest`:
 
@@ -758,7 +788,8 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
 - [x] Re-export:
   - [x] Identify tracks by master IDs + (length, bitrate, bitDepth, fileType, fileSize, sampleRate).
   - [x] Update rows in place; never re-copy existing audio.
-  - [x] Rewrite ANLZ only when the analysis or cue marker changed.
+  - [x] Rewrite ANLZ only when the analysis or cue marker changed, or extended cue data is missing on the stick (`is_need_exporting_cue_ext`).
+- [x] Cues: PCOB/PCO2 from master `djmdCue` (§ 1.6), never from the local ANLZ files.
 - [x] Deletes (§ 4.3, § 8 Deletes):
   - [x] Remove the audio only if no other DB on the stick (and no library on this machine) uses the path.
   - [x] Same rule for ANLZ and artwork.

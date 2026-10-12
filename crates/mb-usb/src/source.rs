@@ -109,6 +109,9 @@ pub struct SourceTrack {
     pub artwork: Option<LocalArtwork>,
     /// My Tag IDs (`djmdSongMyTag`, `TrackNo` order).
     pub my_tags: Vec<u32>,
+    /// `djmdCue` rows in row order (`getContentCueInfo`); the device cue tags are built from
+    /// them (`crate::cues`).
+    pub cues: Vec<crate::cues::SourceCue>,
 }
 
 impl SourceTrack {
@@ -443,6 +446,44 @@ fn track_row(r: &Row) -> rusqlite::Result<SourceTrack> {
     })
 }
 
+/// Every live `djmdCue` row by `ContentID`, in row order: `getContentCueInfo` selects them
+/// without ORDER BY through the `(ContentID, rb_local_deleted)` index.
+fn load_cues(master: &Connection) -> Result<HashMap<String, Vec<crate::cues::SourceCue>>> {
+    let mut stmt = master.prepare(
+        "select ContentID, Kind, InMsec, InMpegFrame, InMpegAbs, OutMsec, OutMpegFrame, OutMpegAbs, \
+         Color, ColorTableIndex, ActiveLoop, Comment, BeatLoopSize, CueMicrosec, InPointSeekInfo, \
+         OutPointSeekInfo from djmdCue where rb_local_deleted = 0 order by rowid",
+    )?;
+    let mut out: HashMap<String, Vec<crate::cues::SourceCue>> = HashMap::new();
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            text(r, 0)?,
+            crate::cues::SourceCue {
+                kind: int(r, 1)?,
+                in_msec: int(r, 2)?,
+                in_mpeg_frame: int(r, 3)?,
+                in_mpeg_abs: int(r, 4)?,
+                out_msec: int(r, 5)?,
+                out_mpeg_frame: int(r, 6)?,
+                out_mpeg_abs: int(r, 7)?,
+                color: int(r, 8)?,
+                color_table_index: int(r, 9)?,
+                active_loop: int(r, 10)?,
+                comment: text(r, 11)?,
+                beat_loop_size: int(r, 12)?,
+                cue_microsec: int(r, 13)?,
+                in_point_seek_info: text(r, 14)?,
+                out_point_seek_info: text(r, 15)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (content, cue) = row?;
+        out.entry(content).or_default().push(cue);
+    }
+    Ok(out)
+}
+
 /// Paths in master.db that start with `/PIONEER/` are relative to the analysis-data root.
 fn under_root(root: &Path, stored: &str) -> PathBuf {
     root.join(stored.trim_start_matches('/'))
@@ -524,12 +565,14 @@ impl SourceLibrary {
             song_tags.entry(content).or_default().push(tag as u32);
         }
         let needed: HashSet<&String> = needed_tracks.iter().collect();
+        let mut cues = load_cues(master)?;
         let mut stmt = master.prepare(TRACK_SQL)?;
         let rows = stmt
             .query_map([], track_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for mut t in rows {
             t.my_tags = song_tags.remove(&t.id).unwrap_or_default();
+            t.cues = cues.remove(&t.id).unwrap_or_default();
             if needed.contains(&t.id) {
                 resolve_files(&mut t, analysis_root);
             }
