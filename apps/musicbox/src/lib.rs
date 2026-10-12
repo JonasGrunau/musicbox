@@ -15,6 +15,7 @@ pub mod smartlist_ui;
 pub mod theme;
 pub mod tree;
 pub mod waveform;
+pub mod xml_bridge;
 
 pub use app::App;
 

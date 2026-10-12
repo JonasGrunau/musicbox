@@ -2347,6 +2347,7 @@ dependencies = [
  "mb-masterdb",
  "mb-pdb",
  "mb-usb",
+ "mb-xml",
  "sha2",
  "thiserror 2.0.21",
 ]
@@ -2514,6 +2515,7 @@ dependencies = [
  "mb-pdb",
  "mb-player",
  "mb-usb",
+ "mb-xml",
 ]
 
 [[package]]

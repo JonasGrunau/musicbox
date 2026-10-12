@@ -119,6 +119,17 @@ pub fn describe(effect: &mb_library::Effect) -> String {
             s
         }
         Effect::HistoriesImported(r) => format!("Imported {} history list(s), skipped {}", r.imported.len(), r.skipped.len()),
+        Effect::ImportedXml(r) => {
+            let count = |f: fn(&mb_library::XmlTrackResult) -> bool| r.results.iter().filter(|x| f(x)).count();
+            let new = count(|x| matches!(x, mb_library::XmlTrackResult::Imported(_)));
+            let existing = count(|x| matches!(x, mb_library::XmlTrackResult::InCollection(_)));
+            let skipped = count(|x| matches!(x, mb_library::XmlTrackResult::Skipped(_)));
+            let mut s = format!("Imported {new} track(s) from rekordbox xml ({existing} already in the collection)");
+            if skipped > 0 {
+                s += &format!(", skipped {skipped}");
+            }
+            s
+        }
         Effect::Done => "Done".into(),
         Effect::Unchanged => "No change".into(),
     }

@@ -285,6 +285,13 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                             actions.push(Action::AskRemoveFromDevice { device, playlists: Vec::new(), tracks });
                             ui.close();
                         }
+                    } else if source.library == LibraryRef::Xml {
+                        let rows: Vec<usize> = state.selection.iter().copied().collect();
+                        ui.weak(format!("{} track(s)", rows.len()));
+                        if ui.button("Import to Collection").clicked() {
+                            actions.push(Action::ImportFromXml { list: None, tracks: rows });
+                            ui.close();
+                        }
                     } else {
                         ui.weak("Turn on editing to change the library");
                     }

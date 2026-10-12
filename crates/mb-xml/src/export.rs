@@ -396,19 +396,23 @@ pub fn playlists_from_snapshot(snapshot: &LibrarySnapshot) -> PlaylistNode {
                 PlaylistKind::Playlist | PlaylistKind::Smart => PlaylistNode::Playlist {
                     name: n.name.clone(),
                     key_type: Some(KeyType::TrackId),
-                    entries: if n.kind == PlaylistKind::Smart { smart.get(&n.id) } else { s.playlist_entries.get(&n.id) }
-                        .map(|ids| {
-                            ids.iter()
-                                .map(|id| match id.as_str().parse::<u32>() {
-                                    Ok(v) => PlaylistEntry::track_id(xml_id(v)),
-                                    Err(_) => PlaylistEntry {
-                                        key: id.0.clone(),
-                                        extra: Extra::default(),
-                                    },
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    entries: if n.kind == PlaylistKind::Smart {
+                        smart.get(&n.id)
+                    } else {
+                        s.playlist_entries.get(&n.id)
+                    }
+                    .map(|ids| {
+                        ids.iter()
+                            .map(|id| match id.as_str().parse::<u32>() {
+                                Ok(v) => PlaylistEntry::track_id(xml_id(v)),
+                                Err(_) => PlaylistEntry {
+                                    key: id.0.clone(),
+                                    extra: Extra::default(),
+                                },
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                     extra: Extra::default(),
                 },
             })

@@ -17,7 +17,13 @@ Status per item: **V** = verified against the fixture, **C** = from the binary, 
   - child list +0x08, attribute list +0x10, tag name +0x18
   - writer `writeElementAsText` @0x10105451c, `writeToStream` @0x101054c08, `setAttribute` @0x101054e44
   - escaper `DjPlaylistsOutputFunctions::escapeIllegalXmlChars` @0x10105494c
-- **Import:** `db::DjPlaylistsAnalyzer` (`analyzeTrack` @0x1010511f4, `getTrackBeatInfo` @0x101052944, `getTrackCueInfo` @0x101053228, `locationFromURI` @0x101053ed0) reads files with `juce::XmlElement`.
+- **Import:** `db::DjPlaylistsAnalyzer` (`analyzeTrack` @0x1010511f4, `getTrackBeatInfo` @0x101052944, `getTrackCueInfo` @0x101053228, `locationFromURI` @0x101053ed0) reads files with `juce::XmlElement`. What the import writes is in `ops/import-xml.md`.
+- **Preferences** (`rekordbox3.settings`):
+  - `bridgeExportBeatGrid` selects the TEMPO mode (§ TEMPO).
+  - `HotCueColorType` sets the default hot-cue colours.
+  - `language` sets the UI language of the `Kind` labels. 2 = German on the user's machine; options.json has `lang` = `de` and `lang-path` = `german.lang` at the same time. The value mapping beyond 2 is *open*.
+  - `bridgeImportedLibraryFile` and `showRbXml` belong to the import side.
+- **PRODUCT is not read back:** `analyzeDjPlaylists` @0x101050b14 only looks at COLLECTION and PLAYLISTS, so a writer may name itself there. musicbox's export writes `musicbox` (`XmlExportOptions::product`).
 
 ## Format (V unless marked)
 ```
@@ -121,7 +127,8 @@ For each beat (time `t`, tempo `T`):
 - On import, `getTrackBeatInfo` reads `Inizio`/`Bpm`/`Battito`/`Metro` back.
 
 ### POSITION_MARK (`addPositionMarkNode` @0x1010574b0), C (no fixture cues)
-- **Source:** `TrackInfo` +0x80, an `OwnedArray<analyzer::Cue>`. For collection tracks it is filled from the database cue rows by a main-DB-controller vfunc (+0x438) followed by `checkCueInfos`. It does not come from the ANLZ files.
+- **Source:** `TrackInfo` +0x80, an `OwnedArray<analyzer::Cue>`. For collection tracks it is filled from the database cue rows by `getContentCueInfo` (main controller vtable +0x438, row order) and `AppSyncDBController::set_cueInfo` @0x100a4c304 per row, then `checkCueInfos` @0x101e5610c. These are the same steps the USB export uses (`export.md` § 1.6 "Cues"; `mb_usb::cues::checked_cues`). It does not come from the ANLZ files.
+- **`OutMsec` −1 becomes end 0** in `set_cueInfo`, so a cue point is `Type` 0. A `Kind` 0 row with an out point is read back as −1 (memory loop), and an active memory loop as 4. All three are written as `Num` −1.
 - **Cue fields used:** kind +0x0c, start ms +0x10, end ms +0x18, name +0x38, colour index byte +0x4c.
 
 **Num** from the cue kind (the `djmdCue.Kind` value):
@@ -148,8 +155,11 @@ For each beat (time `t`, tempo `T`):
   - else a value from the tables `hcTypeColorFull`/`hcTypeCold2`/`hcTypeCold1`, chosen by colour type 4/3/2
   - else 0x16 (22), or 0x1a (26) for hot cues above 8
 - Memory cues get no RGB.
+- The palette is `djplay::getDevicePadColor`'s 64-entry table and the default tables are the three `hcType*` arrays. Both are read out of the binary in `mb_usb::cues` (`PAD_COLORS`, `default_hot_cue_code`), and the same function yields the device PCO2 colours, which match 410/410 reference-stick cue sets (`export.md` § 1.6).
+- The writer takes hot cues A–H only (`Num` 0–7). Pads above H (kinds 10–17) are not written.
+- **musicbox** (`mb_library::xml::position_marks`) writes the marks in that order with those rules. `tests/xml_ops.rs` `cues_and_colours_in_the_export` covers a memory cue with a comment, a memory loop, a hot cue with a colour code, a default-coloured hot cue, a hot loop and a pad above H. This is checked against the rules above, not yet against a rekordbox-written XML with cues.
 
-**Import** (`getTrackCueInfo`):
+**Import** (`getTrackCueInfo`; full rules in `ops/import-xml.md`):
 - **Skipped marks.** A mark is dropped unless:
   - `Type` is 0 or 4 (1..3 are dropped)
   - 0 ≤ `Start` ≤ TotalTime, and for loops `Start` ≤ `End` ≤ TotalTime
@@ -196,6 +206,12 @@ These come from `writeToStream`/`writeElementAsText` with indent 0 and lineWrap 
    - BPM uses `%.02f` and seconds use `%.03f`, both through `vsnprintf`: round-half-even on the exact binary value. Rust's `{:.2}`/`{:.3}` give identical results.
 
 ## Implementation
+- `crates/mb-library/src/xml.rs`:
+  - `export_document`: the whole document from master.db, in `djmdContent` row order. It adds per track the PQTZ of the local `.DAT`, `FileType`, `Subtitle` (Mix), `ColorID` and its `djmdColor.Commnt` (Grouping), and the cue rows.
+  - `write_document`: writes a temporary file and renames it into place.
+  - `XmlExportOptions::from_settings`: the preferences above.
+  - The app's **File → Export Collection in xml format…** runs it in the background.
+- `crates/mb-xml/src/import.rs`: the import's value rules (`ops/import-xml.md`).
 - `crates/mb-xml`:
   - `dom.rs`: generic element tree. quick-xml reader; writer implementing the layout rules above.
   - `model.rs`: typed `Document`/`Track`/`Tempo`/`PositionMark`/`PlaylistNode`. All TRACK attributes are `Option`, so absent ones stay absent. Unknown attributes and elements are kept in `Extra` and written after the known ones. `Count`/`Entries` are recomputed when writing.
@@ -219,12 +235,8 @@ These come from `writeToStream`/`writeElementAsText` with indent 0 and lineWrap 
 - **Result:** 0 unexplained mismatches.
 
 ## Open questions
-- [ ] **POSITION_MARK on real cues.** Several pieces need a fixture with memory cues, hot cues A–H, loops and cue colours:
-  - how djmdCue's `OutMsec = -1` becomes "end 0"
-  - the palette code → RGB table used by `getHotCueDefaultColor`
-  - the default-colour tables `hcTypeColorFull/Cold1/Cold2`
-  - Kind 4 / -1 semantics
-- [ ] `Grouping` = colour name and `Mix` = Subtitle. Both are empty in the fixture; check with a coloured track that has a subtitle.
+- [ ] **POSITION_MARK on real cues:** a rekordbox-written XML of tracks with memory cues, hot cues A–H, loops and cue colours, to confirm the order and the colours. The pieces themselves are now known from the binary (§ POSITION_MARK).
+- [ ] `Grouping` = colour name and `Mix` = Subtitle. Both are empty in the fixture. musicbox writes `djmdColor.Commnt` (e.g. `Orange` for colour 3) and `Subtitle`; check against a rekordbox export of a coloured track with a subtitle.
 - [ ] `Colour` for ColorID 1..8. Constants are from the binary; no fixture yet.
 - [ ] TEMPO with real tempo changes (Dynamic analysis) and in mode 2. The rule is from code and only verified for constant-tempo grids.
 - [ ] Rating ≠ 0, PlayCount ≠ 0, DiscNumber ≠ 0, IDs ≥ 2^31 (negative TrackID/Key), English UI `Kind` labels, Spotify tracks, smart playlists and folders. None of these appear in the fixture.

@@ -22,6 +22,7 @@ mb-anlz = { path = "../../crates/mb-anlz" }
 mb-devlib = { path = "../../crates/mb-devlib" }
 mb-pdb = { path = "../../crates/mb-pdb" }
 mb-usb = { path = "../../crates/mb-usb" }
+mb-xml = { path = "../../crates/mb-xml" }
 mb-player = { path = "../../crates/mb-player" }
 libc = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

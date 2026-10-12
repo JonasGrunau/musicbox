@@ -17,6 +17,8 @@ pub enum LibraryRef {
     Local,
     /// Index into `Devices::list`.
     Device(usize),
+    /// The opened rekordbox.xml ("rekordbox xml" in the tree).
+    Xml,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,13 @@ enum Dialog {
     ConfirmDeviceRemove { device: usize, playlists: Vec<Vec<String>>, tracks: Vec<String>, orphans: bool },
     /// The intelligent playlist editor.
     Smart(Box<crate::smartlist_ui::SmartEditor>),
+    /// "Export Collection in xml format": the file to write.
+    XmlExport { path: String },
+    /// "Open rekordbox xml": the file to show.
+    XmlOpen { path: String },
+    /// rekordbox's two questions before an XML import: update tracks already in the collection,
+    /// replace lists with the same name.
+    ConfirmXmlImport { import: Box<mb_library::XmlImport>, existing: usize, same_name: Vec<String> },
 }
 
 pub struct App {
@@ -78,6 +87,10 @@ pub struct App {
     device_import: Option<(PathBuf, bool)>,
     /// What the stick-side part of the last device import did (joined into the status line).
     device_import_note: Option<String>,
+    /// The opened rekordbox.xml and its loader / the running XML export.
+    xml: Option<crate::xml_bridge::XmlLibrary>,
+    xml_loading: Option<Receiver<Result<crate::xml_bridge::XmlLibrary, String>>>,
+    xml_export: Option<crate::xml_bridge::XmlExportJob>,
 }
 
 static EMPTY: std::sync::LazyLock<LibrarySnapshot> = std::sync::LazyLock::new(LibrarySnapshot::default);
@@ -97,6 +110,9 @@ impl App {
             remove: None,
             device_import: None,
             device_import_note: None,
+            xml: None,
+            xml_loading: None,
+            xml_export: None,
             editor: None,
             dialog: None,
             edit_status: None,
@@ -118,6 +134,7 @@ impl App {
         match library {
             LibraryRef::Local => &self.library,
             LibraryRef::Device(i) => self.devices.list.get(i).and_then(|d| d.snapshot()).unwrap_or(&EMPTY),
+            LibraryRef::Xml => self.xml.as_ref().map_or(&*EMPTY, |x| &x.snapshot),
         }
     }
 
@@ -147,6 +164,11 @@ impl App {
                         analysis_root: loaded.analysis_root,
                         settings_root: loaded.settings_root,
                     });
+                    if self.xml.is_none()
+                        && let Some(path) = self.export_source.as_ref().and_then(|s| crate::xml_bridge::bridge_file(&s.settings_root))
+                    {
+                        self.open_xml(path);
+                    }
                     self.local_db = Some((loaded.db_path, loaded.passphrase));
                     self.browser.invalidate();
                 }
@@ -255,6 +277,24 @@ impl App {
 
     fn status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
+            ui.menu_button("File", |ui| {
+                if ui.add_enabled(self.export_source.is_some(), egui::Button::new("Export Collection in xml format…")).clicked() {
+                    self.dialog = Some(Dialog::XmlExport { path: crate::xml_bridge::default_export_path() });
+                    ui.close();
+                }
+                if ui.button("Open rekordbox xml…").clicked() {
+                    let path = self.xml.as_ref().map(|x| x.path.display().to_string()).unwrap_or_default();
+                    self.dialog = Some(Dialog::XmlOpen { path });
+                    ui.close();
+                }
+                if self.xml.is_some() && ui.button("Close rekordbox xml").clicked() {
+                    self.xml = None;
+                    if self.source.library == LibraryRef::Xml {
+                        self.source = Source { library: LibraryRef::Local, list: List::Collection };
+                    }
+                    ui.close();
+                }
+            });
             self.editing_switch(ui);
             ui.separator();
             if self.loading.is_some() {
@@ -291,6 +331,10 @@ impl App {
                 ui.separator();
                 ui.spinner();
                 ui.label(format!("Removing from {}…", job.device_name));
+            } else if let Some(job) = &self.xml_export {
+                ui.separator();
+                ui.spinner();
+                ui.label(format!("Exporting {}…", job.path.display()));
             } else if let Some(msg) = &self.edit_status {
                 ui.separator();
                 ui.weak(msg);
@@ -410,6 +454,7 @@ impl App {
                 Action::AskRemoveFromDevice { device, playlists, tracks } => self.ask_remove_from_device(device, playlists, tracks),
                 Action::ImportFromDevice { device, playlist, tracks } => self.import_from_device(device, playlist, tracks),
                 Action::ImportHistories { device } => self.import_histories(device),
+                Action::ImportFromXml { list, tracks } => self.import_from_xml(list, tracks),
                 Action::CancelExport => {
                     if let Some(job) = &self.export {
                         job.cancel();
@@ -485,6 +530,65 @@ impl App {
         }
     }
 
+    /// Parses a rekordbox.xml in the background; it then shows as "rekordbox xml".
+    fn open_xml(&mut self, path: PathBuf) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::xml_bridge::open(&path));
+            ctx.request_repaint();
+        });
+        self.xml_loading = Some(rx);
+    }
+
+    fn poll_xml(&mut self) {
+        if let Some(rx) = &self.xml_loading
+            && let Ok(result) = rx.try_recv()
+        {
+            self.xml_loading = None;
+            match result {
+                Ok(xml) => {
+                    self.edit_status = Some(format!("rekordbox xml: {} tracks", xml.snapshot.tracks.len()));
+                    self.xml = Some(xml);
+                    if self.source.library == LibraryRef::Xml {
+                        self.browser.invalidate();
+                    }
+                }
+                Err(e) => self.edit_status = Some(format!("rekordbox xml: {e}")),
+            }
+        }
+        if let Some(job) = &mut self.xml_export
+            && let Some(result) = job.poll()
+        {
+            self.edit_status = Some(result.unwrap_or_else(|e| format!("XML export failed: {e}")));
+            self.xml_export = None;
+        }
+    }
+
+    /// "Import to Collection" on the rekordbox xml: a list (with its tracks) or selected rows.
+    /// Asks rekordbox's questions first when they apply.
+    fn import_from_xml(&mut self, list: Option<DbId>, tracks: Vec<usize>) {
+        if !self.editing() {
+            self.edit_status = Some("Turn on editing first".into());
+            return;
+        }
+        let Some(xml) = &self.xml else { return };
+        let import = match &list {
+            Some(id) => match xml.import_for_list(id) {
+                Some(i) => i,
+                None => return,
+            },
+            None => xml.import_for_tracks(&tracks),
+        };
+        let existing = crate::xml_bridge::already_in_collection(&import, &self.library);
+        let same_name = crate::xml_bridge::same_name_lists(&import, &self.library);
+        if existing > 0 || !same_name.is_empty() {
+            self.dialog = Some(Dialog::ConfirmXmlImport { import: Box::new(import), existing, same_name });
+        } else {
+            self.run(Command::ImportXml { import });
+        }
+    }
+
     fn start_remove(&mut self, device: usize, playlists: Vec<Vec<String>>, tracks: Vec<String>, orphans: bool) {
         let Some(target) = self.devices.list.get(device) else { return };
         // On-stick files the local library still points at stay (`delete_device_song_file`).
@@ -541,6 +645,9 @@ impl App {
             Dialog::ConfirmRemove { .. } => "Remove from Collection",
             Dialog::ConfirmDeviceRemove { .. } => "Remove from Device",
             Dialog::Smart(editor) => editor.title(),
+            Dialog::XmlExport { .. } => "Export Collection in xml format",
+            Dialog::XmlOpen { .. } => "Open rekordbox xml",
+            Dialog::ConfirmXmlImport { .. } => "Import from rekordbox xml",
         };
         egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             match dialog {
@@ -570,6 +677,27 @@ impl App {
                     ui.label(format!("Remove {} track(s) from the collection? Audio files stay on disk.", ids.len()));
                 }
                 Dialog::Smart(editor) => editor.show(ui, &self.library.my_tags),
+                Dialog::XmlExport { path } | Dialog::XmlOpen { path } => {
+                    ui.label("File:");
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let edit = ui.add(egui::TextEdit::singleline(path).desired_width(420.0));
+                    if !edit.has_focus() && !enter {
+                        edit.request_focus();
+                    }
+                    submit |= enter && !path.trim().is_empty();
+                }
+                Dialog::ConfirmXmlImport { import, existing, same_name } => {
+                    ui.label(format!("Import {} track(s) into the collection?", import.tracks.len()));
+                    if *existing > 0 {
+                        ui.label(format!("{existing} of them already exist in the current collection."));
+                        ui.checkbox(&mut import.update_existing, "Load the information of the library being imported into them");
+                        ui.weak("Beat grids are not loaded into tracks locked against analysis.");
+                    }
+                    if !same_name.is_empty() {
+                        ui.label(format!("Lists with the same name already exist: {}", same_name.join(", ")));
+                        ui.checkbox(&mut import.replace_same_name, "Replace them with the one being imported");
+                    }
+                }
             }
             ui.horizontal(|ui| {
                 submit |= ui.button("OK").clicked();
@@ -595,6 +723,18 @@ impl App {
                     self.start_remove(device, playlists, tracks, orphans);
                     return;
                 }
+                Some(Dialog::XmlExport { path }) => {
+                    if let Some(source) = &self.export_source {
+                        let path = PathBuf::from(path.trim());
+                        self.xml_export = Some(crate::xml_bridge::XmlExportJob::start(&self.ctx, source, self.library.clone(), path));
+                    }
+                    return;
+                }
+                Some(Dialog::XmlOpen { path }) => {
+                    self.open_xml(PathBuf::from(path.trim()));
+                    return;
+                }
+                Some(Dialog::ConfirmXmlImport { import, .. }) => Command::ImportXml { import: *import },
                 None => return,
             };
             self.run(command);
@@ -666,6 +806,7 @@ impl eframe::App for App {
         self.poll_editor(&ctx);
         self.poll_export();
         self.poll_remove();
+        self.poll_xml();
         let mut actions = self.global_input(&ctx);
 
         egui::Panel::bottom("status").exact_size(22.0).show(ui, |ui| self.status(ui));
@@ -677,11 +818,15 @@ impl eframe::App for App {
             .resizable(true)
             .default_size(230.0)
             .size_range(160.0..=420.0)
-            .show(ui, |ui| actions.extend(tree::show(ui, &self.library, &self.devices, &mut self.source, editing)));
+            .show(ui, |ui| {
+                let xml = self.xml.as_ref().map(|x| (x.path.as_path(), &x.snapshot));
+                actions.extend(tree::show(ui, &self.library, &self.devices, xml, &mut self.source, editing))
+            });
         egui::CentralPanel::default().show(ui, |ui| {
             let library = match self.source.library {
                 LibraryRef::Local => &self.library,
                 LibraryRef::Device(i) => self.devices.list.get(i).and_then(|d| d.snapshot()).unwrap_or(&EMPTY),
+                LibraryRef::Xml => self.xml.as_ref().map_or(&*EMPTY, |x| &x.snapshot),
             };
             let edit = browser::EditCtx { enabled: editing, playlists: &self.library.playlists };
             actions.extend(browser::show(ui, library, &self.source, &mut self.browser, &edit));

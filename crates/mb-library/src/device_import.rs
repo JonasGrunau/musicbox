@@ -473,7 +473,7 @@ fn slot_of(hot_cue: u16) -> crate::CueSlot {
 /// The builder insert of `import-track.md`, filled from the device row (`insertTrack`
 /// @0x100a56e3c). Lookup order as in the file import, then original artist and composer.
 /// Returns the new content ID and UUID.
-fn insert_track(tx: &WriteTxn<'_>, path: &Path, t: &DeviceTrack) -> Result<(DbId, String)> {
+pub(crate) fn insert_track(tx: &WriteTxn<'_>, path: &Path, t: &DeviceTrack) -> Result<(DbId, String)> {
     let opt = |s: &str, table: NameTable| -> Result<Option<String>> {
         if s.is_empty() { Ok(None) } else { find_or_create(tx, table, s).map(Some) }
     };

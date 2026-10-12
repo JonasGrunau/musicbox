@@ -454,6 +454,11 @@ fn track_row(r: &Row) -> rusqlite::Result<SourceTrack> {
     })
 }
 
+/// Every live `djmdCue` row by `ContentID`, in row order (for [`crate::cues::checked_cues`]).
+pub fn load_master_cues(master: &Connection) -> Result<HashMap<String, Vec<crate::cues::SourceCue>>> {
+    load_cues(master)
+}
+
 /// Every live `djmdCue` row by `ContentID`, in row order: `getContentCueInfo` selects them
 /// without ORDER BY through the `(ContentID, rb_local_deleted)` index.
 fn load_cues(master: &Connection) -> Result<HashMap<String, Vec<crate::cues::SourceCue>>> {

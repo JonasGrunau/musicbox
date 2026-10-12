@@ -113,6 +113,46 @@ fn player_cue(row: &SourceCue) -> PlayerCue {
     }
 }
 
+/// A collection cue as rekordbox's cue loader hands it to the browser and to the rekordbox.xml
+/// writer (`AppSyncDBController::set_cueInfo` @0x100a4c304 per row, then `checkCueInfos`
+/// @0x101e5610c), in `djmdCue` row order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedCue {
+    /// Player-side kind: −1 memory loop, 0 memory cue, 4 active memory loop, 1–3 / 5–17 hot cues.
+    pub kind: i32,
+    pub in_ms: u32,
+    /// 0 = no out point (`OutMsec` −1).
+    pub out_ms: u32,
+    /// `ColorTableIndex` (hot-cue colour code 1–64; 0 = default).
+    pub color_table_index: u8,
+    pub comment: String,
+}
+
+/// The cues of one track after `set_cueInfo` and `checkCueInfos`.
+pub fn checked_cues(rows: &[SourceCue]) -> Vec<CheckedCue> {
+    check_cue_infos(rows.iter().map(player_cue).collect())
+        .into_iter()
+        .map(|c| CheckedCue {
+            kind: c.kind,
+            in_ms: c.in_ms,
+            out_ms: c.out_ms,
+            color_table_index: c.color_table_index,
+            comment: c.comment,
+        })
+        .collect()
+}
+
+/// `CAnalyzerIF::getHotCueDefaultColor(number, is_loop, colour code, colour type)` @0x10162e784:
+/// the code's pad colour when it is 1–64, else the default code's ([`default_hot_cue_code`]).
+pub fn hot_cue_rgb(number: u16, is_loop: bool, color_table_index: u8, color_type: u8) -> [u8; 3] {
+    let code = if (1..=64).contains(&color_table_index) {
+        color_table_index
+    } else {
+        default_hot_cue_code(number, is_loop, color_type)
+    };
+    PAD_COLORS[usize::from(code)]
+}
+
 fn is_hot(kind: i32) -> bool {
     (1..=3).contains(&kind) || (5..=17).contains(&kind)
 }

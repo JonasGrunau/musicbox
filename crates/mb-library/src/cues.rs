@@ -382,6 +382,15 @@ fn cue_row(lib: &Library, cue_id: &str) -> Result<RawRow> {
 /// `CueIF::setCue` inserts the row (`Color` = −1, option columns NULL), then `addCueOption` when
 /// a colour, colour code or comment is set, then `updateCueUpdated`.
 pub(crate) fn add_cue(lib: &mut Library, content: &DbId, cue: &NewCue) -> Result<(Effect, Option<Command>)> {
+    let out = insert_cue(lib, content, cue)?;
+    touch_playlists(lib, content.as_str())?;
+    Ok(out)
+}
+
+/// `rekordboxDBController::setCue` alone (vtable +0x448): the row, library sync, options and
+/// `CueUpdated`, without the mediator's playlist timestamp. The rekordbox.xml import calls it
+/// directly (`importRBXmlData` @0x101a161f0).
+pub(crate) fn insert_cue(lib: &mut Library, content: &DbId, cue: &NewCue) -> Result<(Effect, Option<Command>)> {
     require_track(lib, content.as_str())?;
     if let Some(out) = cue.out_ms
         && out <= cue.in_ms
@@ -451,7 +460,6 @@ pub(crate) fn add_cue(lib: &mut Library, content: &DbId, cue: &NewCue) -> Result
         )?;
     }
     finish(tx, content.as_str())?;
-    touch_playlists(lib, content.as_str())?;
     Ok((Effect::CueAdded { id: id.clone() }, Some(Command::DeleteCue { id })))
 }
 

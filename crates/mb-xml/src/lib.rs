@@ -10,12 +10,15 @@
 //! - [`export`]: how rekordbox derives XML values from its library (`DjPlaylistsWriter`
 //!   @0x101054f0c..): number formats, the TEMPO reduction of a PQTZ beat grid, cue kinds, colours,
 //!   ratings, `Location` URIs and the localised `Kind` names.
+//! - [`import`]: how rekordbox reads a track back (`DjPlaylistsAnalyzer`): TEMPO → beat grid,
+//!   POSITION_MARK → cues, colours and BPM.
 //!
 //! [`Document::parse`] followed by [`Document::to_xml`] reproduces a rekordbox-written file byte for
 //! byte (verified on fixtures/oracle-a, see `tests/fixture.rs`).
 
 pub mod dom;
 pub mod export;
+pub mod import;
 pub mod model;
 
 pub use dom::{Content, Element};

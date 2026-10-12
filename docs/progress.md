@@ -12,6 +12,20 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact except 7 AAC tracks (1 ulp); **beat grid (BALib v1 Normal mode) in progress** | 617fc5f, 8def9c4 |
 | M7 | smart lists (rules, editor, XML, USB export); import from device (tracks, playlists, histories); app bundle (`tools/bundle/bundle.sh`); key display follows `ShowOriginalKey`/`KeyStringSetting`. **rekordbox checks pending** (`m7_check`, device import). rekordbox.xml export/import in the app in progress | 0d0d509, 88593cc, d0babf3, e93d3a4, 3997b37, 53af01b |
 
+**M7 rekordbox.xml (done, not committed by the worker; user check pending):**
+- **Export** (`mb_library::xml::export_document`, app **File → Export Collection in xml format…**): rebuilds rekordbox's own oracle-a export byte for byte (161 tracks). POSITION_MARKs come from `djmdCue` via the USB export's `checked_cues` with the pad-colour tables. Preferences used: `language`, `HotCueColorType`, `bridgeExportBeatGrid`. musicbox names itself in `PRODUCT`; rekordbox's import ignores that node.
+- **Import** (`Command::ImportXml`, spec `docs/re/ops/import-xml.md`, binary-derived):
+  - "rekordbox xml" in the tree: the bridge file when `showRbXml` = 1, or **File → Open rekordbox xml…**. "Import to Collection" on lists, folders and rows.
+  - New tracks are inserted in place with the XML's values; album artist, original artist, lyricist, ISRC and release date come from the file's tags.
+  - TEMPO → a local `.DAT` grid and `Analysed` 0x10; POSITION_MARK → cues with the nearest pad colour.
+  - Lists are created in XML order. rekordbox's two questions (update tracks already in the collection; replace lists with the same name) are a dialog.
+  - Undo is one batch.
+  - Rows for the same files equal rekordbox's own rows. Grids are within 2 ms: the TEMPO format's own loss, which rekordbox's round trip has too.
+- **Tests:**
+  - `cargo test -p mb-xml`
+  - `cargo test -p mb-library --test xml_ops`
+  - `cargo test -p musicbox --test ui_xml`
+
 **User checks waiting** (all need rekordbox quit first; sandbox library only):
 1. Studio: RBTEST on the CDJ-3000 (§ M3 entry below).
 2. Mac: `cargo run -p mb-library --example m5_check -- "$HOME/Library/Application Support/Pioneer/rekordboxAgent/storage/options.json"`, then rekordbox shows the printed cues/grid changes.

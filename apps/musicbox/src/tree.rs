@@ -12,6 +12,7 @@ pub fn show(
     ui: &mut egui::Ui,
     library: &LibrarySnapshot,
     devices: &Devices,
+    xml: Option<(&std::path::Path, &LibrarySnapshot)>,
     source: &mut Source,
     editing: bool,
 ) -> Vec<Action> {
@@ -52,8 +53,37 @@ pub fn show(
                     }
                 });
         }
+        // rekordbox's bridge view of a rekordbox.xml ("rekordbox xml").
+        if let Some((path, snapshot)) = xml {
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("rekordbox xml")
+                .id_salt("rekordbox xml")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.weak(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                    let mut ctx = Ctx {
+                        targets: &[],
+                        library_ref: LibraryRef::Xml,
+                        library: snapshot,
+                        source: &mut *source,
+                        editing: false,
+                        device: None,
+                        import_from: None,
+                        actions: &mut actions,
+                    };
+                    library_lists(ui, "All Tracks", &mut ctx);
+                });
+        }
     });
     actions
+}
+
+/// "Import to Collection" on a rekordbox xml list or folder.
+fn xml_menu(ui: &mut egui::Ui, node: &PlaylistNode, actions: &mut Vec<Action>) {
+    if ui.button("Import to Collection").clicked() {
+        actions.push(Action::ImportFromXml { list: Some(node.id.clone()), tracks: Vec::new() });
+        ui.close();
+    }
 }
 
 struct Ctx<'a> {
@@ -207,6 +237,8 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mu
                     .show(ui, |ui| children(ui, section, Some(&node.id), ctx));
                 if editable {
                     header.header_response.context_menu(|ui| node_menu(ui, node, ctx.actions));
+                } else if ctx.library_ref == LibraryRef::Xml {
+                    header.header_response.context_menu(|ui| xml_menu(ui, node, ctx.actions));
                 } else if let Some(device) = ctx.device.filter(|_| section == Section::Playlists) {
                     let path = name_path(section.nodes(ctx.library), node);
                     let import_from = ctx.import_from.unwrap_or(device);
@@ -249,6 +281,8 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mu
                             node_menu(ui, node, ctx.actions);
                         }
                     });
+                } else if ctx.library_ref == LibraryRef::Xml {
+                    response.context_menu(|ui| xml_menu(ui, node, ctx.actions));
                 } else if let Some(import_from) = ctx.import_from.filter(|_| section == Section::Playlists) {
                     let path = name_path(section.nodes(ctx.library), node);
                     let writable = ctx.device;

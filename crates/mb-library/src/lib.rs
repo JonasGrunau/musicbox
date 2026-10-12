@@ -17,6 +17,7 @@
 //! | [`grid`] | replace a beat grid (shift, downbeat, tempo, ×2, ÷2) | `edit-grid.md` | binary-derived (no trace) |
 //! | [`device_import`] | import tracks / a playlist from a device | `import-device.md` | binary-derived (no trace) |
 //! | [`device_history`] | import player histories from a device | `import-device.md` § Histories | binary-derived (no trace) |
+//! | [`xml`] | rekordbox.xml export; import tracks / lists from it | `../xml.md`, `import-xml.md` | export verified byte-exact; import binary-derived (no trace) |
 //!
 //! [`WriteTxn`]: mb_masterdb::WriteTxn
 
@@ -30,6 +31,7 @@ mod lookup;
 pub mod playlist;
 pub mod remove;
 pub mod tags;
+pub mod xml;
 pub mod xml_sync;
 
 pub use cues::{Cue, CueEdit, CueSlot, NewCue};
@@ -40,6 +42,7 @@ pub use mb_anlz::tags::Beat;
 pub use import::{ImportReport, SkipReason};
 pub use mb_core::DbId;
 pub use playlist::{EntrySnapshot, NodeKind, PlaylistSnapshot};
+pub use xml::{XmlExportOptions, XmlImport, XmlImportReport, XmlList, XmlTrackResult};
 
 use mb_masterdb::MasterDbWriter;
 use mb_masterdb::rusqlite::Connection;
@@ -125,6 +128,10 @@ pub enum Command {
     UndoHistoryImport { histories: Vec<DbId>, play_counts: Vec<(DbId, i64)> },
     /// Put the previous grid sections and BPM back (inverse of [`Command::SetBeatGrid`]).
     RestoreBeatGrid { content: DbId, pqtz: mb_anlz::Section, pqt2: Option<mb_anlz::Section>, bpm_x100: Option<i64> },
+    /// Import tracks and lists from a rekordbox.xml (`import-xml.md`).
+    ImportXml { import: XmlImport },
+    /// Several commands in order, as one undo step; the inverse runs their inverses backwards.
+    Batch { commands: Vec<Command> },
 }
 
 /// What a command did.
@@ -141,6 +148,7 @@ pub enum Effect {
     HistoriesImported(HistoryImportReport),
     /// `djmdCue.ID` of an added or restored cue.
     CueAdded { id: String },
+    ImportedXml(XmlImportReport),
     Done,
     /// Nothing to do (e.g. an edit to the current value); no statement was written.
     Unchanged,
@@ -248,6 +256,15 @@ impl Library {
             Command::UndoHistoryImport { histories, play_counts } => device_history::undo(self, &histories, &play_counts)?,
             Command::RestoreBeatGrid { content, pqtz, pqt2, bpm_x100 } => {
                 grid::restore_beat_grid(self, &content, &pqtz, pqt2.as_ref(), bpm_x100)?
+            }
+            Command::ImportXml { import } => xml::import(self, &import)?,
+            Command::Batch { commands } => {
+                let mut inverses = Vec::new();
+                for c in commands {
+                    inverses.extend(self.execute(c)?.inverse);
+                }
+                inverses.reverse();
+                (Effect::Done, (!inverses.is_empty()).then_some(Command::Batch { commands: inverses }))
             }
         };
         Ok(Outcome { effect, inverse, usn_before, usn_after: self.usn()? })
