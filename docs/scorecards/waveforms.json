@@ -1,0 +1,172 @@
+{
+  "scorecard": "waveforms",
+  "date": "2026-10-12",
+  "rekordbox": "7.2.19.0342",
+  "macos": "27.0",
+  "code": "crates/mb-analysis (analyze_waveforms), crates/mb-dsp",
+  "spec": "docs/re/analysis-waveforms.md",
+  "command": "cargo run --release -p mb-analysis --example waveform_score  (MB_ORACLE=oracle-b for the second fixture)",
+  "tracks": 169,
+  "formats": {
+    "mp3": 37,
+    "aac": 19,
+    "alac": 14,
+    "flac": 23,
+    "wav": 34,
+    "aiff": 34,
+    "wav_aiff_via_juce": 8
+  },
+  "summary": {
+    "oracle_b": "169/169 tracks byte-exact in all eight tags",
+    "oracle_a": "identical except PWAV colours on 4 sampler loops and PWV2 on 1 (Breaks2, Breaks3, House3, House4): oracle-a holds an older analysis of these demo files; rekordbox's re-analysis (oracle-b) matches ours",
+    "aac_caveat": "in some runs earlier the same day, 4-10 AAC tracks differed by 1 (PWV7: 2) in a few columns; AudioToolbox returned a different PCM decode of the same file in those runs (see spec section 6)"
+  },
+  "oracle_b": {
+    "PWAV": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 135200,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV2": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 33800,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV3": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 13512114,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV4": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 1216800,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV5": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 27024232,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV6": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 608400,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV7": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 20268174,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWVC": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 507,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    }
+  },
+  "oracle_a": {
+    "PWAV": {
+      "byte_exact": 165,
+      "differing_fields": 36,
+      "length_mismatch": 0,
+      "total_fields": 135200,
+      "tracks": 169,
+      "within_1": 3,
+      "worst_field_diff": 2
+    },
+    "PWV2": {
+      "byte_exact": 168,
+      "differing_fields": 10,
+      "length_mismatch": 0,
+      "total_fields": 33800,
+      "tracks": 169,
+      "within_1": 1,
+      "worst_field_diff": 1
+    },
+    "PWV3": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 13512114,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV4": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 1216800,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV5": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 27024232,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV6": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 608400,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWV7": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 20268174,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    },
+    "PWVC": {
+      "byte_exact": 169,
+      "differing_fields": 0,
+      "length_mismatch": 0,
+      "total_fields": 507,
+      "tracks": 169,
+      "within_1": 0,
+      "worst_field_diff": 0
+    }
+  }
+}

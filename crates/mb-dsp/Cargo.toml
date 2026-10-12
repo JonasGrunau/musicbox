@@ -1,0 +1,9 @@
+[package]
+name = "mb-dsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Bit-exact ports of the DSP primitives rekordbox's analysis uses (spec: docs/re/analysis-waveforms.md)"
+
+[dependencies]

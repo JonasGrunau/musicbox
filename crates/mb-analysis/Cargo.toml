@@ -1,0 +1,18 @@
+[package]
+name = "mb-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Track analysis matching rekordbox 7.2.19: waveforms (spec: docs/re/analysis-waveforms.md)"
+
+[dependencies]
+thiserror.workspace = true
+mb-audio = { path = "../mb-audio" }
+mb-dsp = { path = "../mb-dsp" }
+
+[dev-dependencies]
+anyhow.workspace = true
+mb-anlz = { path = "../mb-anlz" }
+mb-masterdb = { path = "../mb-masterdb" }
+serde_json = "1"

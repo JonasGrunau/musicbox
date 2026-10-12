@@ -188,6 +188,8 @@ rekordbox decodes ALAC with Apple's open-source `ALACDecoder` (`Init` @0x1028063
 
 mb-audio uses AudioToolbox's ALAC decoder instead: packet by packet, at the source bit depth, and the conversion from §3. ALAC is lossless; the probe decodes **sample-identically** to the WAV original.
 
+The packet read must offer more bytes than the packet's PCM size. An incompressible ("escape") ALAC packet is a few bytes larger than its PCM: 16,388 bytes for 4096 stereo 16-bit frames. With a budget of exactly `frames × bytes per frame`, `AudioFileReadPacketData` fails, and every later packet decodes as silence. One real track went silent after 144 s this way. The ALAC feed therefore offers its whole 64 KiB buffer (2026-10-12, found through waveform parity).
+
 Note that ffmpeg's ALAC files carry 647 × 4096 samples in `stts`/`mdhd` for 60 s of audio. rekordbox uses that full length: 2,650,112 samples → PWV3 = 9014.
 
 ## 7. FLAC (`FileReadFlac`)

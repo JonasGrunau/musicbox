@@ -124,6 +124,11 @@ struct Feed {
     next_packet: i64,
     desc: [PacketDesc; 512],
     buffer: Vec<u8>,
+    /// Offer the whole buffer to `AudioFileReadPacketData` instead of `frames × bytes per frame`.
+    /// ALAC needs it: an incompressible packet (escape mode) is a few bytes larger than its PCM,
+    /// and a budget of exactly the PCM size makes the read fail (and every later packet with it).
+    /// rekordbox decodes ALAC with its own `ALACDecoder`, not through this callback.
+    whole_buffer: bool,
 }
 
 /// `FileReadMp4::converterCallback`: one packet per call, read with `AudioFileReadPacketData`.
@@ -160,6 +165,9 @@ extern "C" fn input_proc(
                 *io_packets = cap;
             }
             *io_packets = (*io_packets).min(feed.desc.len() as u32);
+        }
+        if feed.whole_buffer {
+            bytes = feed.buffer.len() as u32;
         }
         bytes = bytes.min(feed.buffer.len() as u32);
         let st = AudioFileReadPacketData(
@@ -251,6 +259,7 @@ impl Converter {
                     next_packet: 0,
                     desc: [PacketDesc::default(); 512],
                     buffer: vec![0; 1 << 16],
+                    whole_buffer: false,
                 }),
                 src: Asbd::default(),
                 bytes_per_sample: 2,
@@ -458,7 +467,8 @@ impl AlacReader {
         if (bits | 8) != 24 || track.channels > 2 {
             return Err(Error::Format(format!("ALAC {bits}-bit")));
         }
-        let conv = Converter::open(path, track.frames.iter().map(|f| f.samples).collect(), None, Some(bits), false)?;
+        let mut conv = Converter::open(path, track.frames.iter().map(|f| f.samples).collect(), None, Some(bits), false)?;
+        conv.feed.whole_buffer = true;
         let rate = track.alac_rate.filter(|&r| r != 0).unwrap_or(conv.src.sample_rate as u32);
         let info = ReaderInfo { sample_rate: rate, channels: conv.channels as u16, bits: bits as u16, length: track.total as u32 };
         Ok(Self { conv, frames: track.frames.clone(), info, packet: -1, pcm: Vec::new(), bytes: Vec::new() })

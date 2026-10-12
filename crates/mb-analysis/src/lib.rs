@@ -1,0 +1,98 @@
+//! rekordbox 7.2.19's track analysis, ported. So far: the waveform tags (PWAV, PWV2, PWV3, PWV4,
+//! PWV5, PWV6, PWV7, PWVC). Spec: `docs/re/analysis-waveforms.md`.
+//!
+//! The analysis reads the decoded track (`mb-audio`, rekordbox's timeline) at positions
+//! `0 .. L − 1`, quantised to 16 bit (`mb_audio::analysis_i16`), in blocks of two seconds, and
+//! feeds the same samples to BALib (PWAV/PWV2/PWV3) and WaveCreator (PWV4–7, PWVC).
+
+pub mod loud;
+pub mod wavecreator;
+pub mod zoom;
+
+use std::path::Path;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Audio(#[from] mb_audio::Error),
+    #[error("track has no samples")]
+    Empty,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// The waveform tag bodies, ready for `mb_anlz::tags`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Waveforms {
+    /// PWAV: 400 column bytes (`height | colour << 5`).
+    pub pwav: Vec<u8>,
+    /// PWV2: 100 dot heights.
+    pub pwv2: Vec<u8>,
+    /// PWV3 column bytes (150 per second).
+    pub pwv3: Vec<u8>,
+    /// PWV4: 1200 × 6 bytes.
+    pub pwv4: Vec<[u8; 6]>,
+    /// PWV5 columns (150 per second): `r << 13 | g << 10 | b << 7 | height << 2`.
+    pub pwv5: Vec<u16>,
+    /// PWV6: 1200 × (low, mid, high).
+    pub pwv6: Vec<[u8; 3]>,
+    /// PWV7 columns (150 per second): (low, mid, high).
+    pub pwv7: Vec<[u8; 3]>,
+    /// PWVC coefficients.
+    pub pwvc: [u16; 3],
+}
+
+/// Samples per analysis block: `CBeatAnalyzeThread::analyze` reads `2 × rate` samples per step
+/// (`analysis-waveforms.md` § 1).
+fn block_len(rate: u32) -> usize {
+    2 * rate as usize
+}
+
+/// Analyses the waveforms of the audio file at `path`.
+pub fn analyze_waveforms(path: impl AsRef<Path>) -> Result<Waveforms> {
+    let mut dec = mb_audio::open(path.as_ref())?;
+    let info = *dec.info();
+    let len = info.total_samples;
+    if len < 2 {
+        return Err(Error::Empty);
+    }
+    let rate = info.sample_rate;
+    // The analysis loop reads positions 0 .. L − 2 (decode.md § 2).
+    let total = len - 1;
+    let mut zoom = zoom::ZoomViewMaker::new(rate, total);
+    let mut wave = wavecreator::WaveCreator::new(rate, len);
+    let mut loud = loud::LoudAnalyzer::new(rate, total);
+    let block = block_len(rate);
+    let mut frames = vec![[0.0f32; 2]; block];
+    let mut pcm = vec![[0i16; 2]; block];
+    let mut pos = 0u64;
+    while pos < total {
+        let n = ((total - pos) as usize).min(block);
+        let got = dec.read_frames(&mut frames[..n]);
+        if got == 0 {
+            break;
+        }
+        for (dst, src) in pcm[..got].iter_mut().zip(&frames[..got]) {
+            *dst = [
+                mb_audio::analysis_i16(src[0]),
+                mb_audio::analysis_i16(src[1]),
+            ];
+        }
+        zoom.put(&pcm[..got]);
+        wave.put(&pcm[..got]);
+        loud.put(&pcm[..got]);
+        pos += got as u64;
+    }
+    let w = wave.finish();
+    let (pwav, pwv2) = loud.finish();
+    Ok(Waveforms {
+        pwav,
+        pwv2,
+        pwv3: zoom.finish(),
+        pwv4: w.pwv4,
+        pwv5: w.pwv5,
+        pwv6: w.pwv6,
+        pwv7: w.pwv7,
+        pwvc: w.pwvc,
+    })
+}
