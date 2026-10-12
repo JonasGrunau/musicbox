@@ -140,14 +140,14 @@ fn export_keeps_everything_on_a_foreign_stick() -> anyhow::Result<()> {
     all_kept("playlists", &pdb0.playlists, &pdb1.playlists, |r| {
         (r.0.id, r.0.parent_id, r.0.name.clone(), r.0.attribute, r.0.artwork_id)
     });
-    all_kept("entries", &pdb0.playlist_entries, &pdb1.playlist_entries, |r| r.clone());
+    all_kept("entries", &pdb0.playlist_entries, &pdb1.playlist_entries, |r| *r);
     all_kept("hcb lists", &pdb0.hot_cue_bank_lists, &pdb1.hot_cue_bank_lists, |r| r.clone());
     all_kept("histories", &pdb0.histories, &pdb1.histories, |r| r.clone());
-    all_kept("history entries", &pdb0.history_entries, &pdb1.history_entries, |r| r.clone());
+    all_kept("history entries", &pdb0.history_entries, &pdb1.history_entries, |r| *r);
     all_kept("artwork", &pdb0.artwork, &pdb1.artwork, |r| r.clone());
     all_kept("menu items", &pdb0.menu_items, &pdb1.menu_items, |r| r.clone());
-    all_kept("categories", &pdb0.categories, &pdb1.categories, |r| r.clone());
-    all_kept("sorts", &pdb0.sorts, &pdb1.sorts, |r| r.clone());
+    all_kept("categories", &pdb0.categories, &pdb1.categories, |r| *r);
+    all_kept("sorts", &pdb0.sorts, &pdb1.sorts, |r| *r);
     assert_eq!(pdb1.tracks.len(), pdb0.tracks.len() + 5);
     assert_eq!(pdb1.playlists.len(), pdb0.playlists.len() + 1);
 
