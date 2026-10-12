@@ -19,7 +19,7 @@
   "summary": {
     "oracle_b": "169/169 tracks byte-exact in all eight tags",
     "oracle_a": "identical except PWAV colours on 4 sampler loops and PWV2 on 1 (Breaks2, Breaks3, House3, House4): oracle-a holds an older analysis of these demo files; rekordbox's re-analysis (oracle-b) matches ours",
-    "aac_caveat": "in some runs earlier the same day, 4-10 AAC tracks differed by 1 (PWV7: 2) in a few columns; AudioToolbox returned a different PCM decode of the same file in those runs (see spec section 6)"
+    "aac_caveat": "resolved 2026-10-12: the AAC decode depended on the stack alignment at AudioConverterFillComplexBuffer (SP = 48 mod 64 gave +-1 in some columns); mb-audio enters it at a fixed alignment, and all 19 AAC tracks are byte-exact in every tag against both oracles in every run (docs/re/decode.md section 6)"
   },
   "oracle_b": {
     "PWAV": {

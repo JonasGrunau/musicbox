@@ -180,6 +180,22 @@ The AAC map shifts deltas left by one when the AudioSpecificConfig signals SBR. 
 
 With priming at zero and no trimming, the output starts with the encoder priming. The corpus AAC files come from Apple's encoder (via ffmpeg `aac_at`), so priming is 2112 and the timeline is the original **+2112 samples**.
 
+**The decode depends on the stack alignment** (verified 2026-10-12, macOS 27.0, M4 Pro):
+- **The effect.** Apple's AAC decoder does not produce the same samples for every stack pointer at which `AudioConverterFillComplexBuffer` is entered:
+  - Entered with SP ≡ 48 (mod 64), the decode differs from SP ≡ 0, 16 or 32 by ±1 in a few samples, on every corpus file tested.
+  - Only the fill calls matter. `AudioConverterNew` and the `dmgc`/`prim` property calls can run at any alignment.
+  - A mix of alignments over the calls of one track gives yet other decodes.
+  - Only one decoder is installed (`adec`/`aac `/`appl`; `kAudioFormatProperty_Decoders`). The input/output buffer alignment, the buffer contents, the QoS class and the core type (P or E) make no difference.
+- **Why it varied between runs.** A caller's stack position depends on the call chain and, on the main thread, on the size of argv and the environment. So the same program gave different decodes in different processes. Concurrent processes with different environments produced both variants, which looked like random switching.
+- **rekordbox** makes the call from `FileReadMp4::decode` on its analysis thread. Its call chain is fixed, so its decodes are stable (identical values in both oracle sessions).
+- **mb-audio** enters `AudioConverterFillComplexBuffer` through a small trampoline (`mb_audio_call_at`, `coreaudio.rs`), at SP ≡ 0 (mod 1024) whatever the caller's stack.
+  - The 0/16/32 class matches rekordbox: with it, auto-gain is bit-exact on 169/169 tracks and all eight waveform tags are byte-exact on 19/19 AAC tracks, against both oracles.
+  - With SP ≡ 48: gain 162/169, PWV3/5/6/7 ±1 on 4–10 tracks.
+  - `MB_AAC_FILL_SP=<n>` overrides the alignment, for diagnosis only.
+- **Tests and tools.**
+  - `crates/mb-audio/tests/aac_stack.rs` decodes a probe from eight stack depths and requires one result; without the trampoline it fails.
+  - `cargo run --release -p mb-audio --example aac_hash -- [--dump <dir>] <file>…` prints one decode hash per file.
+
 ### ALAC
 rekordbox decodes ALAC with Apple's open-source `ALACDecoder` (`Init` @0x102806368, `Decode` @0x1028064c8), statically linked:
 - **Requirements** (`FileReadAlac::analyze` @0x1028180e0): 16 or 24 bits, ≤2 channels, max frame size 1–65535.
@@ -322,7 +338,7 @@ Lengths per reader: 37 MP3, 19 AAC, 14 ALAC, 23 FLAC, 34 WAV, 34 AIFF, 8 JUCE. T
 
 **Exact by construction, not observable directly:**
 - MP3 samples: same libmpg123, same parameters, same feed/decode sequence including the NEW_FORMAT priming.
-- AAC samples: same AudioToolbox calls, same per-packet callback and same prime info. This depends on the macOS version, which is recorded in the fixture manifest.
+- AAC samples: same AudioToolbox calls, same per-packet callback, same prime info, and `AudioConverterFillComplexBuffer` entered at the stack alignment class rekordbox's decodes match (§ 6). Every analysis output that depends on them is exact on all 19 AAC tracks (auto-gain, all eight waveform tags). This depends on the macOS version, which is recorded in the fixture manifest.
 - SRC samples: literal port with matching FMA, libm and evaluation order; the delay is confirmed.
 
 **Approximate or untested:**

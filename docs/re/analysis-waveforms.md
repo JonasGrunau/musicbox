@@ -1,6 +1,6 @@
 # Waveform analysis (PWAV, PWV2, PWV3, PWV4, PWV5, PWV6, PWV7, PWVC)
 
-Status: **verified**. `mb-analysis::analyze_waveforms` reproduces rekordbox 7.2.19's waveform tags byte for byte: 169/169 corpus tracks in all eight tags against `fixtures/oracle-b`. In some runs, AAC tracks came out ±1 (PWV7 ±2) in a few columns because the system AAC decoder returned a different decode (§ 6). Scorecard: `docs/scorecards/waveforms.json`.
+Status: **verified**. `mb-analysis::analyze_waveforms` reproduces rekordbox 7.2.19's waveform tags byte for byte: 169/169 corpus tracks in all eight tags against `fixtures/oracle-b`. AAC is now stable too: the ±1 (PWV7 ±2) columns some runs showed came from the AAC decode's dependence on stack alignment, fixed in `mb-audio` (`decode.md` § 6). Scorecard: `docs/scorecards/waveforms.json`.
 
 Code: `crates/mb-analysis` (`zoom.rs` PWV3, `loud.rs` PWAV/PWV2, `wavecreator.rs` PWV4–PWVC) and `crates/mb-dsp` (filters, libm calls). Tag layouts are in `anlz.md`; decoding and the analysis input are in `decode.md`.
 
@@ -319,14 +319,11 @@ The last millisecond of a column wins; skipped columns are copies.
 
 Against **oracle-b**, all 169 tracks are byte-exact in all eight tags: MP3 37, AAC 19, ALAC 14, FLAC 23, WAV 34, AIFF 34 and JUCE 8, including the 22.05 kHz and 96 kHz SRC probes. The results were the same with 1 and with 14 analysis threads.
 
-In runs earlier the same day, the same code left 4 to 10 AAC tracks off by 1 (PWV7: 2) in a few columns. No other format was ever affected (§ 6).
+In runs earlier the same day, the same code left 4 to 10 AAC tracks off by 1 (PWV7: 2) in a few columns. The cause was the AAC decode, not this port: `AudioConverterFillComplexBuffer` entered at SP ≡ 48 (mod 64) decodes slightly differently (`decode.md` § 6). With `mb-audio` entering it at a fixed alignment, all 19 AAC tracks are byte-exact in every tag against both oracles, in every run.
 - Against **oracle-a**, the only additional differences are PWAV colours on four sampler loops and PWV2 on one. oracle-a holds an older analysis of those demo files, and rekordbox's re-analysis in oracle-b agrees with ours.
 
 ## 6. Open questions
-- **AAC decoding is not always reproducible.** AudioToolbox returned two different PCM decodes of the same file in separate processes minutes apart. It did not depend on QoS class, output-buffer alignment, earlier decodes in the process, or the number of threads. `examples/aac_variants.rs` prints a hash per file.
-  - While the decoder was in the other state, 4 to 10 AAC tracks missed byte-exactness by ±1.
-  - The waveform code is exact for whatever PCM it gets.
-  - What switches the decoder, and whether rekordbox is affected the same way, is open. That belongs to `mb-audio`.
+- ~~**AAC decoding is not always reproducible.**~~ Resolved (`decode.md` § 6): the decode depends on the stack alignment at `AudioConverterFillComplexBuffer`, which followed the caller's stack (on the main thread also argv and the environment). `mb-audio` now enters it at a fixed alignment that matches rekordbox.
 - **Uninitialised read.** The peak scan in `createColorWaveData` reads each column before its first write. We model that memory as zero; rekordbox's allocation is large enough to come from fresh pages, but a recycled block could differ.
 - **BALib version 1** (`BeatAnalyzer_1_0`, analysis modes other than 2–4) and the LoudViewMaker path without BeatSensor (BPM analysis off) are not ported.
 - **The end of `PeakDetect900`.** A track whose last chunk is exactly `rate/75` samples and whose final sample is off the 4-grid never sets the mid/low dot "done" flag. The port reproduces this, but no fixture exercises it.

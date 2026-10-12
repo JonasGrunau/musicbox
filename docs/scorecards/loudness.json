@@ -8,16 +8,16 @@
   "command": "cargo run --release -p mb-analysis --example loudness_score  (MB_ORACLE=oracle-b for the second fixture)",
   "tracks": 169,
   "oracle_a": {
-    "gain_bit_exact": 162,
+    "gain_bit_exact": 169,
     "peak_bit_exact": 169,
-    "worst_gain_diff_ulp": 1,
-    "worst_gain_diff_db": 1e-06
+    "worst_gain_diff_ulp": 0,
+    "worst_gain_diff_db": 0.0
   },
   "oracle_b": {
-    "gain_bit_exact": 162,
+    "gain_bit_exact": 169,
     "peak_bit_exact": 169,
-    "worst_gain_diff_ulp": 1,
-    "worst_gain_diff_db": 1e-06
+    "worst_gain_diff_ulp": 0,
+    "worst_gain_diff_db": 0.0
   },
   "non_aac": {
     "tracks": 150,
@@ -26,18 +26,8 @@
   },
   "aac": {
     "tracks": 19,
-    "gain_bit_exact": 12,
-    "gain_one_ulp_off": 7,
+    "gain_bit_exact": 19,
     "peak_bit_exact": 19,
-    "off_by_one_ulp": [
-      "probes/m4a_aac256/sweep_20_20k.m4a",
-      "probes/m4a_aac256/tempo_120_to_126.m4a",
-      "real/m4a_aac256/Audiomatic - Lost in the Mix (Nova Remix).m4a",
-      "real/m4a_aac256/Metodi Hristov - The Ish (Original Mix).m4a",
-      "real/m4a_aac256/Maitika, Tronsho - Dreams (Original Mix).m4a",
-      "real/m4a_aac256/Oliver Schories - Be (Original Mix).m4a",
-      "real/m4a_aac256/Oliver Huntemann,Victor Ruiz - Nevermind (O.m4a"
-    ],
-    "root_cause": "our AudioToolbox AAC decode differs from rekordbox's by a few samples (rekordbox's own values are identical in both oracle sessions); see analysis-loudness.md section 5"
+    "note": "until 2026-10-12, 7 AAC tracks were 1 ulp off: AudioConverterFillComplexBuffer entered at SP = 48 (mod 64) decodes slightly differently; mb-audio now enters it at a fixed alignment (docs/re/decode.md section 6)"
   }
 }

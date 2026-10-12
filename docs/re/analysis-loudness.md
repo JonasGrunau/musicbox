@@ -2,7 +2,7 @@
 
 Status: **verified**. `mb_analysis::analyze(…, Options { loudness: true, .. })` reproduces rekordbox 7.2.19's stored auto-gain bit for bit:
 - the sample peak on 169/169 corpus tracks;
-- the gain float on all 150 non-AAC tracks and on 12 of the 19 AAC tracks. The other seven are one float ulp off (≈ 5·10⁻⁷ dB), from the AAC decode (§ 5).
+- the gain float on 169/169 corpus tracks. The seven AAC tracks that used to be one float ulp off came from a decode at the wrong stack alignment (`decode.md` § 6), fixed in `mb-audio`.
 
 The results are the same against `fixtures/oracle-a` and `fixtures/oracle-b`. Scorecard: `docs/scorecards/loudness.json`.
 
@@ -75,12 +75,12 @@ Combined 4th-order filter:
 
 | Fixture | Gain bit-exact | Peak bit-exact | Worst gain difference |
 |---|---|---|---|
-| oracle-a | 162/169 | 169/169 | 1 ulp (≈ 1·10⁻⁶ dB) |
-| oracle-b | 162/169 | 169/169 | 1 ulp |
+| oracle-a | 169/169 | 169/169 | 0 |
+| oracle-b | 169/169 | 169/169 | 0 |
 
-All seven gain differences are AAC tracks: two probes and five real tracks.
+Before the `mb-audio` stack-alignment fix (`decode.md` § 6), 7 AAC tracks were 1 ulp off whenever `AudioConverterFillComplexBuffer` happened to be entered at SP ≡ 48 (mod 64).
 
 ## 5. Open questions
-- **AAC.** rekordbox stored identical values in both oracle sessions, so its AAC decode is stable. Ours misses by one float ulp on 7 of 19 AAC tracks, which means our AudioToolbox decode differs from rekordbox's by a few samples. The waveforms show the same thing in some runs (`analysis-waveforms.md` § 6). Candidates in `mb-audio`'s AAC path: the converter set-up (prime info, packet feeding) and the decode around the 5-frame restart. Loudness is the sensitive probe for comparing decoders.
+- ~~**AAC.**~~ Resolved: the decoder's output depends on the stack alignment at `AudioConverterFillComplexBuffer`; `mb-audio` now enters it at the class rekordbox's values match (`decode.md` § 6). Loudness stays the most sensitive probe for comparing AAC decodes.
 - **Silence.** For a track whose blocks all fall below the absolute gate, the loudness is −∞ and the gain +∞. What rekordbox then stores (the default pair @0x103752930, or +∞) is untested; there is no fixture.
 - **Track length.** The stride uses whole seconds of the analysed length `L − 1`. A track exactly at a multiple of 30 s switches stride at a one-sample boundary; no fixture sits there.

@@ -331,10 +331,80 @@ impl Converter {
         let mut io = frames;
         let user: *mut Feed = &mut *self.feed;
         // SAFETY: the buffer list points at `out`, sized for `frames`; the callback gets the Feed.
-        let st = unsafe {
-            AudioConverterFillComplexBuffer(self.conv, input_proc, user.cast(), &mut io, &mut list, std::ptr::null_mut())
-        };
+        let st = unsafe { fill_complex_buffer(self.conv, user.cast(), &mut io, &mut list) };
         (st, io, list.buffers[0].byte_size)
+    }
+}
+
+/// The stack pointer (modulo 1024) at which `AudioConverterFillComplexBuffer` is entered.
+///
+/// Apple's AAC decoder does not give the same samples for every stack alignment: entered with
+/// SP ≡ 48 (mod 64) it decodes slightly differently (a few samples ±1) than with SP ≡ 0/16/32,
+/// on every file tested; the setup calls (`AudioConverterNew`, `dmgc`, `prim`) do not matter
+/// (`docs/re/decode.md` § 6). rekordbox calls it from `FileReadMp4::decode` on its analysis
+/// thread, at a fixed alignment, so its decodes are stable; ours followed wherever the caller's
+/// stack happened to be. The call therefore goes through a trampoline that enters the function
+/// at a fixed alignment.
+fn fill_sp() -> usize {
+    static SP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *SP.get_or_init(|| {
+        std::env::var("MB_AAC_FILL_SP").ok().and_then(|v| v.parse().ok()).map_or(FILL_SP, |v: usize| v & 0x3f0)
+    })
+}
+
+/// See [`fill_sp`].
+const FILL_SP: usize = 0;
+
+#[cfg(target_arch = "aarch64")]
+std::arch::global_asm!(
+    ".private_extern _mb_audio_call_at",
+    ".globl _mb_audio_call_at",
+    ".p2align 2",
+    // x0..x5: arguments, x6: function, x7: stack pointer at the callee's entry modulo 1024
+    // (a multiple of 16). Uses at most 3 KiB of extra stack.
+    "_mb_audio_call_at:",
+    "  stp x29, x30, [sp, #-32]!",
+    "  stp x19, x20, [sp, #16]",
+    "  mov x29, sp",
+    "  mov x19, sp",
+    "  sub x9, sp, #2048",
+    "  mov x10, #-1024",
+    "  and x9, x9, x10",
+    "  add x9, x9, x7",
+    "  mov sp, x9",
+    "  blr x6",
+    "  mov sp, x19",
+    "  ldp x19, x20, [sp, #16]",
+    "  ldp x29, x30, [sp], #32",
+    "  ret",
+);
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" {
+    fn mb_audio_call_at(a0: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, f: usize, sp: usize) -> usize;
+}
+
+/// `AudioConverterFillComplexBuffer(conv, input_proc, user, io, list, NULL)` entered at
+/// [`fill_sp`].
+unsafe fn fill_complex_buffer(conv: AudioConverterRef, user: *mut c_void, io: *mut u32, list: *mut AudioBufferList) -> OSStatus {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: the trampoline passes the six arguments unchanged and restores the stack pointer.
+    unsafe {
+        mb_audio_call_at(
+            conv as usize,
+            input_proc as InputProc as usize,
+            user as usize,
+            io as usize,
+            list as usize,
+            0,
+            AudioConverterFillComplexBuffer as *const () as usize,
+            fill_sp(),
+        ) as u32 as OSStatus
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    // SAFETY: as documented on the caller.
+    unsafe {
+        AudioConverterFillComplexBuffer(conv, input_proc, user, io, list, std::ptr::null_mut())
     }
 }
 
