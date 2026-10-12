@@ -2484,6 +2484,7 @@ dependencies = [
  "mb-library",
  "mb-masterdb",
  "mb-pdb",
+ "mb-player",
  "mb-usb",
 ]
 

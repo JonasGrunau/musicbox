@@ -58,10 +58,11 @@ fn push_cues(out: &mut Vec<CueMark>, list: &CueListExt) {
     }
 }
 
-/// Full-track overview with cue markers; `duration_ms` maps cue times onto the width.
-pub fn show_overview(ui: &mut egui::Ui, waves: &TrackWaves, duration_ms: u32, style: Style) {
+/// Full-track overview with cue markers and an optional playhead; `duration_ms` maps times onto
+/// the width. A click returns the clicked position in ms.
+pub fn show_overview(ui: &mut egui::Ui, waves: &TrackWaves, duration_ms: u32, style: Style, playhead_ms: Option<f64>) -> Option<f64> {
     let desired = egui::vec2(ui.available_width(), 56.0);
-    let (rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(0x12, 0x12, 0x12));
     let mid = rect.center().y;
@@ -103,6 +104,17 @@ pub fn show_overview(ui: &mut egui::Ui, waves: &TrackWaves, duration_ms: u32, st
         _ => {}
     }
 
+    if let (Some(ms), true) = (playhead_ms, duration_ms > 0) {
+        let x = rect.left() + rect.width() * (ms as f32 / duration_ms as f32).clamp(0.0, 1.0);
+        painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(1.5, egui::Color32::WHITE));
+    }
+    let clicked = response
+        .clicked()
+        .then(|| response.interact_pointer_pos())
+        .flatten()
+        .filter(|_| duration_ms > 0)
+        .map(|p| ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) as f64 * duration_ms as f64);
+
     if duration_ms > 0 {
         for cue in &waves.cues {
             let x = rect.left() + rect.width() * (cue.ms as f32 / duration_ms as f32).min(1.0);
@@ -121,4 +133,5 @@ pub fn show_overview(ui: &mut egui::Ui, waves: &TrackWaves, duration_ms: u32, st
             }
         }
     }
+    clicked
 }

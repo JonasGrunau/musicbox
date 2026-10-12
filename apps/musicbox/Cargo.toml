@@ -22,3 +22,4 @@ mb-anlz = { path = "../../crates/mb-anlz" }
 mb-devlib = { path = "../../crates/mb-devlib" }
 mb-pdb = { path = "../../crates/mb-pdb" }
 mb-usb = { path = "../../crates/mb-usb" }
+mb-player = { path = "../../crates/mb-player" }

@@ -60,6 +60,8 @@ pub struct App {
     pub source: Source,
     pub browser: browser::State,
     waves: HashMap<PathBuf, Option<waveform::TrackWaves>>,
+    /// Preview player for one track (path of the open file).
+    player: Option<(PathBuf, mb_player::Player)>,
     wave_style: waveform::Style,
 }
 
@@ -86,6 +88,7 @@ impl App {
             source: Source { library: LibraryRef::Local, list: List::Collection },
             browser: browser::State::default(),
             waves: HashMap::new(),
+            player: None,
             wave_style: waveform::Style::Rgb,
         }
     }
@@ -133,10 +136,19 @@ impl App {
             self.waves.entry(path.clone()).or_insert_with(|| waveform::load(path)).as_ref()
         });
         let wave_style = &mut self.wave_style;
+        let player = self.player.as_ref().filter(|(p, _)| *p == track.path).map(|(_, pl)| pl);
+        let playing = player.is_some_and(|p| p.is_playing());
+        let playhead = player.map(|p| p.position_ms());
+        if playing {
+            ui.ctx().request_repaint();
+        }
+        let mut play_clicked = false;
+        let mut seek_to = None;
         ui.horizontal(|ui| {
             artwork(ui, track.artwork_path.as_deref(), 76.0);
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
+                    play_clicked = ui.button(if playing { "Pause" } else { "Play" }).clicked();
                     ui.strong(&track.title);
                     ui.label(&track.artist);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -145,13 +157,37 @@ impl App {
                     });
                 });
                 match waves {
-                    Some(w) => waveform::show_overview(ui, w, track.length_seconds.unwrap_or(0) * 1000, *wave_style),
+                    Some(w) => seek_to = waveform::show_overview(ui, w, track.length_seconds.unwrap_or(0) * 1000, *wave_style, playhead),
                     None => {
                         ui.weak("Not analysed");
                     }
                 }
             });
         });
+        let space = ui.ctx().input(|i| i.key_pressed(egui::Key::Space)) && !ui.ctx().egui_wants_keyboard_input();
+        if play_clicked || space || seek_to.is_some() {
+            self.preview(&track.path, play_clicked || space, seek_to);
+        }
+    }
+
+    /// Opens the preview player for `path` if needed, then toggles playback and/or seeks.
+    fn preview(&mut self, path: &std::path::Path, toggle: bool, seek_ms: Option<f64>) {
+        if self.player.as_ref().is_none_or(|(p, _)| p != path) {
+            match mb_player::Player::open(path) {
+                Ok(player) => self.player = Some((path.to_path_buf(), player)),
+                Err(e) => {
+                    self.edit_status = Some(format!("Cannot play {}: {e}", path.display()));
+                    self.player = None;
+                    return;
+                }
+            }
+        }
+        let Some((_, player)) = &self.player else { return };
+        match seek_ms {
+            Some(ms) => player.play_from_ms(ms),
+            None if toggle => player.toggle(),
+            None => {}
+        }
     }
 
     fn status(&mut self, ui: &mut egui::Ui) {
