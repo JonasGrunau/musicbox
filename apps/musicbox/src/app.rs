@@ -41,6 +41,8 @@ enum Dialog {
     ConfirmRemove { ids: Vec<DbId> },
     /// Remove lists (name paths) and tracks (device paths) from a device.
     ConfirmDeviceRemove { device: usize, playlists: Vec<Vec<String>>, tracks: Vec<String>, orphans: bool },
+    /// The intelligent playlist editor.
+    Smart(Box<crate::smartlist_ui::SmartEditor>),
 }
 
 pub struct App {
@@ -361,6 +363,15 @@ impl App {
                     self.dialog = Some(Dialog::Create { parent, kind, name: name.into() });
                 }
                 Action::AskRename { id, name } => self.dialog = Some(Dialog::Rename { id, name }),
+                Action::AskSmartList { parent, id } => {
+                    let editor = match &id {
+                        None => Some(crate::smartlist_ui::SmartEditor::new_list(parent)),
+                        Some(id) => self.library.playlists.iter().find(|p| &p.id == id).map(|node| {
+                            crate::smartlist_ui::SmartEditor::edit(node, self.library.smart_lists.get(id).map(String::as_str))
+                        }),
+                    };
+                    self.dialog = editor.map(|e| Dialog::Smart(Box::new(e)));
+                }
                 Action::AskRemoveFromCollection(ids) => self.dialog = Some(Dialog::ConfirmRemove { ids }),
                 Action::Export { playlist, device } => self.start_export(playlist, device),
                 Action::AskRemoveFromDevice { device, playlists, tracks } => self.ask_remove_from_device(device, playlists, tracks),
@@ -460,6 +471,7 @@ impl App {
             Dialog::Rename { .. } => "Rename",
             Dialog::ConfirmRemove { .. } => "Remove from Collection",
             Dialog::ConfirmDeviceRemove { .. } => "Remove from Device",
+            Dialog::Smart(editor) => editor.title(),
         };
         egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             match dialog {
@@ -488,17 +500,28 @@ impl App {
                 Dialog::ConfirmRemove { ids } => {
                     ui.label(format!("Remove {} track(s) from the collection? Audio files stay on disk.", ids.len()));
                 }
+                Dialog::Smart(editor) => editor.show(ui, &self.library.my_tags),
             }
             ui.horizontal(|ui| {
                 submit |= ui.button("OK").clicked();
                 cancel |= ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
             });
         });
+        if submit && matches!(&self.dialog, Some(Dialog::Smart(e)) if !e.valid()) {
+            self.edit_status = Some("Every condition needs a value".into());
+            submit = false;
+        }
         if submit {
             let command = match self.dialog.take() {
                 Some(Dialog::Create { parent, kind, name }) => Command::CreatePlaylist { parent, name, kind },
                 Some(Dialog::Rename { id, name }) => Command::RenamePlaylist { id, name },
                 Some(Dialog::ConfirmRemove { ids }) => Command::RemoveTracks { ids },
+                Some(Dialog::Smart(editor)) => {
+                    for command in editor.commands() {
+                        self.run(command);
+                    }
+                    return;
+                }
                 Some(Dialog::ConfirmDeviceRemove { device, playlists, tracks, orphans }) => {
                     self.start_remove(device, playlists, tracks, orphans);
                     return;

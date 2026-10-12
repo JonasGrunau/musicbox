@@ -49,7 +49,7 @@ Duplicates are allowed (rekordbox reads the playlist's `ContentID`s before an ad
 - *Hypothesis:* an empty tree is written as `<PLAYLISTS/>`.
 
 ## Smart playlists
-`Attribute` 4 rows (`SmartList` holds the rule XML). musicbox treats them as read-only: rename, move, delete and every entry op on a smart list is refused. They are only deleted (and restored) as part of a folder subtree.
+`Attribute` 4 rows (`SmartList` holds the rule XML; `../smartlist.md`). Rename, move and delete work as for playlists (the row is the same; delete/restore keeps `SmartList`). Rules are written by one builder update of `SmartList` (`Command::SetSmartList`); a new smart list is the create of § Create with `Attribute` 4 followed by that update (`Command::CreateSmartList`). Entry ops on a smart list are refused: its tracks are evaluated, never stored.
 
 ## Undo (musicbox)
 Inverse commands with new USNs, never a rollback: create ↔ delete; delete → restore (same IDs and UUIDs where free, original position, cloud filter rows, entries with their row IDs, one batch per playlist); move → move back; remove entries → restore entries (shift + insert per entry, original row IDs); reorder → reorder to the old order; insert → remove.

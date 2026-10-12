@@ -2499,6 +2499,7 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "image",
+ "libc",
  "mb-anlz",
  "mb-core",
  "mb-devlib",

@@ -106,6 +106,16 @@ impl State {
         // (track index, position in the list's entries)
         let mut rows: Vec<(usize, Option<usize>)> = match &source.list {
             List::Collection => (0..library.tracks.len()).map(|i| (i, None)).collect(),
+            // Smart lists are evaluated on every rebuild (rekordbox stores no entries for them);
+            // their rows have no entry position, so entry edits do not apply.
+            List::Playlist(id) if library.smart_lists.contains_key(id) => {
+                let by_id: HashMap<_, _> = library.tracks.iter().enumerate().map(|(i, t)| (&t.id, i)).collect();
+                crate::smartlist_ui::evaluate(library, id)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|id| by_id.get(id).map(|&i| (i, None)))
+                    .collect()
+            }
             List::Playlist(id) | List::History(id) | List::MyTag(id) => {
                 let entries = match &source.list {
                     List::Playlist(_) => &library.playlist_entries,

@@ -14,6 +14,8 @@ pub enum Action {
     /// Opens the name dialog for a new playlist/folder under `parent`.
     AskCreate { parent: Option<DbId>, kind: NodeKind },
     AskRename { id: DbId, name: String },
+    /// Opens the intelligent playlist editor: a new list under `parent`, or the list `id`.
+    AskSmartList { parent: Option<DbId>, id: Option<DbId> },
     AskRemoveFromCollection(Vec<DbId>),
     /// Export a local playlist to the device at this index of `Devices::list`.
     Export { playlist: DbId, device: usize },

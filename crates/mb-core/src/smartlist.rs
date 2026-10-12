@@ -240,7 +240,7 @@ impl SmartList {
             }
         }
         let mut logical_operator = juce_int(root.attr("LogicalOperator"));
-        if !conditions.is_empty() && !(logical_operator == MATCH_ALL || logical_operator == MATCH_ANY) {
+        if !conditions.is_empty() && logical_operator != MATCH_ALL && logical_operator != MATCH_ANY {
             logical_operator = MATCH_ALL;
         }
         Some(Self {

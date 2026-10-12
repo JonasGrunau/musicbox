@@ -10,6 +10,7 @@ pub mod editor;
 pub mod export;
 pub mod library;
 pub mod protect;
+pub mod smartlist_ui;
 pub mod theme;
 pub mod tree;
 pub mod waveform;

@@ -132,6 +132,10 @@ fn create_menu(ui: &mut egui::Ui, parent: Option<&DbId>, actions: &mut Vec<Actio
         actions.push(Action::AskCreate { parent: parent.cloned(), kind: NodeKind::Folder });
         ui.close();
     }
+    if ui.button("New Intelligent Playlist").clicked() {
+        actions.push(Action::AskSmartList { parent: parent.cloned(), id: None });
+        ui.close();
+    }
 }
 
 fn node_menu(ui: &mut egui::Ui, node: &PlaylistNode, actions: &mut Vec<Action>) {
@@ -220,6 +224,15 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mu
                             ui.separator();
                             node_menu(ui, node, ctx.actions);
                         }
+                    });
+                } else if editable && node.kind == PlaylistKind::Smart {
+                    response.context_menu(|ui| {
+                        if ui.button("Edit Intelligent Playlist…").clicked() {
+                            ctx.actions.push(Action::AskSmartList { parent: None, id: Some(node.id.clone()) });
+                            ui.close();
+                        }
+                        ui.separator();
+                        node_menu(ui, node, ctx.actions);
                     });
                 } else if let Some(device) = ctx.device.filter(|_| section == Section::Playlists) {
                     let path = name_path(section.nodes(ctx.library), node);
