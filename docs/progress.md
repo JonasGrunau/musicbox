@@ -2,6 +2,20 @@
 
 Newest entry first. Each entry records what changed, what is verified, and the next action.
 
+## 2026-10-12 — M3 export on the spare stick; CDJ check pending
+- **Spare stick RBTEST** (volume UUID 0BAB78DC-CFAA-390B-9A88-30FC468A7B99 after the re-erase; it may show up as disk6, so always check the UUID) was wiped and filled by musicbox alone: `cargo run --release -p mb-usb --example export -- live /Volumes/RBTEST "musicbox check" "oracle-all"`.
+  - 162 of 166 steps exported (157 unique tracks). The 4 skipped tracks are the 22.05 kHz probes, which the format gate refuses, as rekordbox does.
+  - `rbdiff device`: 157 tracks, 2 playlists, 0 mismatches. pdb-lint: 54 pages, 0 errors.
+  - macOS added 1448 AppleDouble `._` files (rekordbox's own exports have them too).
+  - Export log: `~/Library/Application Support/musicbox/export-logs/Export Log rekordbox 2026-10-12.txt`.
+- **UI:** export ("Export to ▸" with progress and Cancel) and preview playback are wired and tested headlessly.
+- **Pending user check (CDJ-3000 + DJM-900NXS2, in the studio):**
+  1. both playlists browse with the right counts;
+  2. tracks load with title, artist, BPM, key and artwork;
+  3. waveforms, beat grid and cues show;
+  4. `click_128_offset1234` shows 128.00 BPM.
+- **Next:** M4 (deletes, old-stick conversion, `playlists3*.sync`, player data kept), with M5 cue/grid editing and M6 waveforms in parallel.
+
 ## 2026-10-12 — M2 accepted by rekordbox
 - **M2 user check passed ("all ok").** rekordbox 7.2.19 opened the sandbox library after musicbox edits (`mb-library` example `m2_check`) with no warning or repair dialog. All of these were shown correctly:
   - new folder + playlist with 5 tracks in order
