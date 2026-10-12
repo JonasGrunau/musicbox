@@ -36,6 +36,7 @@ The full plan is in `docs/plan.md`; progress and handoffs are in `docs/progress.
 ## Commands
 - `cargo build` / `cargo test --workspace`
 - `cargo run -p musicbox` — the app
+- `tools/bundle/bundle.sh [--install]` — release build as `target/bundle/musicbox.app`, signed ad hoc (`--install` copies it to `~/Applications`). Don't launch it during development sessions; it opens a window on the user's screen.
 - `cargo run -p mb-masterdb --example probe -- <options.json> [master.db]` — table row counts
 - `cargo run -p mb-masterdb --example schema -- <options.json> <master.db>` — schema dump
 - `re/ghidra/decompile.sh dump <0xaddr|qualified::name|~substr>...` decompiles into `~/re-work/decomp/`; `re/ghidra/decompile.sh list <substr>` lists matching functions.

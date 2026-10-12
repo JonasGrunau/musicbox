@@ -1,5 +1,18 @@
+const USAGE: &str = "usage: musicbox [--options <options.json>] [--db <master.db>] \
+[--analysis-root <dir>] [--device <root>]... [--backup-root <dir>] [--import-folder <dir>] \
+[--no-volume-scan]";
+
 fn main() -> anyhow::Result<()> {
-    let args = musicbox::parse_args(std::env::args().skip(1))?;
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.iter().any(|a| a == "--version") {
+        println!("musicbox {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    if raw.iter().any(|a| a == "--help" || a == "-h") {
+        println!("{USAGE}");
+        return Ok(());
+    }
+    let args = musicbox::parse_args(raw)?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("musicbox")
