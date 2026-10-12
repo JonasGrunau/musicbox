@@ -10,9 +10,9 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | M4 | done: deletes (both DBs + files + sync files), old-stick conversion, `playlists3*.sync`, foreign My Tags kept, row paths stay taken, ≥ 4 GiB on FAT32 planned as failed copy; export onto a reference-stick clone keeps every row and file | 5abe8e9, 22d7451, d846f4a, eb85e3d, 1729250 |
 | M5 | built from the binary (no trace has a cue write): cue/grid ops with undo, deck UI; device cues built from `djmdCue` (410/410 reference-stick cue sets byte-exact). **rekordbox check pending** (`m5_check`) | 0d0d509, b3e4840 |
 | M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact except 7 AAC tracks (1 ulp); **beat grid (BALib v1 Normal mode) in progress** | 617fc5f, 8def9c4 |
-| M7 | smart lists (rules, editor, XML, USB export); import from device (tracks, playlists, histories); app bundle (`tools/bundle/bundle.sh`); key display follows `ShowOriginalKey`/`KeyStringSetting`. **rekordbox checks pending** (`m7_check`, device import). rekordbox.xml export/import in the app in progress | 0d0d509, 88593cc, d0babf3, e93d3a4, 3997b37, 53af01b |
+| M7 | smart lists (rules, editor, XML, USB export); import from device (tracks, playlists, histories); app bundle (`tools/bundle/bundle.sh`); key display follows `ShowOriginalKey`/`KeyStringSetting`. rekordbox.xml export (byte-exact vs oracle-a) and import. **rekordbox checks pending** (`m7_check`, device import, XML) | 0d0d509, 88593cc, d0babf3, e93d3a4, 3997b37, 53af01b, 35c036c |
 
-**M7 rekordbox.xml (done, not committed by the worker; user check pending):**
+**M7 rekordbox.xml (done and committed in 35c036c; user check pending):**
 - **Export** (`mb_library::xml::export_document`, app **File → Export Collection in xml format…**): rebuilds rekordbox's own oracle-a export byte for byte (161 tracks). POSITION_MARKs come from `djmdCue` via the USB export's `checked_cues` with the pad-colour tables. Preferences used: `language`, `HotCueColorType`, `bridgeExportBeatGrid`. musicbox names itself in `PRODUCT`; rekordbox's import ignores that node.
 - **Import** (`Command::ImportXml`, spec `docs/re/ops/import-xml.md`, binary-derived):
   - "rekordbox xml" in the tree: the bridge file when `showRbXml` = 1, or **File → Open rekordbox xml…**. "Import to Collection" on lists, folders and rows.
@@ -31,6 +31,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 2. Mac: `cargo run -p mb-library --example m5_check -- "$HOME/Library/Application Support/Pioneer/rekordboxAgent/storage/options.json"`, then rekordbox shows the printed cues/grid changes.
 3. Mac: same with `--example m7_check`: three "mb …" intelligent playlists with the printed counts and rules.
 4. Mac: device import from RBTEST (musicbox "Import to Collection" on `oracle-small`, "Import Histories" after the CDJ wrote histories), then rekordbox shows the tracks with waveforms/cues and the histories; a rekordbox export of `oracle-small` to RBTEST copies nothing again.
+5. Mac: XML. musicbox "Export Collection in xml format…" → rekordbox imports a playlist from it (metadata, grid, cues). Then musicbox "Open rekordbox xml…" on a rekordbox-written XML → "Import to Collection" → rekordbox shows the list, grids at once, cue colours right.
 
 **Open, not assigned**
 - Export log language: rekordbox writes it in the UI language (`language` preference; only the German column titles are known, from the oracle log). The app uses English.
