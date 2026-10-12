@@ -10,6 +10,7 @@ pub mod devices;
 pub mod editor;
 pub mod export;
 pub mod library;
+pub mod mysettings_ui;
 pub mod protect;
 pub mod smartlist_ui;
 pub mod theme;

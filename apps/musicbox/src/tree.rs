@@ -28,7 +28,7 @@ pub fn show(
         }
         for (i, device) in devices.list.iter().enumerate() {
             let title = if device.write_refusal.is_some() { format!("{} (protected)", device.name) } else { device.name.clone() };
-            egui::CollapsingHeader::new(title)
+            let response = egui::CollapsingHeader::new(title)
                 .id_salt(("device", &device.root))
                 .default_open(true)
                 .show(ui, |ui| match &device.state {
@@ -52,6 +52,12 @@ pub fn show(
                         library_lists(ui, "All Tracks", &mut ctx);
                     }
                 });
+            response.header_response.context_menu(|ui| {
+                if ui.button("My Settings…").clicked() {
+                    actions.push(Action::AskMySettings { device: i });
+                    ui.close();
+                }
+            });
         }
         // rekordbox's bridge view of a rekordbox.xml ("rekordbox xml").
         if let Some((path, snapshot)) = xml {

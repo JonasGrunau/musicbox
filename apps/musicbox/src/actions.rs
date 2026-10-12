@@ -28,6 +28,8 @@ pub enum Action {
     ImportFromDevice { device: usize, playlist: Option<Vec<String>>, tracks: Vec<std::path::PathBuf> },
     /// Import the device's player histories.
     ImportHistories { device: usize },
+    /// Open the device's My Settings (player, mixer and DJ System settings files).
+    AskMySettings { device: usize },
     /// Import from the opened rekordbox.xml: a list (tree ID, with its tracks) or collection rows.
     ImportFromXml { list: Option<DbId>, tracks: Vec<usize> },
 }

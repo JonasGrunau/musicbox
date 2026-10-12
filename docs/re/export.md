@@ -551,7 +551,7 @@ rekordbox deletes from the database the user is browsing (export.pdb or exportLi
 - MYSETTING, MYSETTING2 and DEVSETTING: over the data block only (0x68 .. 0x68+N). Fixture values 0x56CA, 0xF22C and 0xFA6E all match.
 - DJMMYSETTING: over the **whole file up to the CRC** (0x00 .. 0x9C). Fixture 0x144B matches; a data-only CRC would give 0xCB6C.
 
-**Data blocks** (field names from the getters; the bytes not named here are open)
+**Data blocks** (every named setting, its values and menus: `mysetting.md`)
 - **MYSETTING:**
   - Starts with u32 0x12345678 and u32 2, then 32 setting bytes, each `0x80 | value`.
   - Bit 7 means "field set", which matters when merging (*hypothesis* on the exact meaning).
@@ -828,7 +828,7 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
 - [ ] Player-side path limits: is 48 code points per component a player constraint or only rekordbox's choice?
 - [ ] The source field compared at +0x210 vs device +0x230 in `overwrite_export` (key name?).
 - [ ] Whether the classic DB really allocates max + 1 inside `DevAddContent_` (fixture-consistent, but the procedure body is DeviceSQL bytecode).
-- [ ] DJMMYSETTING field map and the unnamed MYSETTING/DEVSETTING bytes. (The DEVSETTING version string is `7.2.19`, verified on the oracle stick.)
+- [x] DJMMYSETTING field map and the MYSETTING/DEVSETTING field names: `mysetting.md` (a few bytes stay unnamed there). (The DEVSETTING version string is `7.2.19`, verified on the oracle stick.)
 - [ ] No FAT32 4 GiB file-size check was found in the export path. What happens with a larger file? (musicbox plans such a file on an `msdos` volume as a failed copy, code 8 / log `[3]`, and goes on with the next track; that rekordbox's own copy fails the same way is a *hypothesis*.)
 - [ ] Whether merely opening or closing the DeviceSQL page manager rewrites the `.pdb` headers when nothing changed. This decides whether § 6.3's explanation of the 20:00 rewrite holds. Test with a before/after diff on a FAT32 image.
 - [ ] For a brand-new stick: does `createDeviceDB` → `needDbConversion` show the conversion dialog, or create the Plus DB silently?

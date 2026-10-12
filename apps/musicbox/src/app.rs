@@ -52,6 +52,8 @@ enum Dialog {
     /// rekordbox's two questions before an XML import: update tracks already in the collection,
     /// replace lists with the same name.
     ConfirmXmlImport { import: Box<mb_library::XmlImport>, existing: usize, same_name: Vec<String> },
+    /// A device's My Settings.
+    MySettings(Box<crate::mysettings_ui::MySettingsDialog>),
 }
 
 pub struct App {
@@ -454,6 +456,12 @@ impl App {
                 Action::AskRemoveFromDevice { device, playlists, tracks } => self.ask_remove_from_device(device, playlists, tracks),
                 Action::ImportFromDevice { device, playlist, tracks } => self.import_from_device(device, playlist, tracks),
                 Action::ImportHistories { device } => self.import_histories(device),
+                Action::AskMySettings { device } => {
+                    if let Some(d) = self.devices.list.get(device) {
+                        let dialog = crate::mysettings_ui::MySettingsDialog::open(device, &d.name, &d.root, d.write_refusal.clone());
+                        self.dialog = Some(Dialog::MySettings(Box::new(dialog)));
+                    }
+                }
                 Action::ImportFromXml { list, tracks } => self.import_from_xml(list, tracks),
                 Action::CancelExport => {
                     if let Some(job) = &self.export {
@@ -648,6 +656,7 @@ impl App {
             Dialog::XmlExport { .. } => "Export Collection in xml format",
             Dialog::XmlOpen { .. } => "Open rekordbox xml",
             Dialog::ConfirmXmlImport { .. } => "Import from rekordbox xml",
+            Dialog::MySettings(_) => "My Settings",
         };
         egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             match dialog {
@@ -677,6 +686,10 @@ impl App {
                     ui.label(format!("Remove {} track(s) from the collection? Audio files stay on disk.", ids.len()));
                 }
                 Dialog::Smart(editor) => editor.show(ui, &self.library.my_tags),
+                Dialog::MySettings(dialog) => {
+                    ui.label(format!("Settings stored on {}", dialog.name));
+                    dialog.show(ui);
+                }
                 Dialog::XmlExport { path } | Dialog::XmlOpen { path } => {
                     ui.label("File:");
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -735,6 +748,19 @@ impl App {
                     return;
                 }
                 Some(Dialog::ConfirmXmlImport { import, .. }) => Command::ImportXml { import: *import },
+                Some(Dialog::MySettings(dialog)) => {
+                    if dialog.read_only.is_some() || dialog.settings.changes().is_empty() {
+                        return;
+                    }
+                    match dialog.save() {
+                        Ok(n) => self.edit_status = Some(format!("My Settings: wrote {n} file(s) to {}", dialog.name)),
+                        Err(e) => {
+                            self.edit_status = Some(format!("My Settings not saved: {e}"));
+                            self.dialog = Some(Dialog::MySettings(dialog));
+                        }
+                    }
+                    return;
+                }
                 None => return,
             };
             self.run(command);

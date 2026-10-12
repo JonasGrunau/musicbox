@@ -9,7 +9,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | M3 | export done; **CDJ check pending** (studio) | 1faf385 |
 | M4 | done: deletes (both DBs + files + sync files), old-stick conversion, `playlists3*.sync`, foreign My Tags kept, row paths stay taken, ≥ 4 GiB on FAT32 planned as failed copy; export onto a reference-stick clone keeps every row and file | 5abe8e9, 22d7451, d846f4a, eb85e3d, 1729250 |
 | M5 | built from the binary (no trace has a cue write): cue/grid ops with undo, deck UI; device cues built from `djmdCue` (410/410 reference-stick cue sets byte-exact). **rekordbox check pending** (`m5_check`) | 0d0d509, b3e4840 |
-| M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact except 7 AAC tracks (1 ulp); Normal-mode beat grid: BPM 161/161, grids identical 140/161, the other 21 moved by the phrase pass (not ported) | 617fc5f, 8def9c4 |
+| M6 | waveforms 8/8 tags byte-exact on 169/169 (oracle-b); auto-gain bit-exact 169/169 (AAC fixed: the decode depended on the stack alignment at `AudioConverterFillComplexBuffer`, `decode.md` § 6); Normal-mode beat grid: BPM 161/161, grids identical 140/161, the other 21 moved by the phrase pass (not ported) | 617fc5f, 8def9c4 |
 | M7 | smart lists (rules, editor, XML, USB export); import from device (tracks, playlists, histories); app bundle (`tools/bundle/bundle.sh`); key display follows `ShowOriginalKey`/`KeyStringSetting`. rekordbox.xml export (byte-exact vs oracle-a) and import. **rekordbox checks pending** (`m7_check`, device import, XML) | 0d0d509, 88593cc, d0babf3, e93d3a4, 3997b37, 53af01b, 35c036c |
 
 **M7 rekordbox.xml (done and committed in 35c036c; user check pending):**
@@ -33,11 +33,13 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 4. Mac: device import from RBTEST (musicbox "Import to Collection" on `oracle-small`, "Import Histories" after the CDJ wrote histories), then rekordbox shows the tracks with waveforms/cues and the histories; a rekordbox export of `oracle-small` to RBTEST copies nothing again.
 5. Mac: XML. musicbox "Export Collection in xml format…" → rekordbox imports a playlist from it (metadata, grid, cues). Then musicbox "Open rekordbox xml…" on a rekordbox-written XML → "Import to Collection" → rekordbox shows the list, grids at once, cue colours right.
 
+**M4 My Settings editor (done, not committed by the worker; CDJ check pending):** `docs/re/mysetting.md` maps every MYSETTING/MYSETTING2/DJMMYSETTING/DEVSETTING setting (label, byte, values, menu order, unset default; DJM paired settings 3/13, 7/15, 16/17) from the binary; consistent with the reference stick (CDJ-3000-written MYSETTING2/DEVSETTING), the oracle stick and the local files. `mb_usb::mysettings` reads/edits/writes them (only the edited bytes change, player headers and unnamed bytes kept, CRC recomputed, unreadable files left alone, reference stick and running rekordbox refused). App: device header context menu **My Settings…** (PLAYER / MIXER / DJ SYSTEM combos; protected devices read-only). Tests: `cargo test -p mb-usb --lib mysettings`, `cargo test -p mb-usb --test mysettings`, `cargo test -p musicbox --test ui_mysettings`.
+- CDJ check (studio, with RBTEST): in musicbox right-click RBTEST → My Settings… → set LANGUAGE German, JOG DISPLAY MODE ARTWORK, TEMPO RANGE WIDE, DJ SYSTEM Waveform color 3Band → OK; plug RBTEST into the CDJ-3000 and load the stick's My Settings (rekordbox-style "My Settings" load on the player): the menus show German, the jog display shows artwork, tempo range WIDE, waveforms in 3Band.
+
 **Open, not assigned**
 - Export log language: rekordbox writes it in the UI language (`language` preference; only the German column titles are known, from the oracle log). The app uses English.
-- AAC: our AudioToolbox decode differs from rekordbox's by a few samples on some tracks (caps AAC parity of every analysis).
+- ~~AAC decode parity~~ done (not committed by the worker): Apple's AAC decoder gives ±1 in a few samples when `AudioConverterFillComplexBuffer` is entered at SP ≡ 48 (mod 64). `mb-audio` now enters it through a trampoline at a fixed alignment matching rekordbox. Auto-gain 169/169 and all waveform tags 19/19 AAC, both oracles, stable under concurrent runs. Test: `cargo test -p mb-audio --test aac_stack`.
 - M6 after Normal-mode beats: phrase (`SongStructureAnalyze`, also moves 21/161 oracle-a grids, `analysis-beats.md` § 8), key (`KeyJudge2`), vocal (TF), Dynamic and high-precision beats (TF + downbeat HMM), auto-cue/embeddings (ORT); an analysis queue in the app.
-- MySetting editor (M4 plan item).
 
 **Housekeeping:** the disk is tight (≈ 20 GB free after deleting `target/debug`). Workers share one target dir; testing a staged snapshot in a scratch copy doubles the build artifacts, so prefer testing in the repo when the tree is coherent.
 

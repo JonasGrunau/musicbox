@@ -21,6 +21,7 @@ pub mod cues;
 pub mod device;
 pub mod exec;
 pub mod log;
+pub mod mysettings;
 pub mod naming;
 pub mod plan;
 pub mod remove;
