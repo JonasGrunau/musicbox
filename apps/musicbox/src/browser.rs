@@ -277,6 +277,10 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                     } else if let LibraryRef::Device(device) = source.library {
                         let tracks: Vec<_> = state.selection.iter().map(|&i| library.tracks[i].path.clone()).collect();
                         ui.weak(format!("{} track(s)", tracks.len()));
+                        if ui.button("Import to Collection").clicked() {
+                            actions.push(Action::ImportFromDevice { device, playlist: None, tracks: tracks.clone() });
+                            ui.close();
+                        }
                         if ui.button("Remove from device…").clicked() {
                             actions.push(Action::AskRemoveFromDevice { device, playlists: Vec::new(), tracks });
                             ui.close();

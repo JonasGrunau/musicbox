@@ -18,6 +18,7 @@ Read `common.md` first: it defines the placeholders (`<U>`, `<TS>`, `<CID>`, …
 | [analyse-track.md](analyse-track.md) | request, start, completion of analysis | verified (Normal mode, all options on) | `djmdContent` field by field, `djmdMixerParam`, `djmdKey`; agent `contentFile` | 18 per track on the first pass (+1 with artwork, +1 per new/orphaned key; agent +3, +1 with artwork), 18 per re-analysis |
 | [edit-cues.md](edit-cues.md) | add, delete, edit memory/hot cues and loops | **binary-derived** (no trace, no fixture cues) | `djmdCue` (no USN), `contentCue` JSON, `CueUpdated` | 2 per add without options, 3 with; 2 per delete or edit |
 | [edit-grid.md](edit-grid.md) | beat-grid edits (shift, downbeat, BPM, ×2, ÷2) | **binary-derived** | local `.DAT` PQTZ / `.EXT` PQT2, `BPM`, `TrackInfoUpdated`, `AnalysisUpdated` | 1, or 3 when the BPM changes |
+| [import-device.md](import-device.md) | import tracks / a playlist / player histories from a device | **binary-derived**; device→local ANLZ verified (133/133 pairs) | `djmdContent` (import-track insert from the device row), local ANLZ set, `djmdCue`, artwork; `djmdHistory` / `djmdSongHistory`, `DJPlayCount`; on the stick: master IDs, `ImportedHistory.xml` | not traced |
 | [settings.md](settings.md) | analysis settings change | verified | none | 0 |
 | [export-xml.md](export-xml.md) | rekordbox.xml export | verified | none | 0 |
 | [export-usb.md](export-usb.md) | USB export, master.db side | verified | none | 0 |

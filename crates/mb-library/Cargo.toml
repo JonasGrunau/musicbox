@@ -9,8 +9,12 @@ publish.workspace = true
 mb-core.workspace = true
 mb-masterdb = { path = "../mb-masterdb" }
 mb-anlz = { path = "../mb-anlz" }
+mb-pdb = { path = "../mb-pdb" }
+mb-usb = { path = "../mb-usb" }
+sha2 = "0.10"
 thiserror.workspace = true
 lofty = "0.25"
 
 [dev-dependencies]
 anyhow.workspace = true
+mb-devlib = { path = "../mb-devlib" }

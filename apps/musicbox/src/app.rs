@@ -74,6 +74,10 @@ pub struct App {
     deck_edit: cue_panel::State,
     /// Local track to select again once a reloaded snapshot is shown (edits keep the deck).
     reselect: Option<DbId>,
+    /// Device of the running "Import to Collection" / "Import Histories" (root, may write).
+    device_import: Option<(PathBuf, bool)>,
+    /// What the stick-side part of the last device import did (joined into the status line).
+    device_import_note: Option<String>,
 }
 
 static EMPTY: std::sync::LazyLock<LibrarySnapshot> = std::sync::LazyLock::new(LibrarySnapshot::default);
@@ -91,6 +95,8 @@ impl App {
             export_source: None,
             export: None,
             remove: None,
+            device_import: None,
+            device_import_note: None,
             editor: None,
             dialog: None,
             edit_status: None,
@@ -338,8 +344,29 @@ impl App {
                     return;
                 }
                 Reply::Done { message, changed } => {
-                    self.edit_status = Some(message);
+                    let note = self.device_import_note.take();
+                    self.edit_status = Some(match note {
+                        Some(n) => format!("{message}; {n}"),
+                        None => message,
+                    });
                     reload |= changed;
+                }
+                Reply::DeviceEffect(effect) => {
+                    if let Some((root, writable)) = self.device_import.take() {
+                        self.device_import_note = Some(if !writable {
+                            "device is protected, nothing written to it".into()
+                        } else {
+                            match crate::device_import::apply_to_device(&root, &effect) {
+                                Ok(Some(n)) => {
+                                    self.devices.reload(ctx, &root);
+                                    n
+                                }
+                                Ok(None) => String::new(),
+                                Err(e) => format!("device not updated: {e}"),
+                            }
+                        })
+                        .filter(|n| !n.is_empty());
+                    }
                 }
             }
         }
@@ -375,6 +402,8 @@ impl App {
                 Action::AskRemoveFromCollection(ids) => self.dialog = Some(Dialog::ConfirmRemove { ids }),
                 Action::Export { playlist, device } => self.start_export(playlist, device),
                 Action::AskRemoveFromDevice { device, playlists, tracks } => self.ask_remove_from_device(device, playlists, tracks),
+                Action::ImportFromDevice { device, playlist, tracks } => self.import_from_device(device, playlist, tracks),
+                Action::ImportHistories { device } => self.import_histories(device),
                 Action::CancelExport => {
                     if let Some(job) = &self.export {
                         job.cancel();
@@ -414,6 +443,40 @@ impl App {
             return;
         }
         self.dialog = Some(Dialog::ConfirmDeviceRemove { device, playlists, tracks, orphans: true });
+    }
+
+    fn import_from_device(&mut self, device: usize, playlist: Option<Vec<String>>, tracks: Vec<PathBuf>) {
+        let Some(target) = self.devices.list.get(device) else { return };
+        if !self.editing() {
+            self.edit_status = Some("Turn on editing first".into());
+            return;
+        }
+        let Some(copy_to) = self.args.import_folder.clone().or_else(mb_library::device_import::default_copy_folder) else {
+            return;
+        };
+        match crate::device_import::import_command(&target.root, playlist.as_deref(), &tracks, copy_to) {
+            Ok(command) => {
+                self.device_import = Some((target.root.clone(), target.write_refusal.is_none()));
+                self.edit_status = Some(format!("Importing from {}…", target.name));
+                self.run(command);
+            }
+            Err(e) => self.edit_status = Some(format!("Import failed: {e}")),
+        }
+    }
+
+    fn import_histories(&mut self, device: usize) {
+        let Some(target) = self.devices.list.get(device) else { return };
+        if !self.editing() {
+            self.edit_status = Some("Turn on editing first".into());
+            return;
+        }
+        match crate::device_import::histories_command(&target.root) {
+            Ok(command) => {
+                self.device_import = Some((target.root.clone(), target.write_refusal.is_none()));
+                self.run(command);
+            }
+            Err(e) => self.edit_status = Some(format!("History import: {e}")),
+        }
     }
 
     fn start_remove(&mut self, device: usize, playlists: Vec<Vec<String>>, tracks: Vec<String>, orphans: bool) {

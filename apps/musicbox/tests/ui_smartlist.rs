@@ -24,12 +24,12 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-fn temp_library() -> Option<(PathBuf, PathBuf, PathBuf, PathBuf)> {
+fn temp_library(tag: &str) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf)> {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/oracle-a");
     if !fixture.exists() {
         return None;
     }
-    let root = std::env::temp_dir().join(format!("mb-ui-smart-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("mb-ui-smart-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     copy_dir(&fixture.join("rekordbox"), &root.join("rekordbox"));
     std::fs::copy(fixture.join("options.json"), root.join("options.json")).unwrap();
@@ -117,7 +117,7 @@ fn type_into(h: &mut Harness<'_, App>, index: usize, text: &str) {
 
 #[test]
 fn create_edit_undo_smart_list() {
-    let Some((options, db, share, root)) = temp_library() else {
+    let Some((options, db, share, root)) = temp_library("edit") else {
         eprintln!("no fixtures, skipping");
         return;
     };
@@ -193,5 +193,64 @@ fn create_edit_undo_smart_list() {
     wait(&mut h, "undo applied", |h| h.state().browser.visible_count() == all);
     assert_eq!(smart_row(&db, &options, "kittest smart").unwrap().1, xml);
     shot(&mut h, "03-undone");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// "Export to ▸" on a smart list: its current tracks land on the device as a plain playlist.
+#[test]
+fn export_smart_list_to_device() {
+    let Some((options, db, share, root)) = temp_library("export") else {
+        eprintln!("no fixtures, skipping");
+        return;
+    };
+    // Two small WAV probes: Title is chords_Eb or chords_C.
+    let paths = mb_masterdb::LibraryPaths::from_options_json(&options).unwrap();
+    let pass = mb_masterdb::derive_passphrase(&paths.dp).unwrap();
+    {
+        use mb_core::smartlist::{Condition, op};
+        let mut lib = mb_library::Library::open_unguarded(&db, &pass).unwrap();
+        lib.execute(mb_library::Command::CreateSmartList {
+            parent: None,
+            name: "mb chords".into(),
+            logical_operator: MATCH_ANY,
+            conditions: vec![Condition::new("name", op::IS, "", "chords_Eb", ""), Condition::new("name", op::IS, "", "chords_C", "")],
+        })
+        .unwrap();
+    }
+    let stick = root.join("MBSTICK");
+    std::fs::create_dir_all(&stick).unwrap();
+    let args = Args {
+        options: Some(options.clone()),
+        db: Some(db.clone()),
+        analysis_root: Some(share),
+        devices: vec![stick.clone()],
+        backup_root: Some(root.join("backups")),
+        no_volume_scan: true,
+        ..Default::default()
+    };
+    let mut h = Harness::builder().with_size(Vec2::new(1280.0, 832.0)).build_eframe(|cc| {
+        musicbox::install(&cc.egui_ctx);
+        App::new(cc.egui_ctx.clone(), args)
+    });
+    wait(&mut h, "library + device", |h| h.query_by_label("mb chords").is_some() && h.query_by_label("MBSTICK").is_some());
+    h.get_by_label("mb chords").click_secondary();
+    h.run_steps(3);
+    h.get_by_label_contains("Export to").click();
+    h.run_steps(3);
+    h.get_all_by_label("MBSTICK").last().unwrap().click();
+    wait(&mut h, "export finished", |h| h.query_by_label_contains("to MBSTICK").is_some() && h.query_by_label_contains("Exporting").is_none());
+    shot(&mut h, "04-exported");
+    assert!(h.query_by_label_contains("Exported 2 track(s) to MBSTICK").is_some(), "status shows the export summary");
+
+    let pdb = mb_pdb::DeviceLibrary::open(&stick.join("PIONEER/rekordbox")).unwrap().snapshot();
+    let list = pdb.playlists.iter().find(|p| p.name == "mb chords").expect("device list");
+    assert_eq!(list.kind, mb_core::PlaylistKind::Playlist);
+    let titles: Vec<String> = pdb.playlist_entries[&list.id]
+        .iter()
+        .map(|id| pdb.tracks.iter().find(|t| &t.id == id).unwrap().title.clone())
+        .collect();
+    let mut sorted = titles.clone();
+    sorted.sort();
+    assert_eq!(sorted, ["chords_C", "chords_Eb"]);
     let _ = std::fs::remove_dir_all(&root);
 }

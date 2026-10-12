@@ -17,6 +17,8 @@ pub enum Reply {
     Failed(String),
     /// A command finished; `changed` means the snapshot must be reloaded.
     Done { message: String, changed: bool },
+    /// Sent before `Done` for imports from a device: the app applies the stick-side part.
+    DeviceEffect(mb_library::Effect),
 }
 
 pub struct Editor {
@@ -63,6 +65,11 @@ impl Editor {
                     Request::Undo => history.undo(&mut lib),
                     Request::Redo => history.redo(&mut lib),
                 };
+                if let Ok(Some(outcome)) = &result
+                    && matches!(outcome.effect, mb_library::Effect::ImportedFromDevice(_) | mb_library::Effect::HistoriesImported(_))
+                {
+                    send(Reply::DeviceEffect(outcome.effect.clone()));
+                }
                 send(match result {
                     Ok(Some(outcome)) => Reply::Done { message: describe(&outcome.effect), changed: true },
                     Ok(None) => Reply::Done { message: "Nothing to undo or redo".into(), changed: false },
@@ -85,7 +92,7 @@ impl Editor {
             match r {
                 Reply::Ready { .. } => self.ready = true,
                 Reply::Done { .. } => self.pending = self.pending.saturating_sub(1),
-                Reply::Failed(_) => {}
+                Reply::Failed(_) | Reply::DeviceEffect(_) => {}
             }
         }
         replies
@@ -103,6 +110,15 @@ pub fn describe(effect: &mb_library::Effect) -> String {
         Effect::PlaylistsRestored { ids } => format!("Restored {} list(s)", ids.len()),
         Effect::EntriesAdded { entry_ids } => format!("Added {} track(s) to the playlist", entry_ids.len()),
         Effect::CueAdded { .. } => "Cue added".into(),
+        Effect::ImportedFromDevice(r) => {
+            let new = r.results.iter().filter(|x| matches!(x.kind, mb_library::DeviceImportKind::Imported { .. })).count();
+            let mut s = format!("Imported {new} track(s) from the device ({} already in the collection)", r.results.len() - new);
+            if !r.skipped.is_empty() {
+                s += &format!(", skipped {}", r.skipped.len());
+            }
+            s
+        }
+        Effect::HistoriesImported(r) => format!("Imported {} history list(s), skipped {}", r.imported.len(), r.skipped.len()),
         Effect::Done => "Done".into(),
         Effect::Unchanged => "No change".into(),
     }

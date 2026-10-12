@@ -24,3 +24,4 @@ mb-pdb = { path = "../../crates/mb-pdb" }
 mb-usb = { path = "../../crates/mb-usb" }
 mb-player = { path = "../../crates/mb-player" }
 libc = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

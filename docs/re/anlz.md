@@ -337,6 +337,8 @@ Differences that matter for interoperable exports:
 | PVDI | plain, version bit 15 clear | body scrambled, version \|= 0x8000 | C |
 | PKEY | not written | written by the EXT export when segmented-key data exists | O |
 
+**Device → local** (import from a device, `ops/import-device.md` § 4): the `.DAT` and `.EXT` are rewritten with the local PPTH and every cue list emptied; PSSI stays scrambled and the `.2EX` is copied unchanged (device PPTH, scrambled PVDI). `mb_anlz::local::to_local`; verified byte-exact against oracle-a's local `.DAT` files (133/133), `.EXT` equal up to the scrambled PSSI.
+
 ### USB folder hash (`CreateAnlzFileFolderPath` @0x1007b2e18)
 1. Take the track's device path, the same string as USB PPTH (`DataSource` vfunc +0x28), as UTF-16 code units.
 2. `h = 0`. For each unit `c`: `h = h * 0x5bc9 + c`, then `h = h * 0x93b5 + c` (u32 wrapping).

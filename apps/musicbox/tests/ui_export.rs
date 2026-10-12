@@ -52,6 +52,7 @@ fn export_playlist_to_empty_device() {
         devices: vec![stick.clone()],
         backup_root: Some(root.join("backups")),
         no_volume_scan: true,
+        import_folder: None,
     };
     let mut h = Harness::builder().with_size(Vec2::new(1280.0, 832.0)).build_eframe(|cc| {
         musicbox::install(&cc.egui_ctx);

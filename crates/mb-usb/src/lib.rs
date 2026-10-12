@@ -26,6 +26,7 @@ pub mod plan;
 pub mod remove;
 pub mod settings;
 pub mod source;
+pub mod stamp;
 pub mod syncfile;
 
 pub use device::DeviceState;

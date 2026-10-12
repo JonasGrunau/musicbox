@@ -19,7 +19,7 @@ pub fn show(
     let targets: Vec<(usize, String, Option<String>)> =
         devices.list.iter().enumerate().map(|(i, d)| (i, d.name.clone(), d.write_refusal.clone())).collect();
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        let mut ctx = Ctx { targets: &targets, library_ref: LibraryRef::Local, library, source, editing, device: None, actions: &mut actions };
+        let mut ctx = Ctx { targets: &targets, library_ref: LibraryRef::Local, library, source, editing, device: None, import_from: None, actions: &mut actions };
         library_lists(ui, "Collection", &mut ctx);
         if !devices.list.is_empty() {
             ui.add_space(8.0);
@@ -45,6 +45,7 @@ pub fn show(
                             source: &mut *source,
                             editing: false,
                             device: device.write_refusal.is_none().then_some(i),
+                            import_from: Some(i),
                             actions: &mut actions,
                         };
                         library_lists(ui, "All Tracks", &mut ctx);
@@ -66,6 +67,9 @@ struct Ctx<'a> {
     /// Index of the device these lists belong to, when musicbox may write to it ("Remove from
     /// device").
     device: Option<usize>,
+    /// Index of the device these lists belong to ("Import to Collection" / "Import Histories";
+    /// reading only, so protected devices too).
+    import_from: Option<usize>,
     actions: &'a mut Vec<Action>,
 }
 
@@ -119,6 +123,13 @@ fn library_lists(ui: &mut egui::Ui, label: &str, ctx: &mut Ctx) {
             .show(ui, |ui| children(ui, section, None, ctx));
         if editable {
             header.header_response.context_menu(|ui| create_menu(ui, None, ctx.actions));
+        } else if let Some(device) = ctx.import_from.filter(|_| section == Section::Histories) {
+            header.header_response.context_menu(|ui| {
+                if ui.button("Import Histories").clicked() {
+                    ctx.actions.push(Action::ImportHistories { device });
+                    ui.close();
+                }
+            });
         }
     }
 }
@@ -166,8 +177,15 @@ fn name_path(nodes: &[PlaylistNode], node: &PlaylistNode) -> Vec<String> {
     path
 }
 
-fn remove_menu(ui: &mut egui::Ui, device: usize, path: Vec<String>, actions: &mut Vec<Action>) {
-    if ui.button("Remove from device…").clicked() {
+/// Device list menu: import (playlists only) and, on writable devices, remove.
+fn device_menu(ui: &mut egui::Ui, import_from: usize, writable: Option<usize>, path: Vec<String>, is_list: bool, actions: &mut Vec<Action>) {
+    if is_list && ui.button("Import to Collection").clicked() {
+        actions.push(Action::ImportFromDevice { device: import_from, playlist: Some(path.clone()), tracks: Vec::new() });
+        ui.close();
+    }
+    if let Some(device) = writable
+        && ui.button("Remove from device…").clicked()
+    {
         actions.push(Action::AskRemoveFromDevice { device, playlists: vec![path], tracks: Vec::new() });
         ui.close();
     }
@@ -191,7 +209,8 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mu
                     header.header_response.context_menu(|ui| node_menu(ui, node, ctx.actions));
                 } else if let Some(device) = ctx.device.filter(|_| section == Section::Playlists) {
                     let path = name_path(section.nodes(ctx.library), node);
-                    header.header_response.context_menu(|ui| remove_menu(ui, device, path, ctx.actions));
+                    let import_from = ctx.import_from.unwrap_or(device);
+                    header.header_response.context_menu(|ui| device_menu(ui, import_from, Some(device), path, false, ctx.actions));
                 }
             }
             PlaylistKind::Playlist | PlaylistKind::Smart => {
@@ -200,7 +219,8 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mu
                 if response.clicked() {
                     *ctx.source = this;
                 }
-                let exportable = ctx.library_ref == LibraryRef::Local && section == Section::Playlists && node.kind == PlaylistKind::Playlist;
+                // Smart lists export their current tracks as a plain device playlist.
+                let exportable = ctx.library_ref == LibraryRef::Local && section == Section::Playlists;
                 if exportable {
                     let targets = ctx.targets;
                     response.context_menu(|ui| {
@@ -222,21 +242,17 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mu
                         });
                         if editable {
                             ui.separator();
+                            if node.kind == PlaylistKind::Smart && ui.button("Edit Intelligent Playlist…").clicked() {
+                                ctx.actions.push(Action::AskSmartList { parent: None, id: Some(node.id.clone()) });
+                                ui.close();
+                            }
                             node_menu(ui, node, ctx.actions);
                         }
                     });
-                } else if editable && node.kind == PlaylistKind::Smart {
-                    response.context_menu(|ui| {
-                        if ui.button("Edit Intelligent Playlist…").clicked() {
-                            ctx.actions.push(Action::AskSmartList { parent: None, id: Some(node.id.clone()) });
-                            ui.close();
-                        }
-                        ui.separator();
-                        node_menu(ui, node, ctx.actions);
-                    });
-                } else if let Some(device) = ctx.device.filter(|_| section == Section::Playlists) {
+                } else if let Some(import_from) = ctx.import_from.filter(|_| section == Section::Playlists) {
                     let path = name_path(section.nodes(ctx.library), node);
-                    response.context_menu(|ui| remove_menu(ui, device, path, ctx.actions));
+                    let writable = ctx.device;
+                    response.context_menu(|ui| device_menu(ui, import_from, writable, path, true, ctx.actions));
                 }
                 if editable && node.kind == PlaylistKind::Playlist {
                     if response.dnd_hover_payload::<TrackDrag>().is_some() {

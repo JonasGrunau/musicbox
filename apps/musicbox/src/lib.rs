@@ -4,6 +4,7 @@ pub mod actions;
 pub mod app;
 pub mod browser;
 pub mod cue_panel;
+pub mod device_import;
 pub mod device_remove;
 pub mod devices;
 pub mod editor;
@@ -33,6 +34,8 @@ pub struct Args {
     pub backup_root: Option<PathBuf>,
     /// Don't list mounted volumes as devices (tests).
     pub no_volume_scan: bool,
+    /// Where "Import to Collection" copies audio (default `~/Music/PioneerDJ/Imported from Device`).
+    pub import_folder: Option<PathBuf>,
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Args> {
@@ -47,6 +50,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<Args
             "--device" => out.devices.push(value()?),
             "--backup-root" => out.backup_root = Some(value()?),
             "--no-volume-scan" => out.no_volume_scan = true,
+            "--import-folder" => out.import_folder = Some(value()?),
             other => anyhow::bail!("unknown argument {other}"),
         }
     }

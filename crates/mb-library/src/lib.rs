@@ -15,10 +15,14 @@
 //! | [`xml_sync`] | `masterPlaylists6.xml` after playlist changes | `playlist-create.md` §5 | traced format, hypothesis for folders |
 //! | [`cues`] | add, delete, edit memory/hot cues and loops | `edit-cues.md` | binary-derived (no trace) |
 //! | [`grid`] | replace a beat grid (shift, downbeat, tempo, ×2, ÷2) | `edit-grid.md` | binary-derived (no trace) |
+//! | [`device_import`] | import tracks / a playlist from a device | `import-device.md` | binary-derived (no trace) |
+//! | [`device_history`] | import player histories from a device | `import-device.md` § Histories | binary-derived (no trace) |
 //!
 //! [`WriteTxn`]: mb_masterdb::WriteTxn
 
 pub mod cues;
+pub mod device_history;
+pub mod device_import;
 pub mod edit;
 pub mod grid;
 pub mod import;
@@ -29,6 +33,8 @@ pub mod tags;
 pub mod xml_sync;
 
 pub use cues::{Cue, CueEdit, CueSlot, NewCue};
+pub use device_history::{DeviceHistory, HistoryImportReport, ImportedHistory, LocalTime};
+pub use device_import::{DeviceImport, DeviceImportKind, DeviceImportReport, DeviceImportResult, DeviceTrack};
 pub use edit::TrackEdit;
 pub use mb_anlz::tags::Beat;
 pub use import::{ImportReport, SkipReason};
@@ -109,6 +115,14 @@ pub enum Command {
     EditCue { id: String, edit: CueEdit },
     /// Replace a track's beat grid (`edit-grid.md`); build `beats` with the [`grid`] functions.
     SetBeatGrid { content: DbId, beats: Vec<Beat> },
+    /// Import tracks (and optionally a playlist of them) from a device (`import-device.md`).
+    ImportFromDevice { import: DeviceImport },
+    /// Inverse of [`Command::ImportFromDevice`]: the playlist, the new rows, the created files.
+    UndoDeviceImport { ids: Vec<DbId>, playlist: Option<DbId>, files: Vec<PathBuf> },
+    /// Import device histories not yet listed in `already` (`import-device.md` § Histories).
+    ImportHistories { histories: Vec<DeviceHistory>, already: ImportedHistory, now: LocalTime },
+    /// Inverse of [`Command::ImportHistories`].
+    UndoHistoryImport { histories: Vec<DbId>, play_counts: Vec<(DbId, i64)> },
     /// Put the previous grid sections and BPM back (inverse of [`Command::SetBeatGrid`]).
     RestoreBeatGrid { content: DbId, pqtz: mb_anlz::Section, pqt2: Option<mb_anlz::Section>, bpm_x100: Option<i64> },
 }
@@ -123,6 +137,8 @@ pub enum Effect {
     PlaylistsRestored { ids: Vec<DbId> },
     /// New `djmdSongPlaylist.ID`s of added or restored entries.
     EntriesAdded { entry_ids: Vec<String> },
+    ImportedFromDevice(DeviceImportReport),
+    HistoriesImported(HistoryImportReport),
     /// `djmdCue.ID` of an added or restored cue.
     CueAdded { id: String },
     Done,
@@ -226,6 +242,10 @@ impl Library {
             Command::RestoreCue { row } => cues::restore_cue(self, &row)?,
             Command::EditCue { id, edit } => cues::edit_cue(self, &id, &edit)?,
             Command::SetBeatGrid { content, beats } => grid::set_beat_grid(self, &content, &beats)?,
+            Command::ImportFromDevice { import } => device_import::import(self, &import)?,
+            Command::UndoDeviceImport { ids, playlist, files } => device_import::undo(self, &ids, playlist.as_ref(), &files)?,
+            Command::ImportHistories { histories, already, now } => device_history::import(self, &histories, &already, &now)?,
+            Command::UndoHistoryImport { histories, play_counts } => device_history::undo(self, &histories, &play_counts)?,
             Command::RestoreBeatGrid { content, pqtz, pqt2, bpm_x100 } => {
                 grid::restore_beat_grid(self, &content, &pqtz, pqt2.as_ref(), bpm_x100)?
             }

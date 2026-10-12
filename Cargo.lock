@@ -2343,7 +2343,11 @@ dependencies = [
  "lofty",
  "mb-anlz",
  "mb-core",
+ "mb-devlib",
  "mb-masterdb",
+ "mb-pdb",
+ "mb-usb",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -2495,6 +2499,7 @@ name = "musicbox"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "eframe",
  "egui",
  "egui_extras",

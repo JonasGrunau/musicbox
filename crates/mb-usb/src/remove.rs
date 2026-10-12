@@ -425,7 +425,7 @@ fn volume_uuid(root: &Path) -> Option<String> {
 }
 
 /// Refuses the reference stick (callers also check the user's protected-volume list).
-fn refuse_reference_stick(root: &Path) -> Result<()> {
+pub(crate) fn refuse_reference_stick(root: &Path) -> Result<()> {
     if root.starts_with("/Volumes") && volume_uuid(root).as_deref() == Some(REFERENCE_STICK_UUID) {
         return Err(Error::Device(format!(
             "{} is the reference stick; musicbox never writes to it",
@@ -458,13 +458,13 @@ fn delete_file(path: &Path) -> Result<bool> {
     }
 }
 
-fn full_fsync(path: &Path) -> Result<()> {
+pub(crate) fn full_fsync(path: &Path) -> Result<()> {
     std::fs::File::open(path)
         .and_then(|f| f.sync_all())
         .map_err(|e| Error::io(path, e))
 }
 
-fn check_unchanged(path: &Path, expected: &[u8]) -> Result<()> {
+pub(crate) fn check_unchanged(path: &Path, expected: &[u8]) -> Result<()> {
     let now = std::fs::read(path).map_err(|e| Error::io(path, e))?;
     if now != expected {
         return Err(Error::Device(format!(

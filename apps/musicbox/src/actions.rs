@@ -23,4 +23,9 @@ pub enum Action {
     /// Confirm, then remove lists (name paths from the top level) and/or tracks (absolute
     /// paths) from the device at this index of `Devices::list`.
     AskRemoveFromDevice { device: usize, playlists: Vec<Vec<String>>, tracks: Vec<std::path::PathBuf> },
+    /// Import a device list (name path from the top level, as a playlist) or single tracks
+    /// (absolute paths on the device) into the collection.
+    ImportFromDevice { device: usize, playlist: Option<Vec<String>>, tracks: Vec<std::path::PathBuf> },
+    /// Import the device's player histories.
+    ImportHistories { device: usize },
 }

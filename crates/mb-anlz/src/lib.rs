@@ -4,6 +4,7 @@
 //! `parse` → `to_bytes` reproduces the input exactly. Typed tag views ([`tags`]) are layered on top
 //! and are lossless as well. [`usb`] has the USB folder hash and the PSSI/PVDI scrambles.
 
+pub mod local;
 pub mod tags;
 pub mod usb;
 
