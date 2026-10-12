@@ -779,7 +779,7 @@ This is a **local** file-name table (master dir: `datafile.edb`, `ExtData.edb`, 
 - [ ] The source field compared at +0x210 vs device +0x230 in `overwrite_export` (key name?).
 - [ ] Whether the classic DB really allocates max + 1 inside `DevAddContent_` (fixture-consistent, but the procedure body is DeviceSQL bytecode).
 - [ ] DJMMYSETTING field map and the unnamed MYSETTING/DEVSETTING bytes. (The DEVSETTING version string is `7.2.19`, verified on the oracle stick.)
-- [ ] No FAT32 4 GiB file-size check was found in the export path. What happens with a larger file?
+- [ ] No FAT32 4 GiB file-size check was found in the export path. What happens with a larger file? (musicbox plans such a file on an `msdos` volume as a failed copy, code 8 / log `[3]`, and goes on with the next track; that rekordbox's own copy fails the same way is a *hypothesis*.)
 - [ ] Whether merely opening or closing the DeviceSQL page manager rewrites the `.pdb` headers when nothing changed. This decides whether § 6.3's explanation of the 20:00 rewrite holds. Test with a before/after diff on a FAT32 image.
 - [ ] For a brand-new stick: does `createDeviceDB` → `needDbConversion` show the conversion dialog, or create the Plus DB silently?
 - [x] The full table list of `deviceSqliteDbConversion` and why the fixture's exportLibrary.db has 12 playlists against 30 live ones in export.pdb: all 22 tables (§ 6.4); the other 21 classic lists are player TAG LISTs and lists exported after the conversion, numbered separately in each DB.

@@ -844,6 +844,8 @@ struct Planner<'a> {
     /// My Tag export enabled for this device (controller +0x40, set by `syncMyTag`): the tree
     /// is written and new tracks get their My Tag links.
     my_tags: bool,
+    /// The device is FAT32 (`msdos`): files of 4 GiB or more cannot be stored.
+    fat32: bool,
 }
 
 /// Plans exporting `selection` from `src` to the device described by `dev`.
@@ -1078,6 +1080,7 @@ impl<'a> Planner<'a> {
             artwork: dev.artwork.clone(),
             lookups: Lookups::default(),
             pdb_first_list_done: pdb_has_lists,
+            fat32: dev.filesystem.as_deref() == Some("msdos"),
             my_tags: {
                 let owner = dev.my_tag_master_db_id();
                 owner == 0 || owner == src.my_tag_master_db_id || opts.overwrite_foreign_my_tags
@@ -1678,6 +1681,13 @@ impl<'a> Planner<'a> {
             Some(x) => x,
             None => {
                 let audio = t.audio.as_ref().expect("gate checked the audio");
+                // FAT32 stores at most 4 GiB − 1 bytes per file. rekordbox has no check for it
+                // (export.md § Open questions), so its copy fails with code 8 / log `[3]`; the
+                // same result is planned here so the export goes on with the next track.
+                if self.fat32 && audio.size > u64::from(u32::MAX) {
+                    step.result = TrackResult::CopyFailed;
+                    return Ok(step);
+                }
                 let path = self.device_path(&t);
                 let (anlz, stale) = self.anlz_path(&path);
                 step.files.push(FileOp::CopyAudio {
@@ -2123,5 +2133,24 @@ mod tests {
         assert!(!format_supported(12, 192_000));
         assert!(!format_supported(0x40, 44_100));
         assert!(format_supported(1, 22_050));
+    }
+
+    #[test]
+    fn files_over_4_gib_fail_on_fat32_only() {
+        let mut big = track("1", "a", "b", "big.wav");
+        big.audio.as_mut().unwrap().size = 1 << 32;
+        let small = track("2", "a", "b", "small.mp3");
+        let lib = library(vec![big, small], &[("10", "l", &["1", "2"])]);
+        let sel = [SelectionItem::Playlist("10".into())];
+        let mut dev = DeviceState::empty(std::path::Path::new("/dev"));
+        dev.filesystem = Some("msdos".into());
+        let plan = plan_export(&lib, &dev, &sel, &PlanOptions::default()).unwrap();
+        let steps: Vec<_> = plan.steps().collect();
+        assert_eq!(steps[0].result, TrackResult::CopyFailed);
+        assert!(steps[0].files.is_empty() && steps[0].pdb.is_empty());
+        assert_eq!(steps[1].result, TrackResult::Exported);
+        dev.filesystem = Some("exfat".into());
+        let plan = plan_export(&lib, &dev, &sel, &PlanOptions::default()).unwrap();
+        assert!(plan.steps().all(|s| s.result == TrackResult::Exported));
     }
 }
