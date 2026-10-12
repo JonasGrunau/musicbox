@@ -7,8 +7,26 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyNotation {
+    /// The stored name as is (rekordbox's default: preference `ShowOriginalKey` on).
+    Original,
     Classic,
     Alphanumeric,
+}
+
+impl KeyNotation {
+    /// The notation rekordbox displays for the preferences `ShowOriginalKey` (default on) and
+    /// `KeyStringSetting` (default 1), as `MusicKey::getKeyNotationSetting` @0x1003662f4 decides:
+    /// original names when `ShowOriginalKey` is on, else 2 = alphanumeric
+    /// (`isKeyDisplaySettingAlphanumeric` @0x1003663ac) and anything else classic.
+    pub fn from_preferences(show_original_key: Option<bool>, key_string_setting: Option<i64>) -> Self {
+        if show_original_key.unwrap_or(true) {
+            KeyNotation::Original
+        } else if key_string_setting.unwrap_or(1) == 2 {
+            KeyNotation::Alphanumeric
+        } else {
+            KeyNotation::Classic
+        }
+    }
 }
 
 /// (classic, alphanumeric) for the 24 keys, minor then major per Camelot number.
@@ -61,6 +79,7 @@ pub fn display(stored: &str, notation: KeyNotation) -> String {
     let short = short_form(stored.trim());
     let name = canonical(&short);
     match notation {
+        KeyNotation::Original => stored.to_owned(),
         KeyNotation::Classic => name.to_owned(),
         KeyNotation::Alphanumeric => KEYS
             .iter()
@@ -79,6 +98,17 @@ pub fn wheel_index(stored: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notation_from_preferences() {
+        use KeyNotation::*;
+        assert_eq!(KeyNotation::from_preferences(None, None), Original);
+        assert_eq!(KeyNotation::from_preferences(Some(true), Some(2)), Original);
+        assert_eq!(KeyNotation::from_preferences(Some(false), Some(2)), Alphanumeric);
+        assert_eq!(KeyNotation::from_preferences(Some(false), Some(1)), Classic);
+        assert_eq!(KeyNotation::from_preferences(Some(false), None), Classic);
+        assert_eq!(display(" Am ", Original), " Am ");
+    }
 
     #[test]
     fn alphanumeric() {

@@ -70,7 +70,7 @@ impl Default for State {
             search: String::new(),
             sort: Col::Index,
             ascending: true,
-            key_notation: KeyNotation::Alphanumeric,
+            key_notation: KeyNotation::Original,
             rows: Vec::new(),
             built_for: None,
             selected: None,

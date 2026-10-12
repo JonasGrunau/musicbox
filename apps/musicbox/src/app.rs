@@ -135,6 +135,12 @@ impl App {
                         .map(|t| t.id.clone());
                     self.library = loaded.snapshot;
                     self.cues = loaded.cues;
+                    // Key column like rekordbox: preferences ShowOriginalKey / KeyStringSetting.
+                    let pref = |name| mb_usb::settings::preference(&loaded.settings_root, name);
+                    self.browser.key_notation = mb_core::key::KeyNotation::from_preferences(
+                        pref("ShowOriginalKey").map(|v| v.trim() != "0"),
+                        pref("KeyStringSetting").and_then(|v| v.trim().parse().ok()),
+                    );
                     self.export_source = Some(export::Source {
                         db_path: loaded.db_path.clone(),
                         passphrase: loaded.passphrase.clone(),
