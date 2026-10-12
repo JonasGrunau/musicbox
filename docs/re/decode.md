@@ -220,7 +220,7 @@ PVB2 is built only for FLAC, by `CBeatAnalyzeThread::createSeekTable` @0x10015b4
 2. libFLAC skips frame by frame. Every target that falls inside a frame gets `{frame first sample, byte offset from the first frame, frame block size}`.
 3. Duplicate points are then removed. The probes have 323–400 points.
 
-The PVB2 total equals the decoded length on all 23 FLACs.
+The PVB2 total equals the decoded length on all 23 FLACs. `mb_audio::flac_seek` builds the whole table from the frame headers (sync code, CRC-8, consecutive frame or sample numbers; no decoding): **byte-exact on 23/23** (`tests/oracle.rs` `pvb2_matches_rekordbox`, 2026-10-12).
 
 ## 8. Sample-rate converter
 

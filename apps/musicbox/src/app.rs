@@ -93,6 +93,13 @@ pub struct App {
     xml: Option<crate::xml_bridge::XmlLibrary>,
     xml_loading: Option<Receiver<Result<crate::xml_bridge::XmlLibrary, String>>>,
     xml_export: Option<crate::xml_bridge::XmlExportJob>,
+    /// musicbox's own analysis: the worker queue (started on first use), the preferences it runs
+    /// with, and the tracks already queued automatically this session.
+    analysis: Option<crate::analysis_jobs::AnalysisQueue>,
+    analysis_settings: mb_library::AnalysisSettings,
+    /// Preference `AutoAnalysis`: analyse tracks that have no analysis yet (after an import).
+    auto_analysis: bool,
+    auto_queued: std::collections::HashSet<DbId>,
 }
 
 static EMPTY: std::sync::LazyLock<LibrarySnapshot> = std::sync::LazyLock::new(LibrarySnapshot::default);
@@ -129,6 +136,10 @@ impl App {
             cues: HashMap::new(),
             deck_edit: cue_panel::State::default(),
             reselect: None,
+            analysis: None,
+            analysis_settings: mb_library::AnalysisSettings::default(),
+            auto_analysis: false,
+            auto_queued: std::collections::HashSet::new(),
         }
     }
 
@@ -160,6 +171,9 @@ impl App {
                         pref("ShowOriginalKey").map(|v| v.trim() != "0"),
                         pref("KeyStringSetting").and_then(|v| v.trim().parse().ok()),
                     );
+                    // Analysis preferences: `AutoGain` (default on), `AutoAnalysis`.
+                    self.analysis_settings = mb_library::AnalysisSettings { auto_gain: pref("AutoGain").is_none_or(|v| v.trim() != "0") };
+                    self.auto_analysis = pref("AutoAnalysis").is_some_and(|v| v.trim() == "1");
                     self.export_source = Some(export::Source {
                         db_path: loaded.db_path.clone(),
                         passphrase: loaded.passphrase.clone(),
@@ -173,6 +187,7 @@ impl App {
                     }
                     self.local_db = Some((loaded.db_path, loaded.passphrase));
                     self.browser.invalidate();
+                    self.queue_unanalysed();
                 }
                 Err(e) => self.error = Some(e),
             }
@@ -312,6 +327,14 @@ impl App {
             {
                 ui.colored_label(egui::Color32::from_rgb(0xFF, 0xB9, 0x37), e);
             }
+            if let Some(p) = self.analysis.as_ref().and_then(|q| q.progress()) {
+                ui.separator();
+                ui.spinner();
+                ui.label(format!("Analysing {}/{} {}", p.done, p.total, p.running.first().map(String::as_str).unwrap_or("")));
+                if ui.small_button("Cancel analysis").clicked() {
+                    self.apply(vec![Action::CancelAnalysis]);
+                }
+            }
             if let Some(job) = &self.export {
                 ui.separator();
                 ui.spinner();
@@ -389,7 +412,10 @@ impl App {
         let mut reload = false;
         for reply in editor.poll() {
             match reply {
-                Reply::Ready { backup } => self.edit_status = Some(format!("Editing on — backup in {}", backup.display())),
+                Reply::Ready { backup } => {
+                    self.edit_status = Some(format!("Editing on — backup in {}", backup.display()));
+                    self.queue_unanalysed();
+                }
                 Reply::Failed(e) => {
                     self.edit_status = Some(e);
                     self.editor = None;
@@ -463,6 +489,13 @@ impl App {
                     }
                 }
                 Action::ImportFromXml { list, tracks } => self.import_from_xml(list, tracks),
+                Action::AnalyzeTracks(ids) => self.analyze(&ids, true),
+                Action::CancelAnalysis => {
+                    if let Some(q) = &self.analysis {
+                        q.cancel();
+                    }
+                    self.edit_status = Some("Analysis cancelled".into());
+                }
                 Action::CancelExport => {
                     if let Some(job) = &self.export {
                         job.cancel();
@@ -628,6 +661,81 @@ impl App {
             });
             self.export = None;
             self.devices.reload(&self.ctx, &root);
+        }
+    }
+
+    /// Queues collection tracks for musicbox's analysis (`analyse-track.md`). Locked tracks
+    /// (`Analysed` bit 0x80) and missing files are skipped. `explicit`: the user asked (messages).
+    fn analyze(&mut self, ids: &[DbId], explicit: bool) {
+        if !self.editing() {
+            if explicit {
+                self.edit_status = Some("Turn on editing first".into());
+            }
+            return;
+        }
+        let jobs: Vec<crate::analysis_jobs::Job> = ids
+            .iter()
+            .filter_map(|id| self.library.tracks.iter().find(|t| t.id == *id))
+            .filter(|t| t.analysed & 0x80 == 0 && t.path.is_file())
+            .map(|t| crate::analysis_jobs::Job {
+                content: t.id.clone(),
+                audio: t.path.clone(),
+                file_name: if t.file_name.is_empty() {
+                    t.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                } else {
+                    t.file_name.clone()
+                },
+                title: t.title.clone(),
+            })
+            .collect();
+        if jobs.is_empty() {
+            if explicit {
+                self.edit_status = Some("Nothing to analyse (locked or missing files)".into());
+            }
+            return;
+        }
+        let settings = self.analysis_settings;
+        let ctx = self.ctx.clone();
+        let queue = self.analysis.get_or_insert_with(|| {
+            crate::analysis_jobs::AnalysisQueue::new(&ctx, settings, crate::analysis_jobs::AnalysisQueue::default_threads())
+        });
+        queue.enqueue(jobs);
+    }
+
+    /// With `AutoAnalysis` on: tracks without any analysis (just imported) are queued once.
+    fn queue_unanalysed(&mut self) {
+        if !self.auto_analysis || !self.editing() {
+            return;
+        }
+        let ids: Vec<DbId> = self
+            .library
+            .tracks
+            .iter()
+            .filter(|t| t.analysed == 0 && t.analysis_path.is_none() && !self.auto_queued.contains(&t.id))
+            .map(|t| t.id.clone())
+            .collect();
+        self.auto_queued.extend(ids.iter().cloned());
+        self.analyze(&ids, false);
+    }
+
+    /// Finished analyses go to the editor; the selected track jumps the queue.
+    fn poll_analysis(&mut self) {
+        let Some(queue) = &self.analysis else { return };
+        if !self.editing() {
+            queue.cancel();
+            return;
+        }
+        if let Some((LibraryRef::Local, i)) = self.browser.selected
+            && let Some(t) = self.library.tracks.get(i)
+        {
+            queue.prioritize(&t.id);
+        }
+        let finished = queue.poll();
+        for f in finished {
+            match f.result {
+                Ok(analysis) => self.run(Command::ApplyAnalysis { content: f.content, analysis }),
+                Err(e) => self.edit_status = Some(format!("Analysis of {} failed: {e}", f.title)),
+            }
         }
     }
 
@@ -833,6 +941,7 @@ impl eframe::App for App {
         self.poll_export();
         self.poll_remove();
         self.poll_xml();
+        self.poll_analysis();
         let mut actions = self.global_input(&ctx);
 
         egui::Panel::bottom("status").exact_size(22.0).show(ui, |ui| self.status(ui));

@@ -12,6 +12,9 @@ mb-anlz = { path = "../mb-anlz" }
 mb-pdb = { path = "../mb-pdb" }
 mb-usb = { path = "../mb-usb" }
 mb-xml = { path = "../mb-xml" }
+mb-analysis = { path = "../mb-analysis" }
+mb-audio = { path = "../mb-audio" }
+md-5 = "0.10"
 sha2 = "0.10"
 thiserror.workspace = true
 lofty = "0.25"

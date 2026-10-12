@@ -18,6 +18,7 @@
 
 pub mod coreaudio;
 pub mod flac;
+pub mod flac_seek;
 pub mod mp3;
 pub mod mp4;
 pub mod mpg123;

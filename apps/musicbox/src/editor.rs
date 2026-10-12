@@ -130,6 +130,7 @@ pub fn describe(effect: &mb_library::Effect) -> String {
             }
             s
         }
+        Effect::Analysed { .. } => "Analysed 1 track".into(),
         Effect::Done => "Done".into(),
         Effect::Unchanged => "No change".into(),
     }

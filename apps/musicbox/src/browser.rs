@@ -388,6 +388,10 @@ fn row_menu(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
             }
         }
     });
+    if ui.button("Analyze Track").clicked() {
+        actions.push(Action::AnalyzeTracks(ids.clone()));
+        ui.close();
+    }
     ui.separator();
     if ui.button("Remove from Collection…").clicked() {
         actions.push(Action::AskRemoveFromCollection(ids));

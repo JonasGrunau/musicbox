@@ -93,3 +93,37 @@ fn pvbr_index_matches_rekordbox() {
     eprintln!("checked {checked} MP3 PVBR tables");
     assert!(failures.is_empty(), "{} mismatches:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// PVB2: the FLAC seek table built from the frame headers equals rekordbox's on every FLAC of the
+/// oracle (`docs/re/decode.md` § 7).
+#[test]
+fn pvb2_matches_rekordbox() {
+    let Some(tracks) = common::oracle_tracks("oracle-a") else {
+        eprintln!("oracle-a fixture missing, skipping");
+        return;
+    };
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for t in &tracks {
+        let Some(want) = t.seek_table() else { continue };
+        let ours = mb_audio::flac_seek::seek_table(&t.path).unwrap();
+        checked += 1;
+        let got: Vec<(u64, u64, u32)> = ours.points.iter().map(|p| (p.sample, p.byte_offset, p.block_samples)).collect();
+        let exp: Vec<(u64, u64, u32)> = want.points.iter().map(|p| (p.sample, p.byte_offset, p.block_samples)).collect();
+        if ours.total_samples != want.total_samples || got != exp {
+            let first = got.iter().zip(&exp).position(|(a, b)| a != b);
+            failures.push(format!(
+                "{}: total {} vs {}, points {} vs {}, first difference {first:?}: {:?} vs {:?}",
+                t.path.display(),
+                ours.total_samples,
+                want.total_samples,
+                got.len(),
+                exp.len(),
+                first.map(|i| got[i]),
+                first.map(|i| exp[i])
+            ));
+        }
+    }
+    eprintln!("checked {checked} PVB2 tables");
+    assert!(failures.is_empty(), "{} mismatches:\n{}", failures.len(), failures.join("\n"));
+}

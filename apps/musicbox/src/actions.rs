@@ -32,4 +32,7 @@ pub enum Action {
     AskMySettings { device: usize },
     /// Import from the opened rekordbox.xml: a list (tree ID, with its tracks) or collection rows.
     ImportFromXml { list: Option<DbId>, tracks: Vec<usize> },
+    /// Analyse these collection tracks with musicbox's own analysis ("Analyze Track").
+    AnalyzeTracks(Vec<DbId>),
+    CancelAnalysis,
 }

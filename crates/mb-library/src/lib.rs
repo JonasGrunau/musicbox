@@ -18,9 +18,11 @@
 //! | [`device_import`] | import tracks / a playlist from a device | `import-device.md` | binary-derived (no trace) |
 //! | [`device_history`] | import player histories from a device | `import-device.md` § Histories | binary-derived (no trace) |
 //! | [`xml`] | rekordbox.xml export; import tracks / lists from it | `../xml.md`, `import-xml.md` | export verified byte-exact; import binary-derived (no trace) |
+//! | [`analyse`] | analyse tracks (musicbox's own analysis) | `analyse-track.md` | traced statements; files verified tag by tag against rekordbox |
 //!
 //! [`WriteTxn`]: mb_masterdb::WriteTxn
 
+pub mod analyse;
 pub mod cues;
 pub mod device_history;
 pub mod device_import;
@@ -34,6 +36,7 @@ pub mod tags;
 pub mod xml;
 pub mod xml_sync;
 
+pub use analyse::{AnalysisSettings, AnalysisSnapshot, TrackAnalysis, analyse_track};
 pub use cues::{Cue, CueEdit, CueSlot, NewCue};
 pub use device_history::{DeviceHistory, HistoryImportReport, ImportedHistory, LocalTime};
 pub use device_import::{DeviceImport, DeviceImportKind, DeviceImportReport, DeviceImportResult, DeviceTrack};
@@ -132,6 +135,11 @@ pub enum Command {
     ImportXml { import: XmlImport },
     /// Several commands in order, as one undo step; the inverse runs their inverses backwards.
     Batch { commands: Vec<Command> },
+    /// Write the result of [`analyse_track`] for a track (`analyse-track.md`). Refused for a track
+    /// whose analysis is locked.
+    ApplyAnalysis { content: DbId, analysis: Box<TrackAnalysis> },
+    /// Inverse of [`Command::ApplyAnalysis`]: the previous files, columns and rows.
+    RestoreAnalysis { snapshot: Box<AnalysisSnapshot> },
 }
 
 /// What a command did.
@@ -149,6 +157,8 @@ pub enum Effect {
     /// `djmdCue.ID` of an added or restored cue.
     CueAdded { id: String },
     ImportedXml(XmlImportReport),
+    /// A track's analysis was written ([`Command::ApplyAnalysis`]).
+    Analysed { content: DbId },
     Done,
     /// Nothing to do (e.g. an edit to the current value); no statement was written.
     Unchanged,
@@ -258,6 +268,8 @@ impl Library {
                 grid::restore_beat_grid(self, &content, &pqtz, pqt2.as_ref(), bpm_x100)?
             }
             Command::ImportXml { import } => xml::import(self, &import)?,
+            Command::ApplyAnalysis { content, analysis } => analyse::apply(self, &content, &analysis)?,
+            Command::RestoreAnalysis { snapshot } => analyse::restore(self, &snapshot)?,
             Command::Batch { commands } => {
                 let mut inverses = Vec::new();
                 for c in commands {

@@ -1,6 +1,7 @@
 //! musicbox app as a library, so the headless UI tests (egui_kittest) can build the real `App`.
 
 pub mod actions;
+pub mod analysis_jobs;
 pub mod app;
 pub mod browser;
 pub mod cue_panel;

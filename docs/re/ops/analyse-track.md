@@ -1,6 +1,6 @@
 # Op: track analysis (request, start, completion)
 
-Status: **verified** for Normal mode with BPM, key, phrase and vocal analysis on (two full passes over 161 tracks: the automatic pass after import, L3694–~17300, and a manual "Analyse track" pass, L17355–29590). Building blocks: `common.md` (UPDATE-COL, DELETE-ROWS, agent `contentFile`).
+Status: **verified** for Normal mode with BPM, key, phrase and vocal analysis on (two full passes over 161 tracks: the automatic pass after import, L3694–~17300, and a manual "Analyse track" pass, L17355–29590). Building blocks: `common.md` (UPDATE-COL, DELETE-ROWS, agent `contentFile`). **Files (2026-10-12): verified** — musicbox's `mb_library::analyse_track` rebuilds rekordbox's local `.DAT`/`.EXT`/`.2EX` of all 161 oracle-a tracks section by section, apart from PSSI/PVDI (not computed yet) and the 21 grids the phrase pass moves (§ Files).
 
 All analysis writes run in **autocommit** mode, one statement at a time, on several worker threads in parallel. There is no transaction around a track.
 
@@ -126,3 +126,60 @@ Three of the eight demo tracks that an untraced session re-added at 22:23 end at
 - To be indistinguishable from rekordbox after an analysis, write: the ANLZ files, `AnalysisDataPath`, BPM/SampleRate/BitRate/BitDepth/Length, `KeyID` (creating the `djmdKey` row if needed, removing orphans), a `djmdMixerParam` row if missing, the counters, `Analysed = 105`, `ContentLink = 1902094`, plus the `contentFile` rows (rekordbox leaves those to the agent, which may not be running).
 - `networkAnalyze6.db` was only read (`manage_tbl` stayed empty). The file's change counter moved during the untraced 22:23 session, not during this one.
 - *Open:* behaviour when no key is detected, when only some analysis types are enabled, Dynamic mode, and whether an existing `djmdMixerParam` row is updated when the gain changes.
+
+## Files (verified 2026-10-12 on all 161 rekordbox-analysed oracle-a tracks)
+`CMusicAnalyzeFile::write_pmai` @0x100f5ab40, `write_pmai_ext` @0x1013d0230 and `write_pmai_ex2` @0x1007869f0 write the sections in a fixed order. The `.DAT` sections are unconditional. An `.EXT`/`.2EX` section is written only when its data exists (a null pointer in the info struct is skipped), so a missing analysis just means a missing section.
+
+| File | Sections | Notes |
+|---|---|---|
+| `.DAT` | PPTH PVBR PQTZ PWAV PWV2 PCOB PCOB | PCOB hot (kind 1) first, then memory (kind 0), both empty: collection cues live in `djmdCue` only |
+| `.EXT` | PPTH PWV3 PCOB PCOB PCO2 PCO2 PQT2 PWV5 PWV4 [PVB2] [PSSI] | PVB2 for FLAC only; PSSI with phrase analysis |
+| `.2EX` | PPTH PWV7 PWV6 PWVC [PVDI] | PVDI with vocal analysis |
+
+- **PMAI header:** 16 bytes `00000001 00010000 00010000 00000000` in all three files.
+- **PPTH:** `?/<FileNameL>`.
+- **PVBR:** always 1604 bytes (400-entry index + sample count). MP3: count = decoded samples; the index is filled only when the first frame carries a `Xing` header (37/37 MP3s). Other formats: zeros.
+- **PVB2:** the FLAC seek table, `decode.md` § 7; `mb_audio::flac_seek` reproduces it on 23/23 FLACs.
+- **Waveforms:** PWAV/PWV2 headers `len, 1, 0`; PWV3/PWV7 150 columns/s; PWV5 150 columns/s, colour bits 3, height bits 5; PWV4 1200 × 6; PWV6 1200 × 3.
+- **Grids:** PQTZ from the beat grid; PQT2 from the same beats plus their µs remainders (`analysis-beats.md`).
+- **Columns:**
+  - `Length` = whole seconds of the analysed samples `0 .. L − 1` at the analysis rate, so an exact 64 s file stores 63.
+  - `BitRate` for MP3 = the first frame's rate (VBR files included).
+  - All five columns match on 161/161.
+
+## Status bits (from the binary)
+- **`modAnalyzeStatus` @0x1017e37fc** takes one status word:
+  - `Analysed` = status & 0x7b, plus 0x80 when the lock flag is passed;
+  - `ContentLink` = (old & ~0x8670, with 0xE kept) | ((status >> 8) & 0x3c8670).
+- **Analysis lock = `Analysed` bit 0x80.** `analyze_complete` @0x101494740 leaves a track alone when that byte is negative. The lock is set by `DatabaseMediator::modifyAnalysisLock` @0x100c4903c. There is no lock column.
+- **Completion** (`analyze_complete`): status `& 0xf379ffce | 0xc060021`, so `Analysed` |= 0x21 (final 105) and `ContentLink` |= 0xC0600.
+- **Optional `ContentLink` bits:**
+  - **0x10000 = phrase:** `setAnalyzedSongStructToContentLink` (vtable +0x4b0) sets it when the song-structure result exists.
+  - **0x100000 = vocal:** status 0x10000000, from the BeatAnalyzeInfo vocal flag.
+  - **0x200000 = embeddings:** status 0x20000000, when the network/AI embedding data is an object.
+
+  Each is followed by `updateAnalysisUpdated`, which explains the trace's two extra `AnalysisUpdated` bumps after the key block.
+- **Fixtures agree:** `sandbox-initial` (phrase/vocal off, network analysis on) ends at 0x2C060E; oracle-a/oracle-b (phrase/vocal on) at 0x1D060E.
+
+## musicbox (`mb_library::analyse`, verified 2026-10-12)
+- **`analyse_track` (pure, no database).** Decodes with `mb-audio` and runs `mb-analysis` (8 waveform tags, auto-gain, Normal-mode beat grid). It builds the three files in the order above, plus the `djmdContent` columns and the `djmdMixerParam` words.
+  - Test: `crates/mb-library/tests/analyse_ops.rs` (`MB_ORACLE_FULL=1` for all tracks). 161/161 match, except PSSI/PVDI and 21 grids the phrase pass moves; mixer row and columns are equal.
+- **`Command::ApplyAnalysis`.** Replays the trace in one transaction:
+  1. The request (re-analysis only).
+  2. The start: `Analysed` 74/106, `ContentLink` | 0x50.
+  3. The files.
+  4. The completion: `AnalysisDataPath`, `AnalysisUpdated`, BPM/SampleRate/BitRate/BitDepth/Length, `TrackInfoUpdated`, a `djmdMixerParam` insert when missing, `Analysed` 105, the final `ContentLink`.
+  5. The playlist timestamps.
+  6. The agent's three `contentFile` rows (MD5, size; only new or changed files).
+
+  It refuses a locked track. The previous files go to the session backup.
+- **Not computed yet** (phrase, vocal, key):
+  - PSSI and PVDI are carried over from the previous files when the track had them; their `ContentLink` bits are kept only then.
+  - The key block (`djmdKey`/`KeyID`) and its `TrackInfoUpdated` bump are skipped.
+- **Inverse `Command::RestoreAnalysis`.** Puts back the previous files (or removes them), the columns and the `contentFile` hash/size. It deletes the inserted mixer and `contentFile` rows, and bumps `AnalysisUpdated` once (counters only move forward).
+- **Analysis settings.** Normal mode only (BALib v1); high precision and Dynamic are not ported (`analysis-beats.md` § 9). The BPM range is the 70–180 preset. `AutoGain` from `rekordbox3.settings` decides the mixer row.
+- **Not done:**
+  - the embedded-artwork extraction of a first analysis (`ImagePath`, `artwork.jpg`);
+  - `.3EX` embeddings;
+  - setting or clearing the lock from the UI (locked tracks are only skipped).
+

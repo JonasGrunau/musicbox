@@ -26,12 +26,34 @@ Newest entry first. Each entry records what changed, what is verified, and the n
   - `cargo test -p mb-library --test xml_ops`
   - `cargo test -p musicbox --test ui_xml`
 
+**M6 analysis job + queue (done, not committed by the worker; user check pending):**
+- **Spec:** `docs/re/ops/analyse-track.md` § Files, § Status bits, § musicbox.
+  - Tag order per file from `write_pmai*`; EXT/2EX sections only when their data exists.
+  - Analysis lock = `Analysed` 0x80.
+  - `ContentLink` 0x10000 phrase, 0x100000 vocal, 0x200000 embeddings, 0xC0600 on completion.
+- **`mb_library::analyse_track` (pure).** Builds `.DAT`/`.EXT`/`.2EX` plus the columns and the gain row.
+  - On all 161 rekordbox-analysed oracle-a tracks it equals rekordbox's files section by section, except PSSI/PVDI (not ported yet) and the 21 grids the phrase pass moves.
+  - Columns and mixer words are equal on 161/161.
+  - New: `mb_audio::flac_seek` (PVB2, 23/23 byte-exact).
+- **`Command::ApplyAnalysis` / `RestoreAnalysis`.** The traced statement sequence plus `contentFile` rows, with undo. Locked tracks are refused; PSSI/PVDI of an earlier rekordbox analysis are kept.
+- **App:**
+  - "Analyze Track" in the table's context menu;
+  - a worker-thread queue (`analysis_jobs.rs`) where the selected track goes first;
+  - a status item with Cancel;
+  - with the `AutoAnalysis` preference on, tracks without any analysis are queued once (e.g. after an import).
+- **Tests:**
+  - `cargo test -p mb-library --test analyse_ops` (`MB_ORACLE_FULL=1 cargo test --release …` for all 161);
+  - `cargo test -p mb-audio --test oracle pvb2`;
+  - `cargo test -p musicbox --test ui_analysis`.
+- **Not done:** first-analysis artwork extraction, `.3EX`, the key block, lock toggling in the UI.
+
 **User checks waiting** (all need rekordbox quit first; sandbox library only):
 1. Studio: RBTEST on the CDJ-3000 (§ M3 entry below), then the My Settings check (musicbox "My Settings…" on RBTEST: LANGUAGE German, JOG DISPLAY MODE ARTWORK, TEMPO RANGE WIDE, Waveform color 3Band; the CDJ shows them after loading the stick's My Settings).
 2. Mac: `cargo run -p mb-library --example m5_check -- "$HOME/Library/Application Support/Pioneer/rekordboxAgent/storage/options.json"`, then rekordbox shows the printed cues/grid changes.
 3. Mac: same with `--example m7_check`: three "mb …" intelligent playlists with the printed counts and rules.
 4. Mac: device import from RBTEST (musicbox "Import to Collection" on `oracle-small`, "Import Histories" after the CDJ wrote histories), then rekordbox shows the tracks with waveforms/cues and the histories; a rekordbox export of `oracle-small` to RBTEST copies nothing again.
 5. Mac: XML. musicbox "Export Collection in xml format…" → rekordbox imports a playlist from it (metadata, grid, cues). Then musicbox "Open rekordbox xml…" on a rekordbox-written XML → "Import to Collection" → rekordbox shows the list, grids at once, cue colours right.
+6. Mac: analysis. In musicbox (editing on) import an unanalysed audio file, or right-click a track → "Analyze Track"; wait for "Analysed 1 track"; quit musicbox, open rekordbox: the track shows waveform, beat grid and BPM straight away without re-analysing, and no repair prompt.
 
 **M4 My Settings editor (done and committed in 466caa5; CDJ check pending):** `docs/re/mysetting.md` maps every MYSETTING/MYSETTING2/DJMMYSETTING/DEVSETTING setting (label, byte, values, menu order, unset default; DJM paired settings 3/13, 7/15, 16/17) from the binary; consistent with the reference stick (CDJ-3000-written MYSETTING2/DEVSETTING), the oracle stick and the local files. `mb_usb::mysettings` reads/edits/writes them (only the edited bytes change, player headers and unnamed bytes kept, CRC recomputed, unreadable files left alone, reference stick and running rekordbox refused). App: device header context menu **My Settings…** (PLAYER / MIXER / DJ SYSTEM combos; protected devices read-only). Tests: `cargo test -p mb-usb --lib mysettings`, `cargo test -p mb-usb --test mysettings`, `cargo test -p musicbox --test ui_mysettings`.
 - CDJ check (studio, with RBTEST): in musicbox right-click RBTEST → My Settings… → set LANGUAGE German, JOG DISPLAY MODE ARTWORK, TEMPO RANGE WIDE, DJ SYSTEM Waveform color 3Band → OK; plug RBTEST into the CDJ-3000 and load the stick's My Settings (rekordbox-style "My Settings" load on the player): the menus show German, the jog display shows artwork, tempo range WIDE, waveforms in 3Band.
