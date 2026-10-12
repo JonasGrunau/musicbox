@@ -90,7 +90,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
   - **Export filter observed:** exporting `oracle-all` showed rekordbox's "Exportieren nicht möglich" dialog. It refuses FLAC/ALAC/WAV/AIFF outside 44.1/48/96 kHz, streaming tracks, AVI/MPG/M4V/MOV, MP4 with video, and DRUM CAPTURE files. OK skips them and exports the rest; our 22.05 kHz probes are skipped. This matches `check_support_export` (export.md §6).
   - **Instrumented clone relaunch problem:** after a quit, relaunching the clone made rekordbox close itself about 7 s after start. It calls `POST /api/v1/agent/quit` right after `showNotification`, with no crash. The first launch ran fine for 30 min. The cause is open; it could be a license or integrity check on relaunch. The normal app works. The trace from the first session is kept (`~/re-work/traces/sqltrace-37549.log`; 30k statements, includes the `oracle-small` export).
   - `ERROR Mismatch Category Setting djmdCategory` on stderr comes from `db::AppSyncDBController::getCategorySetting` @0x100a4d700 and is non-fatal.
-  - Spare stick: SanDisk 3.2Gen1 123 GB, erased as FAT32/MBR, named `RBTEST`, volume UUID ADF6A64C-EF6E-34EB-B42B-4BC44934392E. Reference stick volume UUID: 2335E32F-F224-3E76-8EE8-42C79B582A15.
+  - Spare stick: SanDisk 3.2Gen1 123 GB, FAT32/MBR, named `RBTEST`. Volume UUID was ADF6A64C-EF6E-34EB-B42B-4BC44934392E; after the 2026-10-12 re-erase for the M3 CDJ test it is 0BAB78DC-CFAA-390B-9A88-30FC468A7B99. Reference stick volume UUID: 2335E32F-F224-3E76-8EE8-42C79B582A15.
 
 - **Oracle pass A captured** (`fixtures/oracle-a`, 112 MB):
   - The sandbox library: 169 tracks with phrase, vocal and key analysis.

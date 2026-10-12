@@ -39,11 +39,22 @@ fn main() -> anyhow::Result<()> {
     }
     if positional.len() < 3 {
         anyhow::bail!(
-            "usage: export <library_dir> <device_root> <playlist>... [--settings-dir D] \
+            "usage: export <library_dir|live> <device_root> <playlist>... [--settings-dir D] \
              [--log-dir D] [--date YYYY-MM-DD] [--dry-run]"
         );
     }
-    let library = LibraryDir::open(&PathBuf::from(&positional[0]))?;
+    // `live` = the library rekordbox itself uses (paths from rekordboxAgent's options.json).
+    let library = if positional[0] == "live" {
+        let options = mb_masterdb::LibraryPaths::default_options_json().expect("HOME");
+        let paths = mb_masterdb::LibraryPaths::from_options_json(&options)?;
+        let pass = mb_masterdb::derive_passphrase(&paths.dp)?;
+        if opts.settings_dir.is_none() {
+            opts.settings_dir = Some(paths.settings_root.clone());
+        }
+        LibraryDir::open_paths(&paths.db_path, &pass, paths.analysis_data_root, paths.settings_root)?
+    } else {
+        LibraryDir::open(&PathBuf::from(&positional[0]))?
+    };
     let root = PathBuf::from(&positional[1]);
     std::fs::create_dir_all(&root)?;
 
