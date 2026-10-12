@@ -1,7 +1,7 @@
 //! PSSI: song structure / phrases (.EXT). Writer `write_pmai_ext_song_struct` @0x1013d10b4.
 //! On USB exports the section is XOR-scrambled (`ConvUSB_ScrambleSongStruct` @0x1007b3890, see
-//! [`crate::usb::scramble_song_structure`]). No fixture has PSSI yet: layout from code only, so
-//! this whole view is a **hypothesis**. Spec: `docs/re/anlz.md` § PSSI.
+//! [`crate::usb::scramble_song_structure`]). The layout is verified: every PSSI of the oracle
+//! fixtures decodes and re-encodes byte for byte. Spec: `docs/re/anlz.md` § PSSI.
 
 use super::{Put, Rd, TagResult, check_tag};
 use crate::usb::scramble_song_structure;

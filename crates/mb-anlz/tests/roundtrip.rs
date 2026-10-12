@@ -155,7 +155,9 @@ fn fixture_values_are_consistent() {
             );
         }
         let ext = AnlzFile::parse(&std::fs::read(path.with_extension("EXT")).unwrap()).unwrap();
-        if let Some(pqt2) = ext.ext_beat_grid() {
+        // A grid edit empties PQT2 (no entries, checksum 0), as rekordbox's own edit in
+        // fixtures/oracle-grid-edit shows (docs/re/ops/edit-grid.md).
+        if let Some(pqt2) = ext.ext_beat_grid().filter(|g| !g.entries.is_empty() || g.checksum != 0) {
             assert!(
                 pqt2.matches(&grid.beats),
                 "{}: PQT2 checksum",

@@ -30,11 +30,16 @@ use std::path::{Path, PathBuf};
 pub struct AnalysisSettings {
     /// `AutoGain`: write the `djmdMixerParam` row.
     pub auto_gain: bool,
+    /// `trackAnalysisSettingsSongStruct`: run the phrase pass, which moves the grid onto the
+    /// first downbeat (`docs/re/analysis-phrase.md`). *Hypothesis:* this preference sets the
+    /// thread flag +0x3908 that gates the shift in `CBeatAnalyzeThread::analyze`; a fresh
+    /// install has it off (`fixtures/manifest.toml`, sandbox-initial).
+    pub phrase: bool,
 }
 
 impl Default for AnalysisSettings {
     fn default() -> Self {
-        Self { auto_gain: true }
+        Self { auto_gain: true, phrase: false }
     }
 }
 
@@ -60,7 +65,7 @@ pub struct TrackAnalysis {
 pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings) -> Result<TrackAnalysis> {
     let fail = |e: &dyn std::fmt::Display| Error::Invalid(format!("{}: {e}", audio.display()));
     let info = *mb_audio::open(audio).map_err(|e| fail(&e))?.info();
-    let opts = mb_analysis::Options { loudness: settings.auto_gain, ..mb_analysis::Options::default() };
+    let opts = mb_analysis::Options { loudness: settings.auto_gain, phrase: settings.phrase, ..mb_analysis::Options::default() };
     let a = mb_analysis::analyze(audio, opts).map_err(|e| fail(&e))?;
     let waves = a.waveforms.unwrap_or_default();
     let grid = a.beats;

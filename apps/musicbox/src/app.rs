@@ -172,7 +172,10 @@ impl App {
                         pref("KeyStringSetting").and_then(|v| v.trim().parse().ok()),
                     );
                     // Analysis preferences: `AutoGain` (default on), `AutoAnalysis`.
-                    self.analysis_settings = mb_library::AnalysisSettings { auto_gain: pref("AutoGain").is_none_or(|v| v.trim() != "0") };
+                    self.analysis_settings = mb_library::AnalysisSettings {
+                        auto_gain: pref("AutoGain").is_none_or(|v| v.trim() != "0"),
+                        phrase: pref("trackAnalysisSettingsSongStruct").is_some_and(|v| v.trim() == "1"),
+                    };
                     self.auto_analysis = pref("AutoAnalysis").is_some_and(|v| v.trim() == "1");
                     self.export_source = Some(export::Source {
                         db_path: loaded.db_path.clone(),
