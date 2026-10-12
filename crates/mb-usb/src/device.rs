@@ -109,6 +109,8 @@ pub struct DevlibState {
     /// Playlist ID → content IDs in `sequenceNo` order.
     pub entries: HashMap<u32, Vec<u32>>,
     pub created_date: String,
+    /// `property.myTagMasterDBID`: whose My Tag tree the stick holds (0 = none yet).
+    pub my_tag_master_db_id: u32,
 }
 
 /// One file of an ANLZ folder.
@@ -140,6 +142,21 @@ pub struct DeviceState {
 }
 
 impl DeviceState {
+    /// The library whose My Tag tree the stick holds, as `syncMyTag` @0x100c51eec reads it from
+    /// the device's database (vtable +0x508): exportExt.pdb `DJDBEXDBPROPERTYOPTION`, else the
+    /// exportLibrary.db `property` row. 0 = none written yet (or no database).
+    pub fn my_tag_master_db_id(&self) -> u32 {
+        let classic = self
+            .pdb
+            .as_ref()
+            .and_then(|p| p.ext.as_ref())
+            .and_then(|e| e.db_property_options.first())
+            .map(|o| o.my_tag_master_db_id);
+        classic
+            .or_else(|| self.devlib.as_ref().map(|d| d.my_tag_master_db_id))
+            .unwrap_or(0)
+    }
+
     /// An empty device (nothing exported yet) at `root`, with the `PIONEER` folder.
     pub fn empty(root: &Path) -> Self {
         Self {
@@ -459,6 +476,11 @@ fn load_devlib(path: &Path) -> Result<DevlibState> {
     state.created_date = c
         .query_row("select createdDate from property", [], |r| {
             Ok(as_text(r.get(0)?))
+        })
+        .unwrap_or_default();
+    state.my_tag_master_db_id = c
+        .query_row("select myTagMasterDBID from property", [], |r| {
+            Ok(as_int(r.get(0)?) as u32)
         })
         .unwrap_or_default();
     Ok(state)

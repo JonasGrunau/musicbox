@@ -90,6 +90,10 @@ pub struct PlanOptions {
     pub mount_my_tag_sync: bool,
     /// Tracks per playlist (`get_device_playlist_track_num_max`): 10000, 1000 for some devices.
     pub max_playlist_tracks: usize,
+    /// The stick holds another library's My Tags (`syncMyTag` @0x100c51eec: device value neither
+    /// 0 nor ours): rekordbox asks whether to overwrite them. `true` answers yes; default `false`
+    /// leaves the stick's My Tags alone and exports no My Tag links (`docs/re/export.md` § 2.5).
+    pub overwrite_foreign_my_tags: bool,
 }
 
 impl Default for PlanOptions {
@@ -99,6 +103,7 @@ impl Default for PlanOptions {
             artwork_320: false,
             mount_my_tag_sync: true,
             max_playlist_tracks: 10_000,
+            overwrite_foreign_my_tags: false,
         }
     }
 }
@@ -833,6 +838,9 @@ struct Planner<'a> {
     lookups: Lookups,
     /// export.pdb already has a list (else the next new list is "the first list of a stick").
     pdb_first_list_done: bool,
+    /// My Tag export enabled for this device (controller +0x40, set by `syncMyTag`): the tree
+    /// is written and new tracks get their My Tag links.
+    my_tags: bool,
 }
 
 /// Plans exporting `selection` from `src` to the device described by `dev`.
@@ -888,7 +896,9 @@ pub fn plan_export(
     }
 
     // My Tag syncs (`syncMyTag` on mount for an existing stick, then on `createDeviceDB`).
-    let syncs = if dev.pdb.is_some() && opts.mount_my_tag_sync {
+    let syncs = if !p.my_tags {
+        0
+    } else if dev.pdb.is_some() && opts.mount_my_tag_sync {
         2
     } else {
         1
@@ -899,11 +909,13 @@ pub fn plan_export(
             links: p.pdb_my_tag_links(),
         });
     }
-    plan.devlib_preamble.push(DevlibOp::WriteMyTags {
-        master_db_id: src.my_tag_master_db_id,
-        rows: src.devlib_my_tags(),
-        links: p.devlib_my_tag_links(),
-    });
+    if p.my_tags {
+        plan.devlib_preamble.push(DevlibOp::WriteMyTags {
+            master_db_id: src.my_tag_master_db_id,
+            rows: src.devlib_my_tags(),
+            links: p.devlib_my_tag_links(),
+        });
+    }
 
     // Jobs (UI thread): list rows first, for every job.
     let mut jobs = Vec::new();
@@ -1030,17 +1042,27 @@ impl<'a> Planner<'a> {
             );
         }
         let pdb_has_lists = !pdb.playlists.is_empty();
+        // Paths a track row of either database still points at count as taken even when the
+        // file is missing. rekordbox only tests the file (§ 1.4); on such a stick it would hand
+        // the path to the new track and purge the old row's ANLZ set (§ 1.6). Not reproduced.
+        let mut contents = dev.contents.clone();
+        contents.extend(pdb.tracks.values().map(|t| path_key(&t.folder_path)));
+        contents.extend(devlib.tracks.values().map(|t| path_key(&t.path)));
         Self {
             src,
             opts,
             hidden: dev.hidden,
             pdb,
             devlib,
-            contents: dev.contents.clone(),
+            contents,
             anlz,
             artwork: dev.artwork.clone(),
             lookups: Lookups::default(),
             pdb_first_list_done: pdb_has_lists,
+            my_tags: {
+                let owner = dev.my_tag_master_db_id();
+                owner == 0 || owner == src.my_tag_master_db_id || opts.overwrite_foreign_my_tags
+            },
         }
     }
 
@@ -1764,7 +1786,7 @@ impl<'a> Planner<'a> {
                 ops.push(PdbOp::AddTrack(row.clone()));
                 step.pdb.extend(ops);
                 self.pdb.tracks.insert(tid, row);
-                if !t.my_tags.is_empty() {
+                if self.my_tags && !t.my_tags.is_empty() {
                     step.ext.push(ExtOp::AddMyTagLinks(
                         t.my_tags.iter().map(|tag| my_tag_link(*tag, tid)).collect(),
                     ));
@@ -1855,7 +1877,11 @@ impl<'a> Planner<'a> {
                     expect_id: cid,
                     track: Box::new(new),
                     image,
-                    my_tags: t.my_tags.clone(),
+                    my_tags: if self.my_tags {
+                        t.my_tags.clone()
+                    } else {
+                        Vec::new()
+                    },
                 });
                 self.devlib.tracks.insert(
                     cid,
