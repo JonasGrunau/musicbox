@@ -318,3 +318,92 @@ fn apply_and_undo() {
     drop(lib);
     dir.verify_loads();
 }
+
+/// PSNR (dB) of two same-sized JPEGs, over RGB.
+fn psnr(a: &[u8], b: &[u8]) -> f64 {
+    let (a, b) = (image::load_from_memory(a).unwrap().to_rgb8(), image::load_from_memory(b).unwrap().to_rgb8());
+    assert_eq!(a.dimensions(), b.dimensions());
+    let se: f64 = a.as_raw().iter().zip(b.as_raw()).map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2)).sum();
+    let mse = se / a.as_raw().len() as f64;
+    if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0f64 * 255.0 / mse).log10() }
+}
+
+/// First analysis of a track without artwork: the embedded picture becomes the local set at
+/// rekordbox's `ImagePath`, close to rekordbox's own files; a re-analysis leaves it alone; undo
+/// removes it.
+#[test]
+fn first_analysis_adds_artwork() {
+    let Some(dir) = TempLibrary::new("oracle-a") else {
+        eprintln!("skipped: fixtures/oracle-a missing");
+        return;
+    };
+    let share = fixture("oracle-a").unwrap().join("rekordbox/share");
+    let db = open_read_only("oracle-a").unwrap();
+    let picks: Vec<(String, PathBuf, String, String)> = db
+        .connection()
+        .prepare("SELECT ID, FolderPath, FileNameL, ImagePath FROM djmdContent WHERE rb_local_deleted = 0 AND ImagePath <> '' ORDER BY FolderPath")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?), r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    // One file per container that carries pictures differently (MP4 covr, ID3 APIC, FLAC).
+    let mut chosen = Vec::new();
+    for ext in ["m4a", "mp3", "flac"] {
+        if let Some(p) = picks.iter().find(|p| p.1.exists() && p.1.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))) {
+            chosen.push(p.clone());
+        }
+    }
+    if chosen.is_empty() {
+        eprintln!("skipped: corpus audio missing");
+        return;
+    }
+    let root = dir.dir.join("share");
+    let mut lib = Library::open_unguarded(&dir.db, &dir.passphrase).unwrap();
+    lib.set_analysis_root(&root);
+    let mut history = History::default();
+    for (id, audio, file_name, image_path) in &chosen {
+        // Test setup (not an op): back to the state after import.
+        lib.connection()
+            .execute_batch(&format!(
+                "UPDATE djmdContent SET ImagePath = '', Analysed = 0, ContentLink = 14, AnalysisDataPath = NULL WHERE ID = '{id}';
+                 DELETE FROM contentFile WHERE ContentID = '{id}';"
+            ))
+            .unwrap();
+        let a = analyse_track(audio, file_name, &AnalysisSettings::default()).unwrap();
+        assert!(a.artwork.is_some(), "{}: no embedded picture found", audio.display());
+        history.run(&mut lib, Command::ApplyAnalysis { content: DbId(id.clone()), analysis: Box::new(a.clone()) }).unwrap();
+        assert_eq!(get(&lib, "ImagePath", id), Value::Text(image_path.clone()), "{}", audio.display());
+        let ours = root.join(image_path.trim_start_matches('/'));
+        let theirs = share.join(image_path.trim_start_matches('/'));
+        for name in ["artwork.jpg", "artwork_s.jpg", "artwork_m.jpg"] {
+            let (o, t) = (std::fs::read(ours.with_file_name(name)).unwrap(), std::fs::read(theirs.with_file_name(name)).unwrap());
+            let db = psnr(&o, &t);
+            eprintln!("{} {name}: PSNR {db:.1} dB", audio.display());
+            // artwork.jpg is the picture re-encoded (34–41 dB: two quality-85 encoders; rekordbox's
+            // own file is only 35 dB from the embedded FLAC picture); the thumbnails use another
+            // resampler than rekordbox's CoreGraphics draw (`analyse-track.md` § Artwork).
+            let min = if name == "artwork.jpg" { 30.0 } else { 20.0 };
+            assert!(db > min, "{} {name}: PSNR {db:.1} dB", audio.display());
+        }
+        let art_row = content_files(&lib, id).into_iter().find(|(p, ..)| p == image_path).expect("artwork contentFile row");
+        assert_eq!(art_row.2, std::fs::metadata(&ours).unwrap().len() as i64);
+
+        // A re-analysis keeps the artwork as it is.
+        let before = std::fs::read(&ours).unwrap();
+        std::fs::write(&ours, b"marker").unwrap();
+        history.run(&mut lib, Command::ApplyAnalysis { content: DbId(id.clone()), analysis: Box::new(a.clone()) }).unwrap();
+        assert_eq!(std::fs::read(&ours).unwrap(), b"marker");
+        std::fs::write(&ours, &before).unwrap();
+
+        // Undo both: the artwork goes with the first analysis.
+        history.undo(&mut lib).unwrap();
+        assert_eq!(get(&lib, "ImagePath", id), Value::Text(image_path.clone()));
+        history.undo(&mut lib).unwrap();
+        assert_eq!(get(&lib, "ImagePath", id), Value::Text(String::new()));
+        assert!(!ours.exists() && !ours.with_file_name("artwork_s.jpg").exists());
+        assert!(!content_files(&lib, id).iter().any(|(p, ..)| p == image_path));
+    }
+    dir.verify_loads();
+}
+

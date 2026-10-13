@@ -96,6 +96,31 @@ pub fn read_file(path: &Path) -> Result<FileTags> {
     Ok(tags)
 }
 
+/// The embedded picture rekordbox's first analysis turns into artwork
+/// (`TagLib::ParseTag::parseCoverArt` @0x100e507e0, `analyse-track.md` § Artwork): in an MP4
+/// the `covr` image; in a FLAC the first JPEG or PNG picture of type front cover; in an ID3v2
+/// tag (MP3, AIFF, WAV) the first picture of type "other" or front cover.
+pub fn embedded_picture(path: &Path) -> Option<Vec<u8>> {
+    use lofty::picture::{MimeType, PictureType};
+    for mode in [ParsingMode::Relaxed, ParsingMode::BestAttempt] {
+        let Ok(f) = probe_path(path, ParseOptions::new().read_cover_art(true).parsing_mode(mode)) else { continue };
+        let flac = f.file_type() == LoftyType::Flac;
+        for tag in f.tags() {
+            let mp4 = tag.tag_type() == TagType::Mp4Ilst;
+            let found = tag.pictures().iter().find(|p| {
+                let kind = matches!(p.pic_type(), PictureType::CoverFront) || (!flac && matches!(p.pic_type(), PictureType::Other));
+                let mime = !flac || matches!(p.mime_type(), Some(MimeType::Jpeg | MimeType::Png));
+                mp4 || (kind && mime)
+            });
+            if let Some(p) = found {
+                return Some(p.data().to_vec());
+            }
+        }
+        return None;
+    }
+    None
+}
+
 fn options(mode: ParsingMode) -> ParseOptions {
     ParseOptions::new().read_cover_art(false).parsing_mode(mode)
 }

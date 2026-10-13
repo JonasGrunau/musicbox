@@ -2340,6 +2340,7 @@ name = "mb-library"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
  "lofty",
  "mb-analysis",
  "mb-anlz",

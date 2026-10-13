@@ -21,4 +21,5 @@ lofty = "0.25"
 
 [dev-dependencies]
 anyhow.workspace = true
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 mb-devlib = { path = "../mb-devlib" }

@@ -3,6 +3,7 @@
 #   re/ghidra/decompile.sh dump <query>...   -> ~/re-work/decomp/<addr>_<name>.c
 #       query: 0xADDRESS | exact::qualified::name | ~substring
 #   re/ghidra/decompile.sh list <substring>... -> prints matches (addr, size, name)
+#   re/ghidra/decompile.sh callers <0xADDRESS>... -> prints every reference to each function
 # Calls are serialised with a lock directory because the project cannot be opened twice.
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -23,5 +24,9 @@ case "$mode" in
     out="$(mktemp -t ghidra-list)"
     run MbListFunctions.java "$out" "$@" >/dev/null
     cat "$out"; rm -f "$out" ;;
-  *) echo "usage: $0 dump|list ..." >&2; exit 2 ;;
+  callers)
+    out="$(mktemp -t ghidra-callers)"
+    run MbCallers.java "$out" "$@" >/dev/null
+    cat "$out"; rm -f "$out" ;;
+  *) echo "usage: $0 dump|list|callers ..." >&2; exit 2 ;;
 esac

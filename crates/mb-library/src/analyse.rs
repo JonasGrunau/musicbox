@@ -64,6 +64,9 @@ pub struct TrackAnalysis {
     /// The detected key as rekordbox names it (`djmdKey.ScaleName`, e.g. `Am`), when key
     /// analysis ran.
     pub key: Option<String>,
+    /// The local artwork made from the file's embedded picture (`analyse-track.md` § Artwork),
+    /// written only when the track has no artwork yet.
+    pub artwork: Option<mb_usb::artwork::LocalArtworkSet>,
 }
 
 /// Analyses the audio file at `audio`. `file_name` is the name rekordbox puts into PPTH
@@ -170,6 +173,7 @@ pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings)
             [i64::from(gh), i64::from(gl), i64::from(ph), i64::from(pl)]
         }),
         key: a.key.map(|k| mb_analysis::key::scale_name(k).to_owned()),
+        artwork: crate::tags::embedded_picture(audio).and_then(|p| mb_usb::artwork::local_set(&p).ok()),
     })
 }
 
@@ -249,6 +253,9 @@ pub struct AnalysisSnapshot {
     pub content_files: Vec<(String, Option<(String, i64)>)>,
     /// When the analysis wrote `KeyID`: the previous `KeyID` and the `ScaleName` it pointed to.
     pub key: Option<(Value, Option<String>)>,
+    /// When the analysis added artwork: the previous `ImagePath` (its files are in `files`, its
+    /// `contentFile` row in `content_files`).
+    pub image_path: Option<Value>,
 }
 
 /// `Analysed` states (`analyse-track.md` § Values): bit 0x01 done, 0x02 in progress, 0x80 the
@@ -303,6 +310,56 @@ fn content_file_id(uuid: &str, path: &str) -> String {
 fn md5_hex(bytes: &[u8]) -> String {
     use md5::Digest;
     md5::Md5::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The agent's `contentFile` row for one analysis or artwork file: inserted when missing, new
+/// hash and size when the file changed, untouched when equal (`common.md`). Returns the row ID
+/// and its previous (hash, size) for undo.
+fn upsert_content_file(
+    tx: &mb_masterdb::WriteTxn<'_>,
+    uuid: &str,
+    content: &Value,
+    root: &Path,
+    path: &str,
+    bytes: &[u8],
+) -> Result<(String, Option<(String, i64)>)> {
+    let id = content_file_id(uuid, path);
+    let (hash, size) = (md5_hex(bytes), bytes.len() as i64);
+    let existing: Option<(String, i64)> = tx
+        .connection()
+        .query_row("SELECT Hash, Size FROM contentFile WHERE ID = ?1 AND rb_local_deleted = 0", [id.as_str()], |r| {
+            Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<i64>>(1)?.unwrap_or(0)))
+        })
+        .optional()?;
+    match &existing {
+        None => {
+            tx.insert(
+                "contentFile",
+                &[
+                    ("ID", Value::Text(id.clone())),
+                    ("ContentID", content.clone()),
+                    ("Path", Value::Text(path.to_owned())),
+                    ("Hash", Value::Text(hash)),
+                    ("Size", Value::Integer(size)),
+                    ("rb_local_path", Value::Text(root.join(path.trim_start_matches('/')).display().to_string())),
+                    ("rb_file_hash_dirty", Value::Integer(0)),
+                    ("rb_local_file_status", Value::Integer(0)),
+                    ("rb_in_progress", Value::Integer(0)),
+                    ("rb_process_type", Value::Integer(0)),
+                    ("rb_priority", Value::Integer(50)),
+                    ("rb_file_size_dirty", Value::Integer(0)),
+                    ("UUID", Value::Text(mb_masterdb::write::new_uuid())),
+                ],
+            )?;
+        }
+        // A changed file gets its new hash and size (*hypothesis*: what the agent does then is
+        // open).
+        Some((h, s)) if *h != hash || *s != size => {
+            tx.update("contentFile", "ID", Value::Text(id.clone()), &[("Hash", Value::Text(hash)), ("Size", Value::Integer(size))])?;
+        }
+        Some(_) => {}
+    }
+    Ok((id, existing))
 }
 
 pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis) -> Result<(Effect, Option<Command>)> {
@@ -363,7 +420,30 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     let key = || Value::Text(content.0.clone());
     let col = |tx: &mb_masterdb::WriteTxn<'_>, name: &str, v: Value| tx.update("djmdContent", "ID", key(), &[(name, v)]);
     let link = int(&old.content_link);
+    // Artwork (first analysis only): the embedded picture becomes the local set when the track
+    // has none (`add_track_artwork` @0x100c45e4c), before the analysis starts.
+    let old_image: Value = lib.connection().query_row("SELECT ImagePath FROM djmdContent WHERE ID = ?1", [content.as_str()], |r| r.get(0))?;
+    let artwork = analysis.artwork.as_ref().filter(|_| matches!(&old_image, Value::Null) || matches!(&old_image, Value::Text(t) if t.is_empty()));
+    let art_rel = format!("/PIONEER/Artwork/{}/artwork.jpg", mb_anlz::usb::local_anlz_folder(&uuid));
+    let art_files: Vec<(PathBuf, &[u8])> = artwork.map_or_else(Vec::new, |a| {
+        let base = root.join(art_rel.trim_start_matches('/'));
+        vec![
+            (base.clone(), a.original.as_slice()),
+            (base.with_file_name("artwork_s.jpg"), a.small.as_slice()),
+            (base.with_file_name("artwork_m.jpg"), a.medium.as_slice()),
+        ]
+    });
+    let mut previous = previous;
     let tx = lib.writer.transaction()?;
+    let mut content_files = Vec::new();
+    if let Some(a) = artwork {
+        for (p, bytes) in &art_files {
+            previous.push((p.clone(), std::fs::read(p).ok()));
+            write_file(p, bytes)?;
+        }
+        col(&tx, "ImagePath", Value::Text(art_rel.clone()))?;
+        content_files.push(upsert_content_file(&tx, &uuid, &key(), &root, &art_rel, &a.original)?);
+    }
     // A. Request (only a re-analysis): done bit cleared, queued.
     let mut state = analysed;
     if analysed & 0x01 != 0 {
@@ -439,46 +519,9 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     col(&tx, "Analysed", Value::Integer(ANALYSED_DONE))?;
     col(&tx, "ContentLink", Value::Integer(final_link))?;
     // D. The agent's `contentFile` rows (.2EX, .DAT, .EXT), when musicbox writes in its place.
-    let mut content_files = Vec::new();
     for (ext_name, bytes) in [("2EX", &new_bytes[2]), ("DAT", &new_bytes[0]), ("EXT", &new_bytes[1])] {
         let path = rel.replace(".DAT", &format!(".{ext_name}"));
-        let id = content_file_id(&uuid, &path);
-        let (hash, size) = (md5_hex(bytes), bytes.len() as i64);
-        let existing: Option<(String, i64)> = tx
-            .connection()
-            .query_row("SELECT Hash, Size FROM contentFile WHERE ID = ?1 AND rb_local_deleted = 0", [id.as_str()], |r| {
-                Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<i64>>(1)?.unwrap_or(0)))
-            })
-            .optional()?;
-        match &existing {
-            None => {
-                tx.insert(
-                    "contentFile",
-                    &[
-                        ("ID", Value::Text(id.clone())),
-                        ("ContentID", key()),
-                        ("Path", Value::Text(path.clone())),
-                        ("Hash", Value::Text(hash)),
-                        ("Size", Value::Integer(size)),
-                        ("rb_local_path", Value::Text(root.join(path.trim_start_matches('/')).display().to_string())),
-                        ("rb_file_hash_dirty", Value::Integer(0)),
-                        ("rb_local_file_status", Value::Integer(0)),
-                        ("rb_in_progress", Value::Integer(0)),
-                        ("rb_process_type", Value::Integer(0)),
-                        ("rb_priority", Value::Integer(50)),
-                        ("rb_file_size_dirty", Value::Integer(0)),
-                        ("UUID", Value::Text(mb_masterdb::write::new_uuid())),
-                    ],
-                )?;
-            }
-            // Identical files leave the row alone (common.md); a changed file gets its new hash
-            // and size (*hypothesis*: what the agent does then is open).
-            Some((h, s)) if *h != hash || *s != size => {
-                tx.update("contentFile", "ID", Value::Text(id.clone()), &[("Hash", Value::Text(hash)), ("Size", Value::Integer(size))])?;
-            }
-            Some(_) => {}
-        }
-        content_files.push((id, existing));
+        content_files.push(upsert_content_file(&tx, &uuid, &key(), &root, &path, bytes)?);
     }
     tx.commit()?;
     sync_playlists(lib, content)?;
@@ -491,6 +534,7 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
             mixer_inserted,
             content_files,
             key: key_snapshot,
+            image_path: artwork.map(|_| old_image.clone()),
         }),
     };
     Ok((Effect::Analysed { content: content.clone() }, Some(inverse)))
@@ -553,6 +597,9 @@ pub(crate) fn restore(lib: &mut Library, s: &AnalysisSnapshot) -> Result<(Effect
         tx.update("djmdContent", "ID", key(), &[("KeyID", value)])?;
         tx.cleanup_orphan_table(OrphanTable::Key)?;
         tx.increment_counter(s.content.as_str(), CounterColumn::TrackInfoUpdated)?;
+    }
+    if let Some(v) = &s.image_path {
+        tx.update("djmdContent", "ID", key(), &[("ImagePath", v.clone())])?;
     }
     // Counters only move forward: the restored state is a new change for exports.
     tx.increment_counter(s.content.as_str(), CounterColumn::AnalysisUpdated)?;

@@ -446,22 +446,7 @@ fn artwork_bytes(art: &LocalArtwork, size: ArtworkSize) -> Result<Vec<u8>> {
         message,
     };
     let img = image::open(&art.base).map_err(|e| fail(e.to_string()))?;
-    let (w, h) = (img.width(), img.height());
-    let side = w.max(h);
-    let mut canvas = image::RgbImage::from_pixel(side, side, image::Rgb([0, 0, 0]));
-    image::imageops::overlay(
-        &mut canvas,
-        &img.to_rgb8(),
-        i64::from((side - w) / 2),
-        i64::from((side - h) / 2),
-    );
-    let px = size.pixels();
-    let scaled = image::imageops::resize(&canvas, px, px, image::imageops::FilterType::Lanczos3);
-    let mut out = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
-        .encode_image(&scaled)
-        .map_err(|e| fail(e.to_string()))?;
-    Ok(out)
+    crate::artwork::square_jpeg(&img, size.pixels()).map_err(fail)
 }
 
 // ---- databases ------------------------------------------------------------------------------
