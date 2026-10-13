@@ -16,6 +16,8 @@ pub struct Loaded {
     pub analysis_root: PathBuf,
     /// rekordbox's settings folder (MYSETTING*.DAT etc., copied to sticks on export).
     pub settings_root: PathBuf,
+    /// rekordbox's language file (options.json `lang-path`).
+    pub lang_path: Option<PathBuf>,
 }
 
 pub type LoadResult = Result<Loaded, String>;
@@ -54,5 +56,6 @@ fn load(args: &Args) -> anyhow::Result<Loaded> {
         passphrase,
         analysis_root: paths.analysis_data_root,
         settings_root: paths.settings_root,
+        lang_path: paths.lang_path,
     })
 }

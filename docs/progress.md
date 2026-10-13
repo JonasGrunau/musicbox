@@ -111,7 +111,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 - CDJ check (studio, with RBTEST): in musicbox right-click RBTEST → My Settings… → set LANGUAGE German, JOG DISPLAY MODE ARTWORK, TEMPO RANGE WIDE, DJ SYSTEM Waveform color 3Band → OK; plug RBTEST into the CDJ-3000 and load the stick's My Settings (rekordbox-style "My Settings" load on the player): the menus show German, the jog display shows artwork, tempo range WIDE, waveforms in 3Band.
 
 **Open, not assigned**
-- Export log language: rekordbox writes it in the UI language (`language` preference; only the German column titles are known, from the oracle log). The app uses English.
+- ~~Export log language~~ done: the texts go through the user's rekordbox language file (options.json `lang-path`), as `juce::translate` does; the German file gives exactly the oracle log's texts.
 - ~~AAC decode parity~~ done (7ec372e): Apple's AAC decoder gives ±1 in a few samples when `AudioConverterFillComplexBuffer` is entered at SP ≡ 48 (mod 64). `mb-audio` now enters it through a trampoline at a fixed alignment matching rekordbox. Auto-gain 169/169 and all waveform tags 19/19 AAC, both oracles, stable under concurrent runs. Test: `cargo test -p mb-audio --test aac_stack`.
 - M6 left: phrase stages C/D and PSSI (paused, `analysis-phrase.md` § 9), vocal/PVDI (TF), Dynamic and high-precision beats (TF + downbeat HMM; the user's rekordbox has high precision on, so musicbox's own grids differ from what that rekordbox would write), auto-cue/embeddings. Key is done (b9d0a53) (ORT); an analysis queue in the app.
 

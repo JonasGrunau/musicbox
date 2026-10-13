@@ -184,6 +184,7 @@ impl App {
                         passphrase: loaded.passphrase.clone(),
                         analysis_root: loaded.analysis_root,
                         settings_root: loaded.settings_root,
+                        lang_path: loaded.lang_path,
                     });
                     if self.xml.is_none()
                         && let Some(path) = self.export_source.as_ref().and_then(|s| crate::xml_bridge::bridge_file(&s.settings_root))

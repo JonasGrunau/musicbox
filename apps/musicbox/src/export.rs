@@ -15,6 +15,8 @@ pub struct Source {
     pub passphrase: String,
     pub analysis_root: PathBuf,
     pub settings_root: PathBuf,
+    /// For the export log's language.
+    pub lang_path: Option<PathBuf>,
 }
 
 enum Msg {
@@ -86,7 +88,12 @@ fn run(source: &Source, playlist: &DbId, root: &std::path::Path, cancel: &Cancel
         plan_options.hot_cue_color_type = t;
     }
     let plan = mb_usb::plan_export(&src, &device, &selection, &plan_options).map_err(|e| e.to_string())?;
-    let options = ExportOptions { settings_dir: Some(library.settings_root.clone()), log_dir: log_dir(), ..ExportOptions::default() };
+    let options = ExportOptions {
+        settings_dir: Some(library.settings_root.clone()),
+        log_dir: log_dir(),
+        log_strings: mb_usb::LogStrings::from_lang_file(source.lang_path.as_deref()),
+        ..ExportOptions::default()
+    };
     let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
     let report = mb_usb::execute(&plan, &device, &options, cancel, &mut |p| {
         if last.elapsed().as_millis() >= 100 || p.tracks_done == p.tracks_total {

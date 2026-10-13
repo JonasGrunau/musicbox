@@ -11,6 +11,8 @@ pub struct LibraryPaths {
     pub settings_root: PathBuf,
     /// Encrypted passphrase (`dp`), see [`crate::derive_passphrase`].
     pub dp: String,
+    /// rekordbox's language file (`lang-path`, in its app bundle), when given.
+    pub lang_path: Option<PathBuf>,
 }
 
 impl LibraryPaths {
@@ -51,6 +53,7 @@ impl LibraryPaths {
             analysis_data_root: get("analysis-data-root-path")?.into(),
             settings_root: get("settings-root-path")?.into(),
             dp: get("dp")?,
+            lang_path: get("lang-path").ok().filter(|p| !p.is_empty()).map(PathBuf::from),
         })
     }
 }

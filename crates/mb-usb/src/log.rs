@@ -7,6 +7,7 @@
 //! then appends one line per failed track.
 
 use crate::plan::{Job, TrackResult};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The log's fixed texts. rekordbox passes each through `juce::translate`; the defaults are the
@@ -50,6 +51,64 @@ impl LogStrings {
             ..Self::default()
         }
     }
+
+    /// Every text through a translation table, as `juce::translate` does: a text without an
+    /// entry stays English.
+    pub fn translated(table: &HashMap<String, String>) -> Self {
+        let t = |s: String| table.get(&s).cloned().unwrap_or(s);
+        let d = Self::default();
+        Self {
+            not_exported: t(d.not_exported),
+            reasons_intro: t(d.reasons_intro),
+            reasons: d.reasons.map(t),
+            track_title: t(d.track_title),
+            location: t(d.location),
+        }
+    }
+
+    /// The texts in the language rekordbox uses: its language file (options.json `lang-path`,
+    /// a file of the user's rekordbox install, read at run time). English when there is none.
+    pub fn from_lang_file(path: Option<&Path>) -> Self {
+        path.and_then(|p| std::fs::read_to_string(p).ok())
+            .map_or_else(Self::default, |text| Self::translated(&parse_lang(&text)))
+    }
+}
+
+/// A rekordbox language file (`Contents/Resources/locale/<language>.lang`): JUCE's
+/// `LocalisedStrings` text format. Each entry is a line `"original" = "translation"`; quotes
+/// inside a text are escaped as `\"`, and `\n`, `\r`, `\t`, `\'` are unescaped. Header lines
+/// (`language:`, `countries:`) and comments are skipped, as are empty texts.
+pub fn parse_lang(text: &str) -> HashMap<String, String> {
+    fn close_quote(chars: &[char], from: usize) -> Option<usize> {
+        let mut i = from;
+        while i < chars.len() {
+            match chars[i] {
+                '\\' => i += 2,
+                '"' => return Some(i),
+                _ => i += 1,
+            }
+        }
+        None
+    }
+    fn unescape(s: &[char]) -> String {
+        let s: String = s.iter().collect();
+        s.replace("\\\"", "\"").replace("\\'", "'").replace("\\t", "\t").replace("\\r", "\r").replace("\\n", "\n")
+    }
+    let mut out = HashMap::new();
+    for line in text.lines() {
+        let chars: Vec<char> = line.trim().chars().collect();
+        if chars.first() != Some(&'"') {
+            continue;
+        }
+        let Some(end) = close_quote(&chars, 1) else { continue };
+        let Some(open) = chars[end + 1..].iter().position(|&c| c == '"').map(|i| end + 1 + i) else { continue };
+        let Some(close) = close_quote(&chars, open + 1) else { continue };
+        let (original, translation) = (unescape(&chars[1..end]), unescape(&chars[open + 1..close]));
+        if !original.is_empty() && !translation.is_empty() {
+            out.insert(original, translation);
+        }
+    }
+    out
 }
 
 /// `"Export Log " + appName + " " + getDateString(now) + ".txt"`.
@@ -171,6 +230,29 @@ pub fn write_log(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parses_lang_lines() {
+        let text = "@code\r\n#### header\r\n    language: Test\r\n\"Track Title\" = \"Titel\"\r\n\"Say \\\"hi\\\"\\n\" = \"Sag \\\"hallo\\\"\\n\"\r\n\"Empty\" = \"\"\r\n";
+        let t = parse_lang(text);
+        assert_eq!(t.get("Track Title").map(String::as_str), Some("Titel"));
+        assert_eq!(t.get("Say \"hi\"\n").map(String::as_str), Some("Sag \"hallo\"\n"));
+        assert!(!t.contains_key("Empty"));
+        let s = LogStrings::translated(&t);
+        assert_eq!((s.track_title.as_str(), s.location.as_str()), ("Titel", "Location"));
+    }
+
+    /// With rekordbox installed: its German file gives exactly the German log's texts
+    /// (`fixtures/oracle-a/export-log.txt`): only the two column titles are translated.
+    #[test]
+    fn german_lang_file_gives_the_german_log() {
+        let p = Path::new("/Applications/rekordbox 7/rekordbox.app/Contents/Resources/locale/german.lang");
+        if !p.is_file() {
+            eprintln!("skipped: no rekordbox install");
+            return;
+        }
+        assert_eq!(LogStrings::from_lang_file(Some(p)), LogStrings::german());
+    }
     use super::*;
 
     #[test]
