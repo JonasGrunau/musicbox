@@ -6,6 +6,8 @@
 //! - `survey [device_root] [rekordbox.xml]`: unanalysed tracks, device lists, XML lists.
 //! - `analyse`: analyses every track without analysis (like auto-analysis), preferences from
 //!   `rekordbox3.settings`.
+//! - `xml-export <out.xml>`: musicbox's "Export Collection in xml format".
+//! - `smart`: musicbox's evaluation of every intelligent playlist (`<name>\t<track IDs>`).
 //! - `import <audio file>...`: imports files into the collection (the app's "Import").
 //! - `xml <rekordbox.xml> <list name>`: imports one XML playlist (tracks + list).
 //! - `device <device_root> <list name> [<track id to remove first>]`: imports a device
@@ -28,6 +30,24 @@ fn main() -> anyhow::Result<()> {
     let snap = MasterDb::open_read_only(&paths.db_path, &pass)?.load_snapshot(&paths)?;
     let unanalysed: Vec<_> = snap.tracks.iter().filter(|t| t.analysed == 0 && t.analysis_path.is_none()).collect();
 
+    if step == "xml-export" {
+        let db = MasterDb::open_read_only(&paths.db_path, &pass)?;
+        let opts = mb_library::xml::XmlExportOptions::from_settings(&paths.settings_root);
+        let doc = mb_library::xml::export_document(db.connection(), &snap, &opts)?;
+        mb_library::xml::write_document(&doc, Path::new(&args[2]))?;
+        return Ok(());
+    }
+    if step == "smart" {
+        let results = mb_core::smartlist::evaluate_all(&snap, mb_core::smartlist::Clock::utc_now());
+        for p in &snap.playlists {
+            if let Some(ids) = results.get(&p.id) {
+                let mut ids: Vec<&str> = ids.iter().map(|i| i.0.as_str()).collect();
+                ids.sort_unstable();
+                println!("{}\t{}", p.name, ids.join(","));
+            }
+        }
+        return Ok(());
+    }
     if step == "survey" {
         println!("{} tracks, {} without analysis:", snap.tracks.len(), unanalysed.len());
         for t in &unanalysed {

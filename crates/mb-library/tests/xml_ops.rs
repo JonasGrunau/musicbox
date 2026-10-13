@@ -117,7 +117,8 @@ fn cues_and_colours_in_the_export() {
     let x = doc.tracks().iter().find(|t| t.track_id == Some(mb_xml::export::xml_id(id.0.parse().unwrap()))).unwrap();
     assert_eq!(x.colour, Some(0xFFA500));
     assert_eq!(x.grouping.as_deref(), Some("Orange"));
-    let pad = |code: u8| Some(mb_usb::cues::PAD_COLORS[usize::from(code)]);
+    // rekordbox.xml uses the UI palette (`docs/re/xml.md`), not the device one.
+    let pad = |code: u8| Some(mb_usb::cues::UI_PAD_COLORS[usize::from(code)]);
     let marks: Vec<Mark> = x
         .position_marks
         .iter()

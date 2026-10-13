@@ -26,23 +26,20 @@ pub struct CueMark {
     pub color: egui::Color32,
 }
 
-/// Hot-cue colour codes (`ColorTableIndex`) whose RGB the fixture stick's PCO2 tags show
-/// (docs/re/anlz.md § PCO2). The full 64-entry palette is not decoded yet.
-pub const HOT_CUE_COLORS: [(u8, [u8; 3]); 8] = [
-    (8, [0x00, 0xC4, 0xFF]),
-    (19, [0x00, 0xFF, 0x30]),
-    (23, [0x33, 0xFF, 0x00]),
-    (32, [0xFF, 0xE8, 0x00]),
-    (36, [0xFF, 0x8C, 0x00]),
-    (38, [0xFF, 0x5E, 0x00]),
-    (43, [0xFF, 0x00, 0x17]),
-    (60, [0x4D, 0x00, 0xFF]),
-];
+/// Hot-cue colour codes (`ColorTableIndex`) offered in the colour menu, with the RGB rekordbox
+/// shows for them (`mb_usb::cues::UI_PAD_COLORS`, `djplay::getPadColor`).
+pub const HOT_CUE_COLORS: [(u8, [u8; 3]); 8] = {
+    let t = mb_usb::cues::UI_PAD_COLORS;
+    [(8, t[8]), (19, t[19]), (23, t[23]), (32, t[32]), (36, t[36]), (38, t[38]), (43, t[43]), (60, t[60])]
+};
 
-/// Display colour of a hot cue's colour code (default green when unknown).
+/// Display colour of a hot cue's colour code, as rekordbox shows it (default green without one).
 pub fn hot_cue_color(code: Option<u8>) -> egui::Color32 {
-    code.and_then(|c| HOT_CUE_COLORS.iter().find(|(k, _)| *k == c))
-        .map_or(HOT_CUE_DEFAULT, |(_, [r, g, b])| egui::Color32::from_rgb(*r, *g, *b))
+    code.filter(|c| (1..=64).contains(c))
+        .map_or(HOT_CUE_DEFAULT, |c| {
+            let [r, g, b] = mb_usb::cues::UI_PAD_COLORS[usize::from(c)];
+            egui::Color32::from_rgb(r, g, b)
+        })
 }
 
 /// Memory-cue colours by `djmdCue.Color` slot, for display only (rekordbox's RGB values are open).

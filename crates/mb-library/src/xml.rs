@@ -146,14 +146,14 @@ pub fn write_document(doc: &Document, path: &Path) -> Result<()> {
 
 /// `addPositionMarkNode` @0x1010574b0 for one track: the cues after `checkCueInfos`, in row order;
 /// `Type` 4 when there is an out point; RGB for hot cues A–H from `getHotCueDefaultColor`
-/// (`Num + 1`, `start < end`, the colour code, the colour type). Hot cues beyond H are not written.
+/// (`Num + 1`, `start < end`, the colour code, the colour type, device flag off: the UI palette). Hot cues beyond H are not written.
 pub fn position_marks(rows: &[mb_usb::cues::SourceCue], hot_cue_color_type: u8) -> Vec<PositionMark> {
     mb_usb::cues::checked_cues(rows)
         .into_iter()
         .filter_map(|c| {
             let num = export::position_mark_num(i64::from(c.kind))?;
             let rgb = (num >= 0).then(|| {
-                mb_usb::cues::hot_cue_rgb((num + 1) as u16, c.in_ms < c.out_ms, c.color_table_index, hot_cue_color_type)
+                mb_usb::cues::hot_cue_ui_rgb((num + 1) as u16, c.in_ms < c.out_ms, c.color_table_index, hot_cue_color_type)
             });
             export::position_mark(i64::from(c.kind), &c.comment, c.in_ms, c.out_ms, rgb)
         })
