@@ -16,6 +16,8 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | 6. Analysis of the unanalysed `m2-import-test.wav` | no auto-analysis prompt any more; rows and ANLZ untouched. |
 | musicbox export of the three smart lists to RBTEST (9 tracks copied, 4 unsupported probes skipped like rekordbox) | `rbdiff device` 0 mismatches, lint clean; after rekordbox mounted it: export.pdb, exportExt.pdb and exportLibrary.db rows identical (1137 PDB rows, 1080 devlib rows). |
 
+**First-analysis artwork (7d8724d):** musicbox's analysis now extracts the embedded picture like rekordbox (`ImagePath`, `artwork.jpg`/`_s`/`_m`, the `contentFile` row; `analyse-track.md` § Artwork). Checked in rekordbox: an MP3 imported and analysed by musicbox (`accept_check import` + `analyse`) starts without any prompt, and rekordbox leaves its row, ANLZ and artwork files untouched.
+
 **Also fixed (1b594a4):** 1107 AppleDouble `._` files on RBTEST. macOS tags files a provenance-tracked process creates with `com.apple.provenance` (not removable), and FAT stores it in `._<name>`. Every device write now deletes the companions of what it wrote (`mb_usb::appledouble`); RBTEST was cleaned (339 old ones under `Contents/`).
 
 **rekordbox quirk:** an Apple-Event quit during startup ran `backupDeviceLibrary` and deadlocked in JUCE's URL session (`SharedSession::removeTask`); rekordbox had to be killed. Quit only after the main window is up.

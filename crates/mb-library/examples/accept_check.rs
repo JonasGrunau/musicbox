@@ -6,6 +6,7 @@
 //! - `survey [device_root] [rekordbox.xml]`: unanalysed tracks, device lists, XML lists.
 //! - `analyse`: analyses every track without analysis (like auto-analysis), preferences from
 //!   `rekordbox3.settings`.
+//! - `import <audio file>...`: imports files into the collection (the app's "Import").
 //! - `xml <rekordbox.xml> <list name>`: imports one XML playlist (tracks + list).
 //! - `device <device_root> <list name> [<track id to remove first>]`: imports a device
 //!   playlist; optionally removes one collection track first so that it is imported anew
@@ -91,6 +92,11 @@ fn main() -> anyhow::Result<()> {
                 println!("  {} {}: BPM {:?}, key {:?}, {} s", t.id.0, t.title, analysis.bpm_x100, analysis.key, analysis.length);
                 lib.execute(Command::ApplyAnalysis { content: t.id.clone(), analysis: Box::new(analysis) })?;
             }
+        }
+        "import" => {
+            let paths: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
+            let out = lib.execute(Command::ImportFiles { paths })?;
+            println!("import: {:?}", out.effect);
         }
         "xml" => {
             let doc = mb_library::xml::read_document(Path::new(&args[2]))?;
