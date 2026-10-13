@@ -38,12 +38,12 @@ impl Drop for Lib {
     }
 }
 
-fn temp_library() -> Option<Lib> {
+fn temp_library(name: &str) -> Option<Lib> {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/oracle-a");
     if !fixture.exists() {
         return None;
     }
-    let root = std::env::temp_dir().join(format!("mb-ui-analysis-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("mb-ui-analysis-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     copy_dir(&fixture.join("rekordbox"), &root.join("rekordbox"));
     std::fs::copy(fixture.join("options.json"), root.join("options.json")).unwrap();
@@ -84,7 +84,7 @@ fn shot(h: &mut Harness<'_, App>, name: &str) {
 
 #[test]
 fn analyze_track_then_undo() {
-    let Some(lib) = temp_library() else {
+    let Some(lib) = temp_library("analyze") else {
         eprintln!("no fixtures, skipping");
         return;
     };
@@ -149,4 +149,70 @@ fn analyze_track_then_undo() {
     assert_eq!(analysed(&lib, &content).1, None);
     assert!(!dat.exists() && !dat.with_extension("EXT").exists() && !dat.with_extension("2EX").exists());
     shot(&mut h, "03-undone");
+}
+
+/// "Analysis Lock On" / "Analysis Lock Off" in the track menu set and clear `Analysed` bit 0x80.
+#[test]
+fn analysis_lock_menu() {
+    let Some(lib) = temp_library("lock") else {
+        eprintln!("no fixtures, skipping");
+        return;
+    };
+    let content: String = query(&lib, |c| c.query_row("SELECT ID FROM djmdContent WHERE Title = ?1", [TRACK], |r| r.get(0)).unwrap());
+    let args = Args {
+        options: Some(lib.options.clone()),
+        db: Some(lib.db.clone()),
+        analysis_root: Some(lib.share.clone()),
+        backup_root: Some(lib.root.join("backups")),
+        no_volume_scan: true,
+        ..Default::default()
+    };
+    let mut h = Harness::builder().with_size(Vec2::new(1400.0, 900.0)).build_eframe(|cc| {
+        musicbox::install(&cc.egui_ctx);
+        App::new(cc.egui_ctx.clone(), args)
+    });
+    wait(&mut h, "library loaded", 60, |h| h.query_by_label("oracle-small").is_some());
+    h.get_by_label("Read-only").click();
+    wait(&mut h, "editing on", 60, |h| h.query_by_label_contains("Editing on").is_some());
+    let before = analysed(&lib, &content).0;
+    assert_eq!(before & 0x80, 0);
+
+    h.get_all_by_label(TRACK).next().unwrap().click_secondary();
+    h.run_steps(2);
+    assert!(h.query_by_label("Analysis Lock Off").is_none());
+    h.get_by_role_and_label(Role::Button, "Analysis Lock On").click();
+    wait(&mut h, "locked", 60, |_| analysed(&lib, &content).0 == before | 0x80);
+    h.run_steps(3);
+
+    // The table reloads after the write; reopen the menu until it shows the locked state.
+    let start = std::time::Instant::now();
+    loop {
+        // After the reload the title also shows on the deck; try each match until the table
+        // row's menu opens.
+        let n = h.get_all_by_label(TRACK).count();
+        for i in 0..n {
+            h.key_press(Key::Escape);
+            h.run_steps(2);
+            h.get_all_by_label(TRACK).nth(i).unwrap().click_secondary();
+            h.run_steps(2);
+            if h.query_by_label("Analyze Track").is_some() {
+                break;
+            }
+        }
+        if h.query_by_label("Analysis Lock Off").is_some() {
+            break;
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "menu never offered Analysis Lock Off (menu open: {}, lock on offered: {}, matches: {})",
+            h.query_by_label("Analyze Track").is_some(),
+            h.query_by_label("Analysis Lock On").is_some(),
+            h.get_all_by_label(TRACK).count()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(h.query_by_label("Analysis Lock On").is_none());
+    shot(&mut h, "lock-menu");
+    h.get_by_role_and_label(Role::Button, "Analysis Lock Off").click();
+    wait(&mut h, "unlocked", 60, |_| analysed(&lib, &content).0 == before);
 }

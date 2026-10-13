@@ -23,6 +23,7 @@
 //! [`WriteTxn`]: mb_masterdb::WriteTxn
 
 pub mod analyse;
+pub mod analysis_lock;
 pub mod cues;
 pub mod device_history;
 pub mod device_import;
@@ -140,6 +141,9 @@ pub enum Command {
     ApplyAnalysis { content: DbId, analysis: Box<TrackAnalysis> },
     /// Inverse of [`Command::ApplyAnalysis`]: the previous files, columns and rows.
     RestoreAnalysis { snapshot: Box<AnalysisSnapshot> },
+    /// "Analysis Lock On/Off" (`analysis_lock`): `Analysed` bit 0x80 on the tracks whose state
+    /// differs. Locked tracks are not analysed and their beat grid is not edited.
+    SetAnalysisLock { ids: Vec<DbId>, locked: bool },
 }
 
 /// What a command did.
@@ -270,6 +274,7 @@ impl Library {
             Command::ImportXml { import } => xml::import(self, &import)?,
             Command::ApplyAnalysis { content, analysis } => analyse::apply(self, &content, &analysis)?,
             Command::RestoreAnalysis { snapshot } => analyse::restore(self, &snapshot)?,
+            Command::SetAnalysisLock { ids, locked } => analysis_lock::set_lock(self, &ids, locked)?,
             Command::Batch { commands } => {
                 let mut inverses = Vec::new();
                 for c in commands {

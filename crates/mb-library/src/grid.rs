@@ -255,6 +255,10 @@ pub(crate) fn set_beat_grid(lib: &mut Library, content: &DbId, beats: &[Beat]) -
     if beats.windows(2).any(|w| w[1].time_ms <= w[0].time_ms) {
         return Err(Error::Invalid("beats must be in time order".into()));
     }
+    // rekordbox: "Beatgrid adjustment error. Turn off Analysis Lock."
+    if crate::analysis_lock::is_locked(lib, content)? {
+        return Err(Error::Invalid("the track's analysis is locked; turn off Analysis Lock to adjust the beat grid".into()));
+    }
     write_grid(lib, content, NewGrid::Beats(beats), None)
 }
 

@@ -392,6 +392,16 @@ fn row_menu(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
         actions.push(Action::AnalyzeTracks(ids.clone()));
         ui.close();
     }
+    // rekordbox's "Analysis Lock On/Off": locked tracks are not analysed and their grid stays.
+    let locked = |want: bool| ids.iter().any(|id| library.tracks.iter().any(|t| &t.id == id && (t.analysed & 0x80 != 0) == want));
+    if locked(false) && ui.button("Analysis Lock On").clicked() {
+        actions.push(Action::Run(Command::SetAnalysisLock { ids: ids.clone(), locked: true }));
+        ui.close();
+    }
+    if locked(true) && ui.button("Analysis Lock Off").clicked() {
+        actions.push(Action::Run(Command::SetAnalysisLock { ids: ids.clone(), locked: false }));
+        ui.close();
+    }
     ui.separator();
     if ui.button("Remove from Collection…").clicked() {
         actions.push(Action::AskRemoveFromCollection(ids));
