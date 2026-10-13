@@ -2,6 +2,28 @@
 
 Newest entry first. Each entry records what changed, what is verified, and the next action.
 
+## 2026-10-13 — rekordbox acceptance runs, automated (Mac checks 3–6 done)
+**Method.** musicbox's own commands (`cargo run -p mb-library --example accept_check -- <options.json> <step>`, the same `Command`s the UI sends) on the sandbox library, then rekordbox started in the background with RBTEST mounted (`open -g`, quit by Apple Event), with before/after snapshots: every master.db table as sorted TSV (`cargo run -p mb-masterdb --example dump`), the ANLZ tree's MD5s, the stick's files, and the stick's export.pdb/exportExt.pdb/exportLibrary.db rows (`pdb_dump`, `mb-devlib --example query`). Reference stick not mounted at any time.
+
+**What rekordbox does on its own** (baseline run, nothing changed): rewrites the three `djmdSampler` rows (new USNs), writes `master.backup.<date>.db`, `automixPlaylist6.xml` and a few settings files; on the stick it rewrites export.pdb/exportExt.pdb with the same rows (header `xid` +3, `state` 5 → 4) and, on quit, refreshes `DeviceLibBackup/rbDevLibBaInfo_<DBID>.json` (its PC-side backup). With `AutoAnalysis` = 1 it opens "Analysis Setting / Die Auto-Analyse startet" at startup while any track has no analysis.
+
+**Results**
+| Check | Result |
+|---|---|
+| 3. `m7_check` smart lists (36 / 30 / 170 tracks) | rows untouched by rekordbox. The counts in rekordbox's UI were not read: window capture fails while rekordbox runs (ScreenCaptureKit error -3811), so a visual check is still open. |
+| 4. Device import (RBTEST `musicbox check`, one track removed first so it is copied anew) | **bug found and fixed (1b594a4):** the imported row kept `ContentLink` 14, and rekordbox opened its "analysed with an old version" alert (`MissingWaveDataAlertWindow`). `modAnalyzeStatus` also writes `ContentLink`; now 0xC060E. After the fix: no alert, rows untouched. The device row stamp survives rekordbox's rewrite. |
+| 5. XML import (oracle-a `oracle-small`, tracks already in the collection) | rows untouched. |
+| 6. Analysis of the unanalysed `m2-import-test.wav` | no auto-analysis prompt any more; rows and ANLZ untouched. |
+| musicbox export of the three smart lists to RBTEST (9 tracks copied, 4 unsupported probes skipped like rekordbox) | `rbdiff device` 0 mismatches, lint clean; after rekordbox mounted it: export.pdb, exportExt.pdb and exportLibrary.db rows identical (1137 PDB rows, 1080 devlib rows). |
+
+**Also fixed (1b594a4):** 1107 AppleDouble `._` files on RBTEST. macOS tags files a provenance-tracked process creates with `com.apple.provenance` (not removable), and FAT stores it in `._<name>`. Every device write now deletes the companions of what it wrote (`mb_usb::appledouble`); RBTEST was cleaned (339 old ones under `Contents/`).
+
+**rekordbox quirk:** an Apple-Event quit during startup ran `backupDeviceLibrary` and deadlocked in JUCE's URL session (`SharedSession::removeTask`); rekordbox had to be killed. Quit only after the main window is up.
+
+**M6 in progress (workers):** phrase stage D (stages A–C now match rekordbox bit for bit on 161/161; IntroEndJudge ported, 161/161); TF: `mb-nn` loads rekordbox's TF 2.16.1 (activations bit-identical), madmom beat lists 166/166 on oracle-b, which was made in mode 4 (high precision + `trackHiPrecisionBeatAnalysisMode` 1 = Dynamic).
+
+**User checks left:** studio CDJ test of RBTEST (now 166 tracks, lists `musicbox check`, `oracle-all`, three `mb …` smart lists; no `._` files) and the My Settings check; optionally the smart-list counts in rekordbox's UI.
+
 ## 2026-10-12 (later) — status board: M4 done, M5/M7 built, M6 waveforms + loudness
 **Milestones**
 | | State | Commits |
@@ -79,6 +101,7 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 **User checks waiting** (all need rekordbox quit first; sandbox library only):
 1. Studio: RBTEST on the CDJ-3000 (§ M3 entry below), then the My Settings check (musicbox "My Settings…" on RBTEST: LANGUAGE German, JOG DISPLAY MODE ARTWORK, TEMPO RANGE WIDE, Waveform color 3Band; the CDJ shows them after loading the stick's My Settings).
 2. ~~Mac: `m5_check`~~ **passed 2026-10-12** (cues, hot cues, loop, comment, grid shift, ×2 all shown; the doubled BPM is 2 × the first beat's tempo, which rekordbox's own grid edit also does). A rekordbox grid edit was captured as `fixtures/oracle-grid-edit`; musicbox reproduces it byte for byte.
+3–6: **done by automated runs on 2026-10-13** (entry above), except the visual smart-list counts.
 3. Mac: same with `--example m7_check`: three "mb …" intelligent playlists with the printed counts and rules.
 4. Mac: device import from RBTEST (musicbox "Import to Collection" on `oracle-small`, "Import Histories" after the CDJ wrote histories), then rekordbox shows the tracks with waveforms/cues and the histories; a rekordbox export of `oracle-small` to RBTEST copies nothing again.
 5. Mac: XML. musicbox "Export Collection in xml format…" → rekordbox imports a playlist from it (metadata, grid, cues). Then musicbox "Open rekordbox xml…" on a rekordbox-written XML → "Import to Collection" → rekordbox shows the list, grids at once, cue colours right.
