@@ -166,6 +166,11 @@ fn import_a_playlist_from_rekordboxs_export() {
         let ours: Vec<String> = row(lib.connection(), cols, &r.local_id.0);
         let theirs: Vec<String> = row(oracle.connection(), cols, &t.master_content_id.to_string());
         assert_eq!(ours, theirs, "{}", t.title);
+        // `modAnalyzeStatus` also sets `ContentLink`; without 0x80000 rekordbox would call the
+        // track "analysed by an old version" and ask to re-analyse it.
+        let link: i64 = lib.connection().query_row("SELECT ContentLink FROM djmdContent WHERE ID = ?1", [&r.local_id.0], |x| x.get(0)).unwrap();
+        assert_eq!(link, i64::from(mb_library::device_import::imported_status(t.analysed, t.content_link).1));
+        assert_ne!(link & 0x80000, 0, "{}", t.title);
         let (adp, master): (String, String) = lib
             .connection()
             .query_row("SELECT AnalysisDataPath, MasterSongID FROM djmdContent WHERE ID = ?1", [&r.local_id.0], |x| Ok((x.get(0)?, x.get(1)?)))
@@ -324,4 +329,11 @@ fn histories_of_a_foreign_stick_are_skipped() {
     let Effect::HistoriesImported(r) = &out.effect else { panic!() };
     assert!(r.imported.is_empty() && r.skipped.len() == 21);
     assert_eq!(lib.usn().unwrap(), usn);
+}
+
+#[test]
+fn imported_status_replays_mod_analyze_status() {
+    // An RBTEST row: Analysed 41, ContentLink 0xC0700 → 105 and 0xC060E (no phrase/vocal bits:
+    // the device ContentLink never carries them).
+    assert_eq!(mb_library::device_import::imported_status(41, 0xC0700), (105, 0xC060E));
 }

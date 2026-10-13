@@ -16,6 +16,7 @@
 //!
 //! The three database formats are written by [`mb_pdb`], [`mb_devlib`] and [`mb_anlz`].
 
+pub mod appledouble;
 pub mod convert;
 pub mod cues;
 pub mod device;

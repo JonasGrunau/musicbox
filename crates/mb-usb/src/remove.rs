@@ -574,6 +574,7 @@ pub fn execute_remove(plan: &RemovePlan, dev: &DeviceState) -> Result<RemoveRepo
             }
         }
     }
+    crate::appledouble::clean_tree(&plan.root, &plan.root.join(pioneer_dir(plan.hidden)));
     let _ = std::fs::File::open(&plan.root).and_then(|f| f.sync_all());
     Ok(report)
 }

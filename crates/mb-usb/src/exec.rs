@@ -11,7 +11,8 @@
 //! 3. One `F_FULLFSYNC`, then the databases: exportLibrary.db, export.pdb, exportExt.pdb, each
 //!    built next to its final name and renamed into place, each `F_FULLFSYNC`ed. Only the
 //!    tracks whose files were all written are in them.
-//! 4. The markers are deleted; the export log is written for tracks that were not exported.
+//! 4. The markers are deleted; the AppleDouble companions of everything written are removed
+//!    ([`crate::appledouble`]); the export log is written for tracks that were not exported.
 //!
 //! Cancellation or a failed copy stops before the next track; the databases are still written
 //! for the tracks done so far, so the stick stays consistent.
@@ -142,6 +143,8 @@ struct Ctx<'a> {
     progress: &'a mut dyn FnMut(&Progress),
     state: Progress,
     check_space: bool,
+    /// Audio files written, for the AppleDouble cleanup.
+    written: Vec<PathBuf>,
 }
 
 impl Ctx<'_> {
@@ -179,6 +182,7 @@ pub fn execute(
             current: None,
         },
         check_space: opts.check_free_space,
+        written: Vec::new(),
     };
     ctx.report();
     check_unchanged(dev, &rb)?;
@@ -270,6 +274,8 @@ pub fn execute(
             let _ = std::fs::remove_file(m);
         }
     }
+    crate::appledouble::clean_tree(root, &pioneer);
+    crate::appledouble::remove_companions(root, ctx.written.iter().map(PathBuf::as_path));
     full_fsync_dir(&rb);
     if let Some(dir) = &opts.log_dir {
         let body = entries(&plan.jobs, &report.results);
@@ -328,6 +334,7 @@ fn run_files(ctx: &mut Ctx, files: &[FileOp]) -> std::result::Result<(), StepErr
                     }
                 }
                 copy_audio(ctx, from, &dest)?;
+                ctx.written.push(dest);
             }
             FileOp::DeleteAnlz { dat } => {
                 let p = ctx.fs(dat);

@@ -17,7 +17,9 @@
 //!    `(device & 0x26000) | 0xE`.
 //! 4. **Analysis files** (`import_device_analysis` @0x1001db460): device `.DAT`/`.EXT` →
 //!    [`mb_anlz::local::to_local`], `.2EX` copied unchanged, into the local folder of the new
-//!    content UUID; then `AnalysisDataPath` and `Analysed = (device & 0xC060020) | 0x49`.
+//!    content UUID; then `AnalysisDataPath` and `modAnalyzeStatus` with
+//!    `(device status & 0xC060020) | 0x49`, which sets `Analysed` and `ContentLink`
+//!    ([`imported_status`]).
 //! 5. **Cues** from the device analysis files go to `djmdCue` (`getDeviceContentCueInfo` →
 //!    `updateCue`; hot cue bank cues, kind 101, are skipped).
 //! 6. **Artwork** (`add_track_artwork` @0x1001dbf44): the device image becomes the local
@@ -253,8 +255,9 @@ pub(crate) fn import(lib: &mut Library, req: &DeviceImport) -> Result<(Effect, O
                 Value::Text(id.0.clone()),
                 &[("AnalysisDataPath", Value::Text(format!("/{rel}/ANLZ0000.DAT")))],
             )?;
-            let analysed = (u32::from(t.analysed) & 0x0C06_0020) | 0x49;
+            let (analysed, link) = imported_status(t.analysed, t.content_link);
             tx.update("djmdContent", "ID", Value::Text(id.0.clone()), &[("Analysed", Value::Integer(i64::from(analysed)))])?;
+            tx.update("djmdContent", "ID", Value::Text(id.0.clone()), &[("ContentLink", Value::Integer(i64::from(link)))])?;
             tx.commit()?;
             for cue in device_cues(dat) {
                 cues::add_cue(lib, &id, &cue)?;
@@ -408,6 +411,21 @@ fn write_local_artwork(device_small: &Path, dir: &Path) -> Result<()> {
         std::fs::copy(from, &dest).map_err(|e| io(&dest, e))?;
     }
     Ok(())
+}
+
+/// `Analysed` and `ContentLink` after `modAnalyzeStatus` (vtable +0x490, @0x1017e37fc) runs with
+/// `(device status & 0xC060020) | 0x49`, where the device status is `getAnalyzeStatus`
+/// (`(Analysed | ContentLink << 8) & 0x3C86707B`). `Analysed` = status & 0x7B; `ContentLink` =
+/// the inserted value `(device & 0x26000) | 0xE` with the 0x8670 bits cleared, 0xE kept, and
+/// `(status >> 8) & 0x3C8670` ORed in (`analyse-track.md` § Status bits). An RBTEST row
+/// (41, 0xC0700) becomes (105, 0xC060E). Without the 0x80000 bit rekordbox counts the track as
+/// analysed by an old version (`RowDataTrack::isAnalyzedOldVer` @0x10008a5b0) and asks to
+/// re-analyse it on startup.
+pub fn imported_status(analysed: u8, content_link: u32) -> (u32, u32) {
+    let device_status = (u64::from(analysed) | (u64::from(content_link) << 8)) & 0x3C86_707B;
+    let status = ((device_status & 0x0C06_0020) | 0x49) as u32;
+    let inserted = (content_link & 0x26000) | 0xE;
+    (status & 0x7B, (inserted & !0x8670) | 0xE | ((status >> 8) & 0x3C_8670))
 }
 
 /// Cues in the device analysis files: the `.EXT` lists when present (they carry every hot cue,

@@ -70,5 +70,7 @@ pub fn stamp_master_ids(dev: &DeviceState, stamps: &[(u32, u32, u32)]) -> Result
     let path = rb.join("export.pdb");
     check_unchanged(&path, &files.export_bytes)?;
     crate::exec::write_replace(&path, &ex.finish())?;
-    full_fsync(&path)
+    full_fsync(&path)?;
+    crate::appledouble::clean_tree(&dev.root, &dev.root.join(crate::naming::pioneer_dir(dev.hidden)));
+    Ok(())
 }

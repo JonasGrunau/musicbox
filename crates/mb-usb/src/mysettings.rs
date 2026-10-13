@@ -805,6 +805,7 @@ impl MySettings {
             crate::remove::full_fsync(&path)?;
             written.push(path);
         }
+        crate::appledouble::remove_companions(root, written.iter().map(PathBuf::as_path));
         Ok(written)
     }
 }

@@ -19,3 +19,4 @@ getrandom = "0.4"
 
 [dev-dependencies]
 anyhow.workspace = true
+md-5 = "0.10"

@@ -93,6 +93,7 @@ pub fn apply_to_device(root: &Path, effect: &mb_library::Effect) -> Result<Optio
             }
             let path = rekordbox_dir(root).join("ImportedHistory.xml");
             std::fs::write(&path, ih.to_xml()).map_err(|e| format!("{}: {e}", path.display()))?;
+            mb_usb::appledouble::remove_companions(root, [path.as_path()]);
             Ok(Some("recorded in ImportedHistory.xml".into()))
         }
         _ => Ok(None),

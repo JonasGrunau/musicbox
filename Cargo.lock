@@ -2365,6 +2365,7 @@ dependencies = [
  "chrono",
  "getrandom 0.4.3",
  "mb-core",
+ "md-5",
  "rusqlite",
  "serde_json",
  "sysinfo",
