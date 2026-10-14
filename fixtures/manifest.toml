@@ -50,7 +50,7 @@ rekordbox = "7.2.19.0342"
 macos = "27.0"
 settings = "analysis mode 3 (high precision Normal): HighPrecisionBeatAnalyze=1, trackHiPrecisionBeatAnalysisMode=0, BPM range 70-180, key/phrase/vocal ON, embedding/network OFF; see analysis-settings.txt"
 contents = "oracle-a library re-analysed by rekordbox (all tracks selected, 'Tracks analysieren')"
-notes = "rekordbox exits on the sampler loops House3/House4/Breaks2/Breaks3 in this mode (twice, reproducible; a later crash report shows heap corruption, EXC_BREAKPOINT in malloc): their DAT is rewritten, EXT/2EX and rows are not. Exclude them. vs oracle-a: PQT2 162, PQTZ 161, PSSI 85, PWAV 4, PWV2 1. rekordbox's Focus debug CSVs from the runs: ~/re-work/oracle-modes/m3-run*/csv."
+notes = "rekordbox exits on the sampler loops House3/House4/Breaks2/Breaks3 in this mode (twice, reproducible; a later crash report shows heap corruption, EXC_BREAKPOINT in malloc): their DAT is rewritten, EXT/2EX and rows are not. Exclude them. Also exclude real/mp3_cbr320/Channel X - X-Ray (Original Mix).mp3: its DAT/EXT were written at 10:57:19, two seconds before the second crash, and its 2EX was never rewritten (still oracle-a's), so its PSSI comes from the corrupted process (it is the only PSSI that differs from our analysis on rekordbox's own grid). vs oracle-a: PQT2 162, PQTZ 161, PSSI 85, PWAV 4, PWV2 1. rekordbox's Focus debug CSVs from the runs: ~/re-work/oracle-modes/m3-run*/csv."
 
 [oracle-d]
 path = "fixtures/oracle-d"

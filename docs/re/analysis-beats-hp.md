@@ -1,13 +1,13 @@
 # High-precision beat analysis (madmom + BALib v2 Focus)
 
-Status: **verified for Dynamic mode** (analysis mode 4: `HighPrecisionBeatAnalyze` = 1, `trackHiPrecisionBeatAnalysisMode` = 1). With `Options { high_precision: Some(HpMode::Dynamic), .. }`, `mb_analysis::analyze` reproduces rekordbox 7.2.19 on every `fixtures/oracle-b` track that rekordbox gave a high-precision grid (phrase pass on, as in oracle-b):
-- PQTZ 154/154;
-- PQT2 154/154;
-- `djmdContent.BPM` 154/154.
+Status: **verified for all three high-precision modes.** With `Options { high_precision: Some(mode), .. }`, `mb_analysis::analyze` reproduces rekordbox 7.2.19's grids (phrase pass on):
+- Dynamic (mode 4), `fixtures/oracle-b`: PQTZ, PQT2 and `djmdContent.BPM` 154/154;
+- Normal (mode 3), `fixtures/oracle-c`: 162/162, PSSI 161/161 (the four sampler loops on which rekordbox crashes are excluded, and so is X-Ray's PSSI, written by the crashing process; `fixtures/manifest.toml`);
+- Auto (mode 2), `fixtures/oracle-d`: 154/154, PSSI 166/166.
 
-The other 12 tracks (sweeps) get no high-precision grid, in rekordbox as in musicbox (§ 6). Normal (mode 3) and Auto (mode 2) are not ported (§ 8). Scorecard: `docs/scorecards/beats-hp.json`.
+In modes 4 and 2 the other 12 tracks (sweeps) get no high-precision grid, in rekordbox as in musicbox (§ 6). The BPM-range rebuild for grids outside 70–180 is not ported (§ 6, § 9). Scorecards: `docs/scorecards/beats-hp.json` (mode 4), `docs/scorecards/beats-hp-v2.json` (modes 3 and 2).
 
-Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`madmom.rs`, `hmm.rs`, `focus.rs`, `mod.rs`).
+Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`madmom.rs`, `hmm.rs`, `focus.rs`, `focus/constant.rs`, `focus/vote.rs`, `mod.rs`); `crates/mb-analysis/src/balib2/` (BALib v2 for modes 2 and 3).
 
 ## 1. Modes, preferences and flags
 - **Mode selection** (`DatabaseMediator::execAnalyze` @0x1014900ec):
@@ -20,8 +20,10 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
   - The shift flag `CBeatAnalyzeThread` +0x3908 is `AnalyzeJobManager` (+0x38f8) +0x10, written by `AnalyzeJobManager::SetUrahaku` @0x1022fb028.
   - `CBeatAnalyzeThread::analyze` @0x1001528c4 sets it to: beat analysis on (+0x3900) and mode ∉ {1, 4}.
   - It gates the phrase pass's grid move (`analysis-beats.md` § 8). `SongStructureAnalyze::Initialize` also receives it, negated, as its 9th argument.
-  - musicbox: `phrase::run(…, urahaku)` is called with `grid_type != 2`.
+  - musicbox: `hpbeat::HpGrid.urahaku`, passed to `phrase::run`.
+- **No phrase grid shift once madmom found beats.** Besides the thread's setting, `highPrecisionBeatAnalyze` @0x102327e50 calls `AnalyzeJobManager::SetUrahaku(false)` after parsing madmom's JSON when the beat list is not empty. So modes 2 and 3 do not shift either, unless madmom returned no beats. oracle-c and oracle-d confirm it: their PQTZ are the unshifted Focus grids.
 - **PQT2 type.** `CBeatAnalyzeThread::notifyBeat` @0x1001595c8 passes the PQT2 `analysis_type` to `notify_detailed_beat_info` (then `MstStoreExtBeatGrid`): 2 for modes 1 and 4, 2 for mode 2 when +0x3940 is set, else 1.
+  - In mode 2, `startAnalyze` sets +0x3940 from the request's beat-analysis mode (1 or 4), yet in oracle-d the type follows BALib v2's verdict: the 22 grids with tempo changes (hendou) have type 2, the 132 constant ones type 1, and the 12 sweeps keep their old type-1 grid. Where +0x3940 is rewritten is not located.
 - **oracle-b is mode 4.** 154 PQT2 have type 2. The 12 sweeps keep type 1 from the earlier pass (§ 6).
 
 ## 2. TensorFlow runtime (`mb-nn`)
@@ -47,7 +49,7 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
 ## 3. `madmom::analyze` @0x10230a820 (inner part @0x102307f8c)
 - **Input.** `(L + R)·0.5` of the decoded float samples at the analysis rate, samples `0 … L − 2` (`decode.md` § 2).
 - **Arguments.** The model 7 and model 8 paths, the file path, the rate, BALib's `GetOffsetCalc`, and the hendou flag. An output JSON gets `numChannels, sampleRate, decodeSampleRate, bitRate, bitDepth, decodeSamples, bpm, beatList[{index, bpm, pos, msec, numBar}]`.
-- **Without hendou** (modes 2/3, not ported). Model 8 runs once over 60 s from `offset`. When less than 60 s remains after `offset`, it runs over the last 60 s instead (the whole track when shorter).
+- **Without hendou** (modes 2/3). Model 8 runs once over 60 s from `offset`. When less than 60 s remains after `offset`, it runs over the last 60 s instead (the whole track when shorter).
 - **With hendou** (mode 4). Model 7 runs over the whole track in 60 s chunks.
   - When the part after the last full chunk is shorter than 30 s, the last full chunk and that remainder are run as two halves of their combined span.
   - Each chunk's times are offset by its start.
@@ -113,7 +115,29 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
      - Beat lengths come from the unrounded grid; BALib's offset is added.
      - Whole beats are added before the first beat (≥ 0) and after the last (≤ the sample count), with tempo 60000/BPM (single precision).
   8. `UnitBeatAdjust::analyze` runs on the grid (§ 8).
-  9. Then come the low- and full-band downbeat votes (not ported yet).
+  9. Then the bar-number vote below.
+- **Bar numbering after UnitBeatAdjust** (0x10117db28–0x101180744; `hpbeat/focus/vote.rs`). The adjusted grid (n beats) keeps the anchor's bar numbers until this vote; it runs whether or not `UnitBeatAdjust` ran (+0x2c).
+  1. **Band sums.** Index k+1 holds beat k: L = `calcLowInteg(bpm·0.5, pos)` (the low band over one beat), A = `calcAllInteg(bpm, pos)` @0x10113d9ac (the full band, +0x80, `rate/4·60/bpm` values from `pos/4`, −1 in the same cases as `calcLowInteg`). A negative sum becomes 0 except at beat 0. Index n+1 is 0.
+     - Index 0 is the lead-in: when the first beat lies at least half a beat in (`bpm·pos₀/(rate·60)` ≥ 0.5), the same sums from 0 at the tempo B = `rate·60/pos₀` (120 when pos₀ = 0), times B/bpm; else 0.
+  2. **Rises.** dX[0] = X[0], dX[i] = X[i] − X[i−1]. dX[0..n] are scaled by their largest value (taken together with 0) when that is over `DBL_EPSILON`: dX[0] by division, the others by the reciprocal. dX[n+1] stays unscaled.
+  3. **Irregular falls.** Per band: the running maximum of |dX| from the end; from one past the last index with |dX| > 0.7 up to n−1, the indices where that maximum grows by more than 0.005. More than four, or two of the first four not on neighbouring indices, mark the band irregular.
+  4. **Head votes.** Without a lead-in (q < 0.5): the first k in 1..n with dL[k] > 0.35 votes beat k−1's bar number; the first k with dA[k] > mean + 1.5σ of |dA[1..w]| (w = min(n, 48)) does the same. With a lead-in the scans start at 0 and the statistics take |dA[0..w]| (w+1 values); k = 0 votes the bar before beat 0. 0 when nothing qualifies.
+  5. **Tail votes.** Per band: mean and σ of the last w values |dX[n+1−w+1 .. n+1]|, summed from the end. Scanning k from n+1 down to 2, the first dX[k] < −0.5σ − mean votes beat k−1's bar number, or the bar after the last beat when k = n+1. A band's tail vote counts only when the band is not irregular. The mean and spread sums are 8-wide with four 2-lane accumulators and fused multiply-adds, like the constant path's mean residual.
+  6. **Median votes.** With m = the median of |dL[0..n+1]| (n+2 values): every k in 1..n+1 with dL[k] > m + 0.2 (m + 0.1 when that gives fewer than five) is a candidate for beat k−1's bar number (the bar after the last beat at k = n+1). A candidate is kept when it lies at least 5 beats after each of the previous four candidates. Kept votes are tallied per bar (k₁..k₄) only when at least two were kept.
+  7. **Loudest beats.** L[0..n+1] sorted descending (exchange sort, so ties keep a fixed order) with the bar numbers [beat 0..n−1, the bar after the last beat, the one after that]; the first 16 are tallied (t₁..t₄).
+  8. **Winner.** The leader of k₁..k₄ (ties to the lower bar). When its lead over the runner-up is at most 10 and the runner-up has more than 4 votes, step 6 is redone on L itself, scaled by its largest value over 0..n; that vote's leader wins (0 when it has none).
+  9. **Cases** (first match; v₁..v₄ tallies the head and tail votes, "lead" = first or last leader of v; each case rotates every beat's bar number or keeps it):
+     - only k₁ non-zero → keep; only k₂ → one back (2→1, 1→4); only k₃ → half a bar (s ± 2); only k₄ → one on (4→1);
+     - lead 1 and k₁ ≥ 1, others ≤ 1 → keep; lead 2, k₂ ≥ 1, others ≤ 1 → one back; lead 3, k₃ ≥ 1, others ≤ 1 → half a bar;
+     - (last leader 4 or v₄ above v₁..v₃), k₁ ≤ 1, k₂ ≤ 1, k₃ ≤ 10, k₄ ≥ 1 → one on;
+     - head low vote h ≠ 1 with h = head full vote, and h equal to each tail vote or the bar before it (any combination) → shift by 1 − h;
+     - first and last leader 1 and winner 1 → keep; a leader i ≥ 2 equal to the winner → shift by 1 − winner;
+     - v_i ≥ 1 and the loudest 16 only on bar i → keep / one back / half a bar / one on for i = 1..4;
+     - first leader i ≥ 2 equal to the last leader → shift by 1 − i;
+     - else keep.
+     - "Shift by d" adds d and adds 4 below 1, with no wrap at the top. With all four head/tail votes 0 the fourth case would give bar 5; not seen.
+  10. The list is copied to the result (+0x88) and +0x4c = +0x48.
+  - **Result.** With harness inputs (BALib and madmom from rekordbox), Focus's final list and BPM match rekordbox on 166/166 constant-path tracks; every case above occurs at least twice.
 - **A pass.**
   1. Beat times are rounded to the ms (`frinta`). Intervals in ms are `trunc(Δt·1000 + 0.5)`.
   2. **Reference interval:** the mean interval of the first stretch of at least `min(n, 37)` intervals whose neighbours differ by ≤ 11 ms, else ≤ 20 ms, else ≤ 30 ms; failing all three, the mean of the first `min(n, 37)` intervals. It is kept when `60000/mean` is within 0.8–1.25× the madmom BPM. Otherwise the madmom BPM sets it.
@@ -176,25 +200,30 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
    - `µs = pos·10⁶/rate` (64-bit integer); `ms = µs/1000`; sub-ms = the remainder (`analysis-beats.md` § 7).
    - The BPM-range rebuild (`bpmToDouble`/`bpmToHalf`) is skipped because the job's hendou flag (job +0x28 → +0x30) is set.
 6. `djmdContent.BPM` = `GetBpm_Focus`. PQT2 type 2 (§ 1).
+- **Modes 2 and 3.** hendou = BALib v2's verdict in mode 2, false in mode 3 (`SetBpmHendou`, job +0x30). madmom runs model 7 over the whole track with hendou, else model 8 over the 60 s window. Focus gets BALib v2's beat count and BPM, madmom's list and BPM, and the analyser's `UnitBeatAdjust` bands.
+- **`getFirstBeatPos`** @0x102328a00 reads the job's previous `DetailedBeatInfo` array (+0x58, when it has more than 7 beats): +0x88 = its first beat's ms, +0x90 = that beat's bar through `convFirstBar`. When the stored tempo differs from the new BPM and the beat lies between one and two beats in, both move one beat back. It does not touch the new grid.
+- **BPM-range rebuild** (`convertToMicrosec` without hendou). The BPM (`GetBpm_Focus`, else the first beat's tempo) is checked against `bpmRangeList[+0x7c]` (index 1 → 70–180). Below the range `bpmToDouble` @0x102329060 inserts a beat between each pair at double tempo, repeatedly; above it `bpmToHalf` @0x10232967c keeps every second beat at half tempo; both renumber the bars (`renumberBeat`) from the first beat's bar through a table, and the job BPM is doubled or halved with them. Not ported: no oracle-c/d track leaves 70–180 (min 73.97, max 180.00).
 
 ## 7. musicbox
 - **Options.** `Options.high_precision: Option<HpMode>`.
   - `hpbeat::grid` runs madmom on the `(L + R)/2` samples gathered during the decode pass.
   - Focus is then seeded with the Normal-mode grid's beat count and BPM. Only non-zero matters, which stands in for BALib v2's count (§ 8).
   - `Analysis.grid_type` is the PQT2 type.
-  - Normal and Auto keep the Normal-mode grid and set `Analysis.high_precision_error`.
   - The model is loaded once per process.
 - **No beats.** `Analysis.beats` is `None`. `mb-library` then sets `TrackAnalysis.keep_old_grid`: `ApplyAnalysis` carries the previous PQTZ/PQT2 over and writes `BPM` 0 (`ops/analyse-track.md`).
   - Key and phrase run on the stored grid, as in rekordbox (§ 6): `mb_analysis::analyze_with` / `mb_library::analyse_track_with` take it from the caller. The 12 sweeps then get oracle-b's key and PSSI.
 - **Preferences.** `AnalysisSettings::high_precision_from(HighPrecisionBeatAnalyze, trackHiPrecisionBeatAnalysisMode)`, with the binary's defaults 0 and 2.
-- **No phrase shift for a Dynamic grid** (urahaku, § 1). Without this gate, 57 of the 154 grids would move.
+- **Normal and Auto.** `mb_analysis::analyze` feeds BALib v2's constant analyser (`balib2::Analyzer`) during the decode pass. `hpbeat::grid_v2` then runs the job: `finish_with_adjust` (BPM, offset, verdict, and the `UnitBeatAdjust` bands), madmom, Focus (`run_with`), `convertToMicrosec`. A BPM outside 70–180 without hendou is an error (the Normal-mode grid stays, `high_precision_error`).
+  - `HpGrid { grid, grid_type, urahaku }`; no beats keeps the stored grid for key and phrase, as in Dynamic.
+- **No phrase shift once madmom found beats** (urahaku, § 1). Without this gate, 57 of oracle-b's 154 grids would move.
 - **Cost.** About 4–5 s per track, with three tracks in parallel on this machine.
 - **Tools.**
   - `cargo run --release -p mb-analysis --example hp_score`: oracle-b scoring.
-  - `hp_check {table, madmom, focus, focusin}`: developer checks against harness dumps.
+  - `hp_check {table, madmom, focus, focusin, window}`: developer checks against harness dumps.
+  - `hp_v2_score <normal|auto> [--full]`: oracle-c / oracle-d scoring; `--full` goes through `analyze_with` and scores PSSI too.
 
 ## 8. BALib v2 beat analysis (modes 2/3)
-Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (harness outside the repo) on the 169 oracle tracks: the verdict flags and returned BPM 169/169, `getOffsetCalc` 169/169, the beat list 169/169 in mode 3 and 168/169 in mode 2 (Timelock (Red Sun, Harmonika Remix): v2's copy of the varied pipeline differs from v1's from beat 575). Model 8's 60 s window: 20/20. UnitBeatAdjust v2's `analyze` 166/166; Focus's constant path up to UnitBeatAdjust 166/166 (§ 5). Not wired into `analyze()` yet; the constant path's downbeat vote and the job steps are next. Code: `crates/mb-analysis/src/balib2/` (`mod.rs`, `verdict.rs`, `adjust.rs`); examples `balib2_score`, `balib2_stages`, `balib2_uba`, `hp_check window`.
+Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (harness outside the repo) on the 169 oracle tracks: the verdict flags and returned BPM 169/169, `getOffsetCalc` 169/169, the beat list 169/169 in mode 3 and 168/169 in mode 2 (Timelock (Red Sun, Harmonika Remix): v2's copy of the varied pipeline differs from v1's from beat 575). Model 8's 60 s window: 20/20. UnitBeatAdjust v2's `analyze` 166/166; Focus's constant path up to UnitBeatAdjust 166/166 (§ 5). Wired into `analyze()` through `hpbeat::grid_v2` (§ 7). Code: `crates/mb-analysis/src/balib2/` (`mod.rs`, `verdict.rs`, `adjust.rs`); examples `balib2_score`, `balib2_stages`, `balib2_uba`, `hp_check window`.
 
 - **Shared with v1.** The sensor, envelope and filters are instruction-identical to v1 (`beats::sensor`, `beats::envelope`, `beats::filters`); the sensor list is identical on every track.
 - **Two passes.** `BeatInfoAnalyzer::analyze` @0x101198e4c runs v1's constant path, then v1's varied (Dynamic) path, on the sensor list. It keeps two BPMs:
@@ -247,10 +276,7 @@ Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (ha
     - `offsetBeatPosition` @0x10113d304 shifts all beats by (index − w)·4 samples, drops beats before 0 and beats whose next shift would pass the end, and refills whole beat lengths at both ends; the beat length is `trunc(rate/4 · (0.004 · tempo))`, single precision.
 
 ## 9. Open
-- **Modes 2 and 3** (§ 8):
-  - Focus's constant path: the downbeat vote after UnitBeatAdjust (§ 5);
-  - the BPM-range rebuild and the job side (PQT2 type, phrase shift);
-  - Timelock's varied list in mode 2.
+- **Modes 2 and 3:** the BPM-range rebuild (`bpmToDouble`/`bpmToHalf`/`renumberBeat`); Timelock's varied BALib list in mode 2 (Focus only takes the count and BPM there, so the grid is unaffected); where +0x3940 follows the verdict.
 - **BALib v2's beat count** is approximated by the presence of our Normal-mode (v1) grid. This only matters if one finds beats and the other does not.
 - **Mode 1** (Normal-mode Dynamic, the BALib v1 varied analyser) is ported and verified separately: `analysis-beats.md` § 9.
 - **Stale slot:** what the whole-run start alignment's one-past-the-end read holds. This happens only near the end of the beat vector.

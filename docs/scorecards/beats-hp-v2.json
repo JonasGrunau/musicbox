@@ -1,0 +1,44 @@
+{
+  "scorecard": "high-precision beat grid + BPM, Normal (mode 3) and Auto (mode 2): BALib v2 + madmom model 7/8 + Focus (constant path), with PSSI on top",
+  "date": "2026-10-14",
+  "rekordbox": "7.2.19.0342",
+  "tensorflow": "2.16.1 (rekordbox's own libtensorflow_cc, dlopen)",
+  "macos": "27.0",
+  "code": "crates/mb-analysis/src/balib2/ (BALib v2: two passes, verdict, UnitBeatAdjust v2, offset), crates/mb-analysis/src/hpbeat/ (grid_v2, focus/constant.rs, focus/vote.rs)",
+  "spec": "docs/re/analysis-beats-hp.md § 5-8",
+  "command": "MB_THREADS=3 cargo run --release -p mb-analysis --example hp_v2_score -- <normal|auto> --full",
+  "fixtures": {
+    "oracle-c": {
+      "mode": "3 (HighPrecisionBeatAnalyze 1, trackHiPrecisionBeatAnalysisMode 0)",
+      "tracks": 162,
+      "excluded": "House3, House4, Breaks2, Breaks3: rekordbox exits on them in this mode (fixtures/manifest.toml)",
+      "pqtz_identical": 162,
+      "pqt2_identical": 162,
+      "bpm_x100_exact": 162,
+      "pssi_identical": "161/162; the other is Channel X - X-Ray (mp3_cbr320), whose rekordbox files were written two seconds before rekordbox's crash and whose .2EX was never rewritten (excluded in the manifest), so 161/161"
+    },
+    "oracle-d": {
+      "mode": "2 (HighPrecisionBeatAnalyze 1, trackHiPrecisionBeatAnalysisMode 2, rekordbox's default high-precision mode)",
+      "tracks": 166,
+      "pqtz_identical": 154,
+      "pqt2_identical": 154,
+      "bpm_x100_exact": 154,
+      "no_beats_as_rekordbox": 12,
+      "pssi_identical": "166/166"
+    }
+  },
+  "stages_vs_rekordbox": {
+    "balib2_verdict_and_bpm": "169/169 (flags A/B/C/D and returned BPM)",
+    "balib2_offset": "169/169",
+    "balib2_beat_list": "mode 3 169/169, mode 2 168/169 (Timelock varied list; Focus takes only the count and BPM there)",
+    "unitbeatadjust_v2": "166/166 (output list, BPM, band checksums)",
+    "focus_constant_path_with_harness_inputs": "166/166 before UnitBeatAdjust, 166/166 final",
+    "madmom_model8_window": "20/20"
+  },
+  "regression": {
+    "oracle_b_mode4": "154/154 + 12 (unchanged)",
+    "oracle_a_normal": "see beats.json (unchanged)"
+  },
+  "seconds_per_track": "about 4 with phrase (3 tracks in parallel)",
+  "not_covered": ["the BPM-range rebuild for grids outside 70-180 (bpmToDouble/bpmToHalf); no oracle track leaves the range", "where the PQT2 type follows the verdict in mode 2 (+0x3940)"]
+}
