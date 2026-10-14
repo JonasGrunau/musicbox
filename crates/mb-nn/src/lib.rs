@@ -9,6 +9,8 @@
 //!
 //! All `unsafe` FFI of the analysis lives in this crate.
 
+pub mod ort;
+
 use libloading::Library;
 use md5::{Digest, Md5};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -39,6 +41,8 @@ pub enum Error {
     Io(PathBuf, std::io::Error),
     #[error("TensorFlow: {0}")]
     Tf(String),
+    #[error("ONNX Runtime: {0}")]
+    Onnx(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
