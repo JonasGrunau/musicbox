@@ -1,0 +1,50 @@
+{
+  "scorecard": "beat grid + BPM, Normal-mode Dynamic (analysis mode 1, BALib v1 varied analyser), and PSSI on top",
+  "date": "2026-10-14",
+  "rekordbox": "7.2.19.0342",
+  "macos": "27.0",
+  "code": "crates/mb-analysis/src/beats/ (varied.rs front end; info.rs shared multi-segment middle; mod.rs BeatAnalyzer::new_dynamic), Options.dynamic; mb-library AnalysisSettings.dynamic (trackAnalysisMode 1)",
+  "spec": "docs/re/analysis-beats.md § 9",
+  "commands": [
+    "MB_ORACLE=oracle-e MB_DYNAMIC=1 cargo run --release -p mb-analysis --example beat_score",
+    "MB_ORACLE=oracle-e MB_DYNAMIC=1 cargo run --release -p mb-analysis --example phrase_score"
+  ],
+  "tests": [
+    "cargo test --release -p mb-library --test analyse_ops dynamic_mode_matches_oracle_e  (wav_44k16 probes; MB_ORACLE_FULL=1 for all 166)",
+    "beats::vtest (MB_V1_DIR, harness output outside the repo): every stage against rekordbox's own analyser"
+  ],
+  "fixture": "oracle-e (trackAnalysisMode 1, HighPrecisionBeatAnalyze 0, BPM range 70-180, phrase/key/vocal on)",
+  "tracks": 166,
+  "tracks_note": "the oracle-e tracks with a PQT2 (all type 2; the 8 sampler loops included)",
+  "own_analysis": {
+    "bpm_x100_exact": 166,
+    "beat_count_exact": 166,
+    "bars_match": 166,
+    "beats_exact": "95145/95145",
+    "pqt2_identical": 166,
+    "mb_library_files": "166/166: PQTZ, PQT2 and BPM identical; PSSI identical except the known 96 kHz click probe"
+  },
+  "pssi_with_phrase_pass": {
+    "tracks": 169,
+    "with_pssi": 161,
+    "presence_matches": 169,
+    "pssi_identical": "160/161",
+    "phrases_identical": "2446/2447 by index",
+    "miss": "wav_96k32f/click_128_offset1234: phrase 2 starts at beat 15, rekordbox 11; the same 96 kHz input-side difference as in oracle-a (analysis-phrase.md § 10). Stored-grid input gives the same result."
+  },
+  "against_rekordbox_routines": {
+    "set": "rekordbox's BALib v1 analyser run on our decoded stream (harness outside the repo)",
+    "harness_vs_oracle_e": "166/166 identical",
+    "varied_path": "166/166: all 8 intermediate lists, BeatInfoAnalyzer output (exact floats), final beat list and BPM",
+    "constant_path": "166/166, same check",
+    "segments": "138 tracks with one tempo segment, 19 with two, 7 with three, 1 with four, 1 with five"
+  },
+  "regression": {
+    "oracle_a_beats_match_rekordbox": "161 tracks, 160 identical (unchanged)",
+    "oracle_a_beat_score": "BPM 161, count 161, bars 161, beats ±1 ms 94769/94897, PQT2 160/161 (unchanged)"
+  },
+  "targets": {
+    "pqtz_pqt2_bpm": "met: 166/166",
+    "pssi": "met: 160/161"
+  }
+}

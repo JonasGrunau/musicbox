@@ -108,6 +108,7 @@ fn main() -> anyhow::Result<()> {
                     pref("HighPrecisionBeatAnalyze").as_deref(),
                     pref("trackHiPrecisionBeatAnalysisMode").as_deref(),
                 ),
+                dynamic: AnalysisSettings::dynamic_from(pref("trackAnalysisMode").as_deref()),
                 vocal: pref("trackAnalysisSettingsVocalDetect").is_some_and(|v| v.trim() == "1"),
                 embedding: pref("TrackAnalysisSettingsEmbedding").is_none_or(|v| v.trim() != "0"),
                 cue: mb_library::CueAnalysisSettings::from_prefs(|n| mb_usb::settings::preference(&paths.settings_root, n)),

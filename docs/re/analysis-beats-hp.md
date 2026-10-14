@@ -177,5 +177,5 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
   - Focus's constant path;
   - the BPM-range rebuild.
 - **BALib v2's beat count** is approximated by the presence of our Normal-mode (v1) grid. This only matters if one finds beats and the other does not.
-- **Mode 1** (Normal-mode Dynamic, the BALib v1 varied analyser): `analysis-beats.md` § 9.
+- **Mode 1** (Normal-mode Dynamic, the BALib v1 varied analyser) is ported and verified separately: `analysis-beats.md` § 9.
 - **Stale slot:** what the whole-run start alignment's one-past-the-end read holds. This happens only near the end of the beat vector.

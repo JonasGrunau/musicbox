@@ -664,3 +664,59 @@ fn manual_cue_analysis_sets_cues() {
     history.undo(&mut lib).unwrap().unwrap();
     assert_eq!(cues(&lib), [(mb_library::CueSlot::Hot(0), 777, String::new())]);
 }
+
+/// Normal-mode Dynamic (`trackAnalysisMode` 1) against `fixtures/oracle-e`: PQTZ, PQT2 (type 2),
+/// PSSI and `BPM` equal rekordbox's. The 44.1 kHz WAV probes by default, every track with
+/// `MB_ORACLE_FULL=1`; the 96 kHz click probe's PSSI is the known miss
+/// (`docs/scorecards/beats-dynamic.json`).
+#[test]
+fn dynamic_mode_matches_oracle_e() {
+    let Some((share, all)) = tracks_in("oracle-e") else {
+        eprintln!("skipped: fixtures/oracle-e missing");
+        return;
+    };
+    let full = std::env::var_os("MB_ORACLE_FULL").is_some();
+    let selected: Vec<&Track> = all
+        .iter()
+        .filter(|t| t.path.exists())
+        .filter(|t| load(&share, &t.rel, "EXT").is_some_and(|f| f.ext_beat_grid().is_some()))
+        .filter(|t| full || t.path.to_string_lossy().contains("/probes/wav_44k16/"))
+        .collect();
+    if selected.is_empty() {
+        eprintln!("skipped: corpus audio missing");
+        return;
+    }
+    let settings = AnalysisSettings { phrase: true, dynamic: true, embedding: false, ..AnalysisSettings::default() };
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
+    let failures: Vec<String> = std::thread::scope(|s| {
+        let chunks: Vec<Vec<&Track>> = (0..threads).map(|i| selected.iter().skip(i).step_by(threads).copied().collect()).collect();
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                let share = &share;
+                let settings = &settings;
+                s.spawn(move || {
+                    let mut bad = Vec::new();
+                    for t in chunk {
+                        let a = analyse_track(&t.path, &t.file_name, settings).unwrap();
+                        let name = t.path.display().to_string();
+                        if a.bpm_x100 != Some(t.columns[0]) {
+                            bad.push(format!("{name}: BPM {:?} vs {}", a.bpm_x100, t.columns[0]));
+                        }
+                        for (ext, ours, tag) in [("DAT", &a.dat, Tag::PQTZ), ("EXT", &a.ext, Tag::PQT2), ("EXT", &a.ext, Tag::PSSI)] {
+                            let theirs = load(share, &t.rel, ext).unwrap();
+                            let known = tag == Tag::PSSI && name.contains("/wav_96k32f/click_128_offset1234");
+                            if ours.sections_with(tag).next() != theirs.sections_with(tag).next() && !known {
+                                bad.push(format!("{name}: {tag} differs"));
+                            }
+                        }
+                    }
+                    bad
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
+    eprintln!("{} tracks, {} failures", selected.len(), failures.len());
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

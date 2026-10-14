@@ -49,6 +49,7 @@ fn main() {
                         key: false,
                         high_precision: Some(HpMode::Dynamic),
                         vocal: false,
+                        ..Default::default()
                     };
                     let t0 = std::time::Instant::now();
                     let r = mb_analysis::analyze(&t.path, opts);

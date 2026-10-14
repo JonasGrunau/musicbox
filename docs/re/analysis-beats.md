@@ -7,7 +7,9 @@ Status: **verified** for BALib's own output. `mb_analysis::analyze(…, Options 
 
 BALib's own output matches on 140/161. In the other 21, rekordbox's **phrase pass** then moved the whole grid or renumbered its bars (§ 8). That pass's downbeat stages are ported (`analysis-phrase.md`, `Options.phrase`, on by default), and 20 of those 21 now match. The one miss is `wav_96k32f/click_128_offset1234`: we move it, rekordbox did not (`analysis-phrase.md` § 6).
 
-- Scorecard: `docs/scorecards/beats.json`.
+Normal-mode Dynamic (analysis mode 1) is verified on oracle-e: PQTZ, PQT2 and BPM 166/166 (§ 9).
+
+- Scorecard: `docs/scorecards/beats.json` (Dynamic: `docs/scorecards/beats-dynamic.json`).
 - Code: `crates/mb-analysis/src/beats/` (`sensor.rs`, `info.rs`, `envelope.rs`, `adjust.rs`, `filters.rs`, `mod.rs`).
 - Tests: `tests/oracle.rs` `beats_match_rekordbox`, `tests/synthetic.rs` `click_track_grid`.
 - Scorer: `examples/beat_score.rs`.
@@ -185,16 +187,76 @@ In oracle-a, phrase analysis was on. After the beat job, `CBeatAnalyzeThread::an
    The 5 `click_128_offset1234` copies rekordbox did not move equal ours exactly: the three MP3s, the AAC m4a and the 96 kHz WAV. So this pass is the only remaining difference. Why it left those five alone is part of the phrase analyser.
 5. **Port.** `mb_analysis::phrase` runs `SongStructureAnalyze` stages A/B on the decoded audio with `(bpm, fb, fbar)` from `BeatGrid` and applies `(first ms, first bar)` to `BeatGrid::beats` (`phrase::run`). With it, 160/161 grids are identical. Our port also leaves the three MP3 copies and the AAC copy of the click probe alone, but moves the 96 kHz WAV, which rekordbox left. The rest of the analyser (stages C/D, PSSI) is paused; see `analysis-phrase.md` § 9.
 
-## 9. Not covered: Dynamic mode and high precision
-- **Dynamic (modes 1/4, "varied").** `BA_CreateVaried44k/48k` with `Analyzer::create(…, varied = true)`:
-  - no `UnitBeatAdjust`;
-  - Analyzer +0x28 may take the caller's window;
-  - `BeatInfoAnalyzer::analyze` takes the varied branch @0x1011900d0, which builds several tempo segments from the `stat >> 8` call groups and uses `gapCorrect` @0x101194b00 instead of @0x101194e7c;
-  - `UnitEnvelopeMaker::analyze` skips the half-beat check;
-  - the job's hendou flag (+0x28 +0x30) skips the BPM range check and PQT2 gets type 2.
-- **High precision (modes 2–4).** `highPrecisionBeatAnalyze` @0x102327e50 runs BALib v2 (`GetBpm`/`GetOffsetCalc` as hints; `GetBpmHendou` in mode 2) and `madmom::analyze` @0x10230a820: a TensorFlow beat activation (TFWrapper, dlopen of the user's install) plus the downbeat HMM. Oracle-b grids are not constant (`anlz.md`).
+## 9. Dynamic mode (analysis mode 1, "varied")
 
-## 10. Open questions
+Status: **verified.** Against rekordbox's own BALib v1 analyser run on our decoded stream, on all 166 oracle-e tracks: every intermediate list of `BeatInfoAnalyzer::analyze`, its output (exact floats) and the final `BA_GetBeatList` with `BA_GetBpm` are identical. The same check on the constant path is also 166/166. That analyser reproduces oracle-e's PQTZ, PQT2 and `djmdContent.BPM` on 166/166, so the port does too (`docs/scorecards/beats-dynamic.json`).
+
+- **Mode.** `trackAnalysisMode` = 1 with `HighPrecisionBeatAnalyze` = 0 is analysis mode 1. `BALibWrapper::Create` @0x101f543dc then builds `BA_CreateVaried44k/48k` @0x101156214/0x101156104, i.e. `Analyzer::create(…, varied = true)`. The window argument is 32 as in Normal mode.
+- **`Analyzer::analyze` @0x101136890.**
+  - `BeatInfoAnalyzer::analyze(…, varied = true)` returns the BPM of the longest tempo segment.
+  - `UnitEnvelopeMaker::analyze(bpm, beats, true)` skips the half-beat check (§ 5).
+  - There is no `UnitBeatAdjust`, so `BA_GetBpm` is that segment BPM, ×100 rounded.
+- **Thread side.**
+  - PQT2 gets `analysis_type` 2 (§ 7).
+  - The BPM range check is skipped; with 70–180 it cannot trigger anyway.
+  - The phrase pass does not shift the grid (`urahaku` off in modes 1 and 4, `analysis-phrase.md` § 1.5).
+- **Code.**
+  - `beats::BeatAnalyzer::new_dynamic`; `beats/varied.rs` (the front end); `beats/info.rs` (the shared middle, now over several segments). The constant path is the one-segment case of the same code.
+  - `Options.dynamic`: high precision wins over it; `Analysis.grid_type` is 2.
+  - `mb_library::AnalysisSettings.dynamic` comes from `trackAnalysisMode` = 1 (`dynamic_from`).
+- **End to end against oracle-e** (`mb_analysis::analyze`, `mb_library::analyse_track`):
+  - PQTZ, PQT2 and BPM identical on 166/166;
+  - with the phrase pass, PSSI identical on 160/161. The miss is the 96 kHz click probe, the input-side difference of `analysis-phrase.md` § 10.
+
+### 9.1 Front end (@0x1011900d0 … @0x101191588)
+1. **Call groups.** Every raw beat belongs to the sensor call that filed it (`stat >> 8`). A group's tempo is its first beat's tempo. An empty group takes a later beat of its own whose tempo (or double, or half) lies strictly inside `t ± tol(t)` of the next group that has a tempo (`tol` as in § 2). Leading groups without a tempo are dropped with their beats.
+2. **Group runs.** The groups after the first are walked with a run tempo `a`, a run length `c` and the previous run (tempo `pa`, length `pc`):
+   - a group of tempo 0 is dropped;
+   - a group fitting `a` extends the run (`a` becomes its tempo);
+   - otherwise, a run of 3–8 groups whose next group does not fit `pa`, or any longer run, stands and becomes the previous run;
+   - a shorter run, or a 3–8 group run whose next group returns to `pa`, is dropped. The walk then continues from the previous run, or starts a new run at the group;
+   - at the end, a last run of one group after a standing run is dropped.
+3. **Beat runs.** The same walk over the beats themselves, with these thresholds: runs of up to 8 beats are dropped; runs of 9–32 beats stand unless the next beat returns to the previous run's tempo; longer runs always stand. A trailing run of up to 8 beats after a standing one is cut off.
+4. **Segments.** From each beat `i`, the integer-BPM histogram (400 bins, as § 3 step 1) of the beats within `8 · rate` samples gives the window's BPM `b` and beat length `T = 60000/b`. When `T` fits the previous window's `T`, the walk moves to `i + 1`. Otherwise a segment starts:
+   - its tempo is that of the first beat from `i` whose own integer BPM is `b`;
+   - its start is the earliest beat from `i` whose integer BPM lies in the BPM range of `T/2`, `T` or `2T` (for a centre `x`: `[60000/(x + tol(T) + ½), 60000/(x − tol(T) + ½))`, truncated);
+   - the walk continues after the start.
+
+### 9.2 Shared middle (both paths)
+1. **Segment tempos.** Each segment's tempo comes from the BPM histograms (§ 3 step 1) of the beats from its start, within its span: up to the next segment, or `total` for the last. When it fits the previous segment's tempo, the segment is merged into the previous one, which is then estimated again.
+2. **Close beats** (§ 3 step 4) are merged per segment, with that segment's tempo, in one pass over the list.
+3. **Representative BPM.** That of the longest segment; the first one's length counts from sample 0. The constant path computes and discards it.
+4. **`segAdjust`** runs per segment. For each tempo trial with beat length `P`, the search runs:
+   - from one eighth beat after the beat before the last beat at or before the segment's start, clamped to the previous segment's start, the segment's start and 0 (0 for the first segment);
+   - to the same bound built at the next segment's start, clamped to `[start of this segment, start of the next]` (`total` for the last).
+   The adjusted segment is stored in place, so the next segment's search starts from it.
+5. **Grid walk** (§ 3 step 7) per segment, up to the segment's end:
+   - back-fill stops at the last beat of the earlier segments;
+   - the window bookkeeping starts at the output count so far;
+   - the first/last band-confirmed beats and the first anchor of segment 0 are kept across segments.
+6. **Varied `gapCorrect`** @0x101194b00 replaces § 3 step 8. It walks four consecutive beats `a b c d` with gaps `g1 g2 g3`, `M = max(g1, g3)`, `m = min(g1, g3)`:
+   - **`g2/M > 1.1`:**
+     - `M = g1` and `(g2 − M)/(M − m) < 4`: `c = b + M`;
+     - else `m = g1` and `fma(M, 3, g2) > 5m`: `c = b + m`, and a beat `b + 2m` is inserted before `c` when `b + 3m < d`;
+     - else the span `a…d` is split into thirds (`(g1+g2+g3)/M < 3.3`), or into quarters with a beat inserted before `c`.
+   - **`g2/m < 0.9`:**
+     - `m = g1` and `(m − g2)/(M − m) < 4`: `c = b + m`;
+     - else `M = g1` and `fma(m, 4, g2) < 4M`: `c = b + M`, or `c` is dropped when that reaches `d`;
+     - else `(g1+g2+g3)/m ≤ 2.7`: `b = (a + d)/2` and `c` is dropped;
+     - otherwise thirds.
+   The insertions put the new beat before `c`, as the binary does. None occur in oracle-e.
+7. **Bars** (§ 3 step 9). The mark is segment 0's first anchor in the varied path (`out[first]` in the constant one). Beats outside `[0, total]` are dropped.
+
+### 9.3 Verification
+- A harness outside the repo runs rekordbox's BALib v1 (`BA_CreateVaried*` / `BA_CreateConst*`, `BA_SetSample`, `BA_GetBeatList`) on our decoded stream. A hook turns on the analyser's own debug log, which dumps 9 intermediate lists.
+- `beats::vtest` (`MB_V1_DIR`, `cfg(test)`) compares every stage and the final list with it: 166/166 in both modes.
+- `mb-library` `analyse_ops::dynamic_mode_matches_oracle_e` checks the files (`MB_ORACLE_FULL=1`: 166/166).
+- 138 oracle-e tracks have one segment, 19 two, 7 three, one four, one five.
+
+## 10. High precision (modes 2–4)
+`highPrecisionBeatAnalyze` @0x102327e50 runs BALib v2 and `madmom::analyze` @0x10230a820: a TensorFlow beat activation (TFWrapper, dlopen of the user's install) plus the downbeat HMM. Mode 4 (Dynamic) is ported and verified (`analysis-beats-hp.md`). Modes 2 and 3 need BALib v2's own analysis in full; that port is in progress (`analysis-beats-hp.md` § 8).
+
+## 11. Open questions
 - Where the thread flag +0x3908 is set (phrase analysis setting assumed).
 - `SongStructureAnalyze`'s first-downbeat logic (§ 8).
 - Uninitialised memory: the grid walk's band table is `new int[129]` without zeroing, and a partial first window can read past the quarters written. We use −1. Only possible on grids shorter than ~32 beats after the anchor.

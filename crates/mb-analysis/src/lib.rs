@@ -80,6 +80,9 @@ pub struct Options {
     /// Vocal detection (`trackAnalysisSettingsVocalDetect`, default off), with rekordbox's own
     /// network and statistics from the installed app (`analysis-vocal.md`).
     pub vocal: bool,
+    /// Normal-mode Dynamic (`trackAnalysisMode` 1, analysis mode 1); ignored when
+    /// `high_precision` is set (`analysis-beats.md` § 9).
+    pub dynamic: bool,
 }
 
 impl Default for Options {
@@ -92,6 +95,7 @@ impl Default for Options {
             key: true,
             high_precision: None,
             vocal: false,
+            dynamic: false,
         }
     }
 }
@@ -130,6 +134,7 @@ pub fn analyze_waveforms(path: impl AsRef<Path>) -> Result<Waveforms> {
             key: false,
             high_precision: None,
             vocal: false,
+            ..Default::default()
         },
     )?;
     Ok(a.waveforms.unwrap_or_default())
@@ -168,7 +173,15 @@ pub fn analyze_with(
     let mut meter = opts
         .loudness
         .then(|| loudness::LoudnessAnalyzer::new(rate, total));
-    let mut beat = opts.beats.then(|| beats::BeatAnalyzer::new(rate, total));
+    // Normal-mode Dynamic takes BALib v1's varied analyser; high precision wins over it.
+    let dynamic = opts.dynamic && opts.high_precision.is_none();
+    let mut beat = opts.beats.then(|| {
+        if dynamic {
+            beats::BeatAnalyzer::new_dynamic(rate, total)
+        } else {
+            beats::BeatAnalyzer::new(rate, total)
+        }
+    });
     let mut phrase = (opts.beats && opts.phrase).then(|| phrase::PhraseAnalyzer::new(rate, total));
     let mut keys =
         (opts.beats && opts.key).then(|| key::KeyCollector::new(rate, total, info.channels));
@@ -247,7 +260,8 @@ pub fn analyze_with(
         }
     });
     let mut grid = beat.and_then(beats::BeatAnalyzer::finish);
-    let (mut grid_type, mut high_precision_error) = (1, None);
+    // PQT2 type: 2 for analysis modes 1 and 4 (`notifyBeat`).
+    let (mut grid_type, mut high_precision_error) = (if dynamic { 2 } else { 1 }, None);
     if let (Some(mode), Some(m), Some(g)) = (opts.high_precision, &mono, &grid) {
         match hpbeat::grid(mode, m, rate, total, g) {
             Ok(hp) => (grid, grid_type) = (hp, 2),
@@ -255,7 +269,7 @@ pub fn analyze_with(
         }
     }
     drop(mono);
-    // High precision found no beats: key and phrase take the stored grid.
+    // A Dynamic mode found no beats: key and phrase take the stored grid.
     let mut stored = (grid_type == 2 && grid.is_none()).then(|| stored.cloned()).flatten();
     let mut phrases = None;
     if let (Some(g), Some(p)) = (grid.as_mut().or(stored.as_mut()), &phrase) {

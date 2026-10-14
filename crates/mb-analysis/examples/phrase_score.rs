@@ -3,8 +3,8 @@
 //! `djmdContent.BPM`) as the anchor. Usage:
 //!   cargo run --release -p mb-analysis --example phrase_score -- [--dump] [--rb-only] [filter]
 //! (`MB_ORACLE=oracle-b` for the second fixture, `MB_HP=dynamic` for a high-precision own grid,
-//! `MB_URAHAKU=0/1` to override the grid-shift flag for the stored grid, `MB_THREADS` for the
-//! worker count.)
+//! `MB_DYNAMIC=1` for Normal-mode Dynamic (oracle-e), `MB_URAHAKU=0/1` to override the
+//! grid-shift flag for the stored grid, `MB_THREADS` for the worker count.)
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -117,7 +117,8 @@ fn main() {
     let hp = std::env::var("MB_HP").is_ok_and(|v| v == "dynamic").then_some(mb_analysis::hpbeat::HpMode::Dynamic);
     // oracle-b was analysed in high-precision Dynamic mode, where rekordbox does not shift the
     // grid (`phrase::run`).
-    let urahaku = std::env::var("MB_URAHAKU").map_or(fixture != "oracle-b", |v| v == "1");
+    let dynamic = std::env::var("MB_DYNAMIC").is_ok_and(|v| v == "1");
+    let urahaku = std::env::var("MB_URAHAKU").map_or(fixture != "oracle-b" && !dynamic, |v| v == "1");
     let threads: usize = std::env::var("MB_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out = std::sync::Mutex::new(Vec::new());
@@ -147,6 +148,7 @@ fn main() {
                         key: false,
                         high_precision: hp,
                         vocal: false,
+                        dynamic,
                     };
                     // With the stored grid as the fallback where high precision finds no beats.
                     mb_analysis::analyze_with(&t.path, opts, t.stored_grid().as_ref())

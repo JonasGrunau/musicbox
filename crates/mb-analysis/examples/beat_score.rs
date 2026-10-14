@@ -1,6 +1,7 @@
 //! Scores the beat-grid port against rekordbox's PQTZ and `djmdContent.BPM`. Usage:
 //!   cargo run --release -p mb-analysis --example beat_score -- [--verbose] [--dump] [filter]
-//! (`MB_ORACLE=oracle-b` for the second fixture, `MB_THREADS` to limit threads.)
+//! (`MB_ORACLE=oracle-b` for the second fixture, `MB_DYNAMIC=1` for Normal-mode Dynamic as in
+//! oracle-e, `MB_THREADS` to limit threads.)
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -51,8 +52,9 @@ fn main() {
                         key: false,
                         high_precision: None,
                         vocal: false,
+                        dynamic: std::env::var("MB_DYNAMIC").is_ok_and(|v| v == "1"),
                     };
-                    let r = mb_analysis::analyze(&t.path, opts).map(|a| a.beats);
+                    let r = mb_analysis::analyze(&t.path, opts).map(|a| (a.beats, a.grid_type));
                     rows.lock().unwrap().push((i, r));
                 }
             });
@@ -70,7 +72,7 @@ fn main() {
         let rb = t.dat.as_ref().and_then(|d| d.beat_grid()).unwrap();
         let rb_bpm = t.bpm.unwrap_or(0);
         n += 1;
-        let Ok(Some(g)) = r else {
+        let Ok((Some(g), grid_type)) = r else {
             println!("{name}: no grid ({:?})", r.as_ref().err());
             continue;
         };
@@ -102,10 +104,11 @@ fn main() {
                     time_ms: b.time_ms,
                 })
                 .collect();
-            let mine = mb_anlz::tags::ExtBeatGrid::from_beats(
+            let mut mine = mb_anlz::tags::ExtBeatGrid::from_beats(
                 &ours,
                 g.beats.iter().map(|b| b.sub_ms).collect(),
             );
+            mine.analysis_type = *grid_type;
             pqt2_n += 1;
             if mine == x {
                 pqt2_ok += 1;

@@ -147,6 +147,7 @@ fn score(tracks: &[common::OracleTrack], filter: Option<&String>) {
                     key: false,
                     high_precision: None,
                     vocal: true,
+                    ..Default::default()
                 };
                 let r = mb_analysis::analyze(&t.path, opts);
                 rows.lock().unwrap().push((i, r));

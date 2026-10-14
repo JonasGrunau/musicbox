@@ -175,7 +175,7 @@ impl App {
                         pref("KeyStringSetting").and_then(|v| v.trim().parse().ok()),
                     );
                     // Analysis preferences: `AutoGain` and `enableKeyAnalysis` (default on),
-                    // `trackAnalysisSettingsSongStruct`, `HighPrecisionBeatAnalyze` with
+                    // `trackAnalysisSettingsSongStruct`, `trackAnalysisMode`, `HighPrecisionBeatAnalyze` with
                     // `trackHiPrecisionBeatAnalysisMode`, `trackAnalysisSettingsVocalDetect`,
                     // `TrackAnalysisSettingsEmbedding` (default on), the CUE analysis preferences
                     // (`DetectCue`, `AutoDetectCue`, …), `AutoAnalysis`.
@@ -187,6 +187,7 @@ impl App {
                             pref("HighPrecisionBeatAnalyze").as_deref(),
                             pref("trackHiPrecisionBeatAnalysisMode").as_deref(),
                         ),
+                        dynamic: mb_library::AnalysisSettings::dynamic_from(pref("trackAnalysisMode").as_deref()),
                         vocal: pref("trackAnalysisSettingsVocalDetect").is_some_and(|v| v.trim() == "1"),
                         embedding: pref("TrackAnalysisSettingsEmbedding").is_none_or(|v| v.trim() != "0"),
                         cue: mb_library::CueAnalysisSettings::from_prefs(|n| mb_usb::settings::preference(&loaded.settings_root, n)),

@@ -42,6 +42,10 @@ pub struct AnalysisSettings {
     /// `HighPrecisionBeatAnalyze`: the high-precision beat grid in the given mode
     /// (`docs/re/analysis-beats-hp.md`); `None` for the Normal-mode grid.
     pub high_precision: Option<mb_analysis::hpbeat::HpMode>,
+    /// `trackAnalysisMode` 1 (Dynamic) with high precision off: BALib v1's varied analyser,
+    /// PQT2 type 2 and no phrase shift (`docs/re/analysis-beats.md` § 9). Ignored when
+    /// [`AnalysisSettings::high_precision`] is set.
+    pub dynamic: bool,
     /// `trackAnalysisSettingsVocalDetect` (default 0): PVDI and the `ContentLink` vocal bit
     /// (`docs/re/analysis-vocal.md`).
     pub vocal: bool,
@@ -62,6 +66,7 @@ impl Default for AnalysisSettings {
             phrase: false,
             key: true,
             high_precision: None,
+            dynamic: false,
             vocal: false,
             embedding: true,
             cue: crate::cue_analysis::CueAnalysisSettings::default(),
@@ -78,6 +83,11 @@ impl AnalysisSettings {
             return None;
         }
         Some(mb_analysis::hpbeat::HpMode::from_pref(mode.and_then(|v| v.trim().parse().ok()).unwrap_or(2)))
+    }
+
+    /// [`AnalysisSettings::dynamic`] from the preference `trackAnalysisMode` (default 0, Normal).
+    pub fn dynamic_from(track_analysis_mode: Option<&str>) -> bool {
+        track_analysis_mode.is_some_and(|v| v.trim() == "1")
     }
 }
 
@@ -166,6 +176,7 @@ pub fn analyse_track_with(
         key: settings.key,
         high_precision: settings.high_precision,
         vocal: settings.vocal || embed,
+        dynamic: settings.dynamic,
         ..mb_analysis::Options::default()
     };
     let a = mb_analysis::analyze_with(audio, opts, stored).map_err(|e| fail(&e))?;
