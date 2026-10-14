@@ -73,7 +73,7 @@ impl Models {
     fn f32s(t: &OrtTensor) -> Result<&[f32], String> {
         match t {
             OrtTensor::F32 { data, .. } => Ok(data),
-            OrtTensor::I64 { .. } => Err("f32 output expected".into()),
+            OrtTensor::F64 { .. } | OrtTensor::I64 { .. } => Err("f32 output expected".into()),
         }
     }
 
@@ -129,7 +129,7 @@ impl Models {
         let out = self.genre.run(&[("input_features", &t)], &["output_label"]).map_err(|e| e.to_string())?;
         let genre = match &out[0] {
             OrtTensor::I64 { data, .. } => data[0],
-            OrtTensor::F32 { .. } => return Err("genre label expected as i64".into()),
+            OrtTensor::F32 { .. } | OrtTensor::F64 { .. } => return Err("genre label expected as i64".into()),
         };
         Ok(Embedding { duration, windows, mean, position, energy, genre })
     }

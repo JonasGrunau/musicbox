@@ -114,6 +114,7 @@ mod idx {
 
 const ELEM_FLOAT: c_int = 1;
 const ELEM_INT64: c_int = 7;
+const ELEM_DOUBLE: c_int = 11;
 
 impl Api {
     /// The function at `i`, typed by the caller.
@@ -188,6 +189,7 @@ pub fn available() -> bool {
 #[derive(Debug, Clone, PartialEq)]
 pub enum OrtTensor {
     F32 { dims: Vec<i64>, data: Vec<f32> },
+    F64 { dims: Vec<i64>, data: Vec<f64> },
     I64 { dims: Vec<i64>, data: Vec<i64> },
 }
 
@@ -204,31 +206,43 @@ unsafe impl Sync for OrtSession {}
 
 impl OrtSession {
     pub fn open(model: OnnxModel, threads: usize) -> Result<Self> {
+        let threads = threads.max(1) as c_int;
+        Self::open_with(model, |api, set| {
+            // ORT_SEQUENTIAL for one thread, else ORT_PARALLEL
+            set(api, idx::SET_SESSION_EXECUTION_MODE, c_int::from(threads > 1))?;
+            set(api, idx::SET_INTRA_OP_THREADS, threads)?;
+            set(api, idx::SET_INTER_OP_THREADS, threads)?;
+            // ORT_ENABLE_ALL
+            set(api, idx::SET_GRAPH_OPTIMIZATION_LEVEL, 99)
+        })
+    }
+
+    /// A session as `CuePointPredictor::initilaize_session` @0x101b49614 opens the auto-cue
+    /// models: memory arena off, extended graph optimisations (level 2), the default threads and
+    /// execution mode.
+    pub fn open_cue(model: OnnxModel) -> Result<Self> {
+        Self::open_with(model, |api, set| set(api, idx::SET_GRAPH_OPTIMIZATION_LEVEL, 2))
+    }
+
+    /// Opens `model` with the CPU memory arena off and the options `configure` sets through its
+    /// setter (an `int` option by table index).
+    fn open_with(model: OnnxModel, configure: impl FnOnce(&Api, &dyn Fn(&Api, usize, c_int) -> Result<()>) -> Result<()>) -> Result<Self> {
         model.verify()?;
         let api = api()?;
         let path = model.path();
         let path_c = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|e| Error::Onnx(e.to_string()))?;
-        let threads = threads.max(1) as c_int;
         // SAFETY: entries per the header; handles are released on every path.
         unsafe {
             let mut opts: Ptr = std::ptr::null_mut();
             let create: unsafe extern "C" fn(*mut Ptr) -> Status = api.f(idx::CREATE_SESSION_OPTIONS);
             api.check(create(&mut opts))?;
             let release_opts: unsafe extern "C" fn(Ptr) = api.f(idx::RELEASE_SESSION_OPTIONS);
-            let set = |i: usize, v: c_int| -> Result<()> {
+            let set = |api: &Api, i: usize, v: c_int| -> Result<()> {
                 let f: unsafe extern "C" fn(Ptr, c_int) -> Status = api.f(i);
                 api.check(f(opts, v))
             };
             let disable_arena: unsafe extern "C" fn(Ptr) -> Status = api.f(idx::DISABLE_CPU_MEM_ARENA);
-            let setup = (|| -> Result<()> {
-                api.check(disable_arena(opts))?;
-                // ORT_SEQUENTIAL for one thread, else ORT_PARALLEL
-                set(idx::SET_SESSION_EXECUTION_MODE, c_int::from(threads > 1))?;
-                set(idx::SET_INTRA_OP_THREADS, threads)?;
-                set(idx::SET_INTER_OP_THREADS, threads)?;
-                // ORT_ENABLE_ALL
-                set(idx::SET_GRAPH_OPTIMIZATION_LEVEL, 99)
-            })();
+            let setup = api.check(disable_arena(opts)).and_then(|()| configure(api, &set));
             if let Err(e) = setup {
                 release_opts(opts);
                 return Err(e);
@@ -242,7 +256,7 @@ impl OrtSession {
         }
     }
 
-    /// Runs the model: `inputs` by name, `outputs` fetched by name (f32 or i64 tensors).
+    /// Runs the model: `inputs` by name, `outputs` fetched by name (f32, f64 or i64 tensors).
     pub fn run(&self, inputs: &[(&str, &OrtTensor)], outputs: &[&str]) -> Result<Vec<OrtTensor>> {
         let api = self.api;
         let in_names: Vec<CString> = inputs.iter().map(|(n, _)| CString::new(*n).unwrap()).collect();
@@ -266,6 +280,7 @@ impl OrtSession {
             for (_, t) in inputs {
                 let (data, bytes, dims, ty): (*mut c_void, usize, &[i64], c_int) = match t {
                     OrtTensor::F32 { dims, data } => (data.as_ptr() as *mut c_void, data.len() * 4, dims, ELEM_FLOAT),
+                    OrtTensor::F64 { dims, data } => (data.as_ptr() as *mut c_void, data.len() * 8, dims, ELEM_DOUBLE),
                     OrtTensor::I64 { dims, data } => (data.as_ptr() as *mut c_void, data.len() * 8, dims, ELEM_INT64),
                 };
                 let mut v: Ptr = std::ptr::null_mut();
@@ -308,7 +323,7 @@ impl OrtSession {
         }
     }
 
-    /// Copies an output value (f32 or i64 tensor).
+    /// Copies an output value (f32, f64 or i64 tensor).
     unsafe fn tensor(&self, v: Ptr) -> Result<OrtTensor> {
         let api = self.api;
         // SAFETY: `v` is a tensor value from a successful run.
@@ -337,6 +352,7 @@ impl OrtSession {
             api.check(md(v, &mut p))?;
             match ty {
                 ELEM_FLOAT => Ok(OrtTensor::F32 { dims, data: std::slice::from_raw_parts(p.cast::<f32>(), count).to_vec() }),
+                ELEM_DOUBLE => Ok(OrtTensor::F64 { dims, data: std::slice::from_raw_parts(p.cast::<f64>(), count).to_vec() }),
                 ELEM_INT64 => Ok(OrtTensor::I64 { dims, data: std::slice::from_raw_parts(p.cast::<i64>(), count).to_vec() }),
                 other => Err(Error::Onnx(format!("output element type {other}"))),
             }
@@ -383,5 +399,28 @@ mod tests {
         let x = OrtTensor::F32 { dims: vec![1, 64], data: data.clone() };
         let OrtTensor::F32 { dims, .. } = &norm.run(&[("input_features", &x)], &["normalized_features"]).unwrap()[0] else { panic!() };
         assert_eq!(dims, &[1, 64]);
+    }
+
+    /// The auto-cue models as `CuePointPredictor` runs them; needs the installed rekordbox.
+    #[test]
+    fn runs_the_cue_models() {
+        if !available() {
+            eprintln!("skipped: ONNX Runtime unavailable");
+            return;
+        }
+        let cnn = OrtSession::open_cue(OnnxModel::SampleCnn).unwrap();
+        let n = 59_049;
+        let wave = OrtTensor::F32 { dims: vec![2, n], data: (0..2 * n).map(|i| ((i as f32) * 0.01).sin() * 0.1).collect() };
+        let OrtTensor::F32 { dims, data } = &cnn.run(&[("waveform", &wave)], &["features"]).unwrap()[0] else { panic!("features") };
+        assert_eq!(dims, &[2, 512]);
+        let reg = OrtSession::open_cue(OnnxModel::CuePrediction).unwrap();
+        let mut row = vec![0.0f64; 13];
+        row[0] = 1.0;
+        row[10] = 1.0;
+        row.extend(data[..512].iter().cycle().take(3072).map(|&v| f64::from(v)));
+        let x = OrtTensor::F64 { dims: vec![1, row.len() as i64], data: row };
+        // a tree ensemble: it reads feature 3084, the last of the 13 one-hot values and 6 × 512 CNN features
+        let OrtTensor::F32 { dims, .. } = &reg.run(&[("input", &x)], &["variable"]).unwrap()[0] else { panic!("score") };
+        assert_eq!(dims, &[1, 1]);
     }
 }
