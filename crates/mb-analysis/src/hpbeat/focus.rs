@@ -90,7 +90,7 @@ impl Beats {
 
 /// Sum of `a` the way the binary's 8-wide loops add it: four two-lane accumulators over the
 /// first `len & !7` values, reduced lane-wise, then the rest one by one.
-fn neon_sum8(a: &[f64]) -> f64 {
+pub(crate) fn neon_sum8(a: &[f64]) -> f64 {
     let n8 = a.len() & !7;
     let mut s = 0.0;
     if n8 > 0 {
@@ -112,7 +112,7 @@ fn neon_sum8(a: &[f64]) -> f64 {
 }
 
 /// Sum of squared deviations from `m`, 8-wide with fused multiply-adds like `neon_sum8`.
-fn neon_sumsq8(a: &[f64], m: f64) -> f64 {
+pub(crate) fn neon_sumsq8(a: &[f64], m: f64) -> f64 {
     let n8 = a.len() & !7;
     let mut s = 0.0;
     if n8 > 0 {
