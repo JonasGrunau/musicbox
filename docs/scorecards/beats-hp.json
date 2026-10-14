@@ -1,0 +1,28 @@
+{
+  "scorecard": "high-precision beat grid + BPM (Dynamic mode 4: madmom model 7 + BALib v2 Focus)",
+  "date": "2026-10-14",
+  "rekordbox": "7.2.19.0342",
+  "tensorflow": "2.16.1 (rekordbox's own libtensorflow_cc, dlopen)",
+  "macos": "27.0",
+  "code": "crates/mb-nn/, crates/mb-analysis/src/hpbeat/",
+  "spec": "docs/re/analysis-beats-hp.md",
+  "command": "cargo run --release -p mb-analysis --example hp_score  (MB_ORACLE defaults to oracle-b; --verbose, --no-phrase; MB_THREADS, default 2)",
+  "fixture": "oracle-b (HighPrecisionBeatAnalyze 1, trackHiPrecisionBeatAnalysisMode 1 = analysis mode 4, phrase analysis on)",
+  "tracks": 166,
+  "tracks_note": "the 166 oracle-b tracks with a PQT2; 154 carry a high-precision grid (PQT2 type 2), 12 sweep probes kept their earlier type-1 grid because madmom finds no beats",
+  "high_precision_tracks": 154,
+  "pqtz_identical": 154,
+  "pqt2_identical": 154,
+  "bpm_x100_exact": 154,
+  "no_beats_as_rekordbox": 12,
+  "phrase_pass": "on; no grid shift in Dynamic mode (urahaku), 154/154 also with it on",
+  "stages": {
+    "activations": "bit-identical to rekordbox's (TensorFlow run, native harness dump)",
+    "madmom_beat_lists": "166/166 identical",
+    "hmm_transition_table": "SHA-256 equal to the table compiled into rekordbox",
+    "focus_vs_harness_oracle_b": "166/166 identical",
+    "focus_vs_harness_fuzz": "5100/5100 synthetic lists identical (seeds 0-5999; 900 constant-path inputs excluded, modes 2/3 only)"
+  },
+  "seconds_per_track": "about 4-5 (3 tracks in parallel)",
+  "not_covered": ["modes 2 and 3 (BALib v2 beat analysis, model 8 window, Focus constant path)", "mode 1 (Normal-mode Dynamic)", "key and phrase on the stored grid when no beats are found (sweeps)"]
+}
