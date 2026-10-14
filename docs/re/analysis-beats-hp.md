@@ -170,12 +170,48 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
   - `cargo run --release -p mb-analysis --example hp_score`: oracle-b scoring.
   - `hp_check {table, madmom, focus, focusin}`: developer checks against harness dumps.
 
-## 8. Open
-- **Modes 2 and 3:**
-  - BALib v2's own beat analysis (`GetBpm`, `GetOffsetCalc`, `GetBpmHendou`);
-  - model 8 over the 60 s window;
+## 8. BALib v2 beat analysis (modes 2/3)
+Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (harness outside the repo) on the 169 oracle tracks: the verdict flags and returned BPM 169/169, `getOffsetCalc` 169/169, the beat list 169/169 in mode 3 and 168/169 in mode 2 (Timelock (Red Sun, Harmonika Remix): v2's copy of the varied pipeline differs from v1's from beat 575). Model 8's 60 s window: 20/20. Not wired into `analyze()` yet; Focus's constant path and UnitBeatAdjust v2's `analyze` are next. Code: `crates/mb-analysis/src/balib2/` (`mod.rs`, `verdict.rs`, `lowband.rs`); examples `balib2_score`, `balib2_stages`, `hp_check window`.
+
+- **Shared with v1.** The sensor, envelope and filters are instruction-identical to v1 (`beats::sensor`, `beats::envelope`, `beats::filters`); the sensor list is identical on every track.
+- **Two passes.** `BeatInfoAnalyzer::analyze` @0x101198e4c runs v1's constant path, then v1's varied (Dynamic) path, on the sensor list. It keeps two BPMs:
+  - constant: 60000 / the constant list's first beat length (0x10119bd94);
+  - varied: the varied list's longest-segment tempo (0x10119dc14).
+- **Verdict** (0x10119fe0c–0x1011a53c0).
+  - Skipped (no list, BPM 0) when either BPM is 0, the varied list is empty or the rate is 0.
+  - Otherwise four tests run on the varied list. Any of them true keeps the varied list and its BPM, and sets the hendou flag (+0x2d). If all are false, the constant list and its BPM are kept.
+  - **A**, `judgeHendouDynamicPeak` @0x1011a6714:
+    - input is the sensor list. For each onset before 15 min, sum UnitBeatAdjust v2's low band over half a beat from the onset (rate·7.5/BPM quarter-rate samples);
+    - the scan stops at the first window past the band's end;
+    - A = n × (max sum × mean sum) < 2e15.
+  - **D** (two tempo segments):
+    - intervals (ms, `fma(|Δt|, 1000, 0.5)` with times rounded to the ms) are split at stretches where neighbours differ by more than 11 ms (up to 32 stretches);
+    - each segment's BPM (single precision) must be within 0.2 of a whole BPM;
+    - no segment may cover 65 % of the track. Segments longer than 16 beats must each cover more than 7.5 %, and the largest and smallest of those may differ by less than 55 %;
+    - two such segments must have different whole BPMs.
+  - **B** (spread):
+    - reference interval: the mean of the longest stretch of ≥ min(n, 37) intervals whose neighbours differ by ≤ 11/20/30 ms, else the median. Segments at a harmonic of the longest segment (0.5, 2/3, 1.5, 2) are rescaled to it;
+    - take the deviation of the 16-beat mean intervals from the reference, and the share of stable stretches over 23 intervals;
+    - B = (dev ≥ 2.25 and share ≤ 0.19) or (dev > 1.56 and share < 0.057).
+  - **C**, only when A, B and D are false (position drift):
+    - beats between 5 % and 80 % of the track, outside 10 ms-irregular stretches, are compared with a uniform grid. The grid's beat length comes from the varied BPM after an octave/whole-BPM check against the reference;
+    - the linear trend is removed, short excursions between jumps over 1/16 beat are cut, and residuals are classified per range by their mean phase (whole, half or quarter beat);
+    - C needs all four 32-beat-mean measures above their bounds. Fewer than 65 usable beats counts as C;
+    - whatever its outcome, the trend refines both BPMs: a drift-corrected BPM replaces a stored one when it rounds to the same whole BPM and is closer to it; each BPM then snaps to its tenth when within 0.1 % (e.g. a constant BPM of 119.998 becomes 120.0).
+  - Fired on the 169 tracks: C 23, D 7, A 2, A + B 2, none 132 (+ 3 loops without beats).
+- **Low band.** UnitBeatAdjust v2 `putSample` @0x10113ad58 takes every fourth frame of each block: mid signal → 100 Hz low-pass → |·| → 25 Hz low-pass, clamped to 0…32767. Its filters are designed for rate/4 (`create` @0x10113aabc divides the rate by 4).
+- **Offset** (`getOffsetCalc` @0x101182100, `BA_GetOffsetCalc`):
+  - for each beat of the final list, `calcLowInteg` @0x10113d760 gives the low band over two beats (a failure copies the previous value). The values are scaled to the loudest;
+  - a scan finds where the low end comes in: a beat over 0.4 (or three over 0.2) after a rise > 0.15 starts a loud stretch; the first stretch reaching 12 loud beats wins; otherwise the first loud start, or the one after more than 32 quiet beats;
+  - offset = rate·60·(index − 4)/BPM samples, at least 0.
+- **Hendou to the job.** Mode 3 then sets `SetBpmHendou(false)`; mode 2 reads `GetBpmHendou`.
+
+## 9. Open
+- **Modes 2 and 3** (§ 8):
+  - UnitBeatAdjust v2's `analyze` (bpmAdjust, beatPositionAdjust, getPeakBpm, findBeatPositionForBeat*, findpeaks_x, calcAllInteg);
   - Focus's constant path;
-  - the BPM-range rebuild.
+  - the BPM-range rebuild and the job side (PQT2 type, phrase shift);
+  - Timelock's varied list in mode 2.
 - **BALib v2's beat count** is approximated by the presence of our Normal-mode (v1) grid. This only matters if one finds beats and the other does not.
 - **Mode 1** (Normal-mode Dynamic, the BALib v1 varied analyser) is ported and verified separately: `analysis-beats.md` § 9.
 - **Stale slot:** what the whole-run start alignment's one-past-the-end read holds. This happens only near the end of the beat vector.
