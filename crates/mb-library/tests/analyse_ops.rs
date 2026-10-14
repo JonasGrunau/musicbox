@@ -16,7 +16,7 @@
 mod common;
 use common::*;
 use mb_anlz::{AnlzFile, Tag};
-use mb_library::{AnalysisSettings, Command, DbId, History, Library, analyse_track};
+use mb_library::{AnalysisSettings, Command, DbId, History, Library, analyse_track, analyse_track_with, stored_grid};
 use mb_masterdb::rusqlite::types::Value;
 use std::path::{Path, PathBuf};
 
@@ -32,8 +32,12 @@ struct Track {
 }
 
 fn tracks() -> Option<(PathBuf, Vec<Track>)> {
-    let db = open_read_only("oracle-a")?;
-    let share = fixture("oracle-a")?.join("rekordbox/share");
+    tracks_in("oracle-a")
+}
+
+fn tracks_in(name: &str) -> Option<(PathBuf, Vec<Track>)> {
+    let db = open_read_only(name)?;
+    let share = fixture(name)?.join("rekordbox/share");
     let mut stmt = db
         .connection()
         .prepare(
@@ -459,4 +463,35 @@ fn phrase_pass_writes_pssi() {
     assert_eq!(ext.sections_with(Tag::PSSI).next(), theirs.sections_with(Tag::PSSI).next());
     let Value::Integer(link) = get(&lib, "ContentLink", &t.id) else { panic!("ContentLink") };
     assert_ne!(link & 0x10000, 0, "phrase bit");
+}
+
+/// High precision without beats (oracle-b's sweep probes): with the stored grid as input, key
+/// and phrase run on it as in rekordbox, so PSSI and key equal oracle-b's, and the old grid is
+/// kept.
+#[test]
+fn high_precision_without_beats_uses_stored_grid() {
+    let Some((share, all)) = tracks_in("oracle-b") else {
+        eprintln!("skipped: fixtures/oracle-b missing");
+        return;
+    };
+    let Some(t) = all.iter().find(|t| t.path.exists() && t.path.to_string_lossy().contains("/probes/wav_44k16/sweep_20_20k")) else {
+        eprintln!("skipped: corpus audio missing");
+        return;
+    };
+    let dat = share.join(t.rel.trim_start_matches('/'));
+    let stored = stored_grid(&dat, Some(t.columns[0])).expect("stored grid");
+    let settings = AnalysisSettings {
+        phrase: true,
+        high_precision: Some(mb_analysis::hpbeat::HpMode::Dynamic),
+        ..AnalysisSettings::default()
+    };
+    let a = analyse_track_with(&t.path, &t.file_name, &settings, Some(&stored)).unwrap();
+    assert!(a.keep_old_grid);
+    assert_eq!(a.key, t.key);
+    let theirs = load(&share, &t.rel, "EXT").unwrap();
+    assert!(theirs.sections_with(Tag::PSSI).next().is_some());
+    assert_eq!(a.ext.sections_with(Tag::PSSI).next(), theirs.sections_with(Tag::PSSI).next());
+    // Without the stored grid there is no PSSI.
+    let b = analyse_track(&t.path, &t.file_name, &settings).unwrap();
+    assert!(b.ext.sections_with(Tag::PSSI).next().is_none());
 }

@@ -125,6 +125,18 @@ pub fn analyze_waveforms(path: impl AsRef<Path>) -> Result<Waveforms> {
 
 /// Analyses the audio file at `path` in one decode pass.
 pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
+    analyze_with(path, opts, None)
+}
+
+/// [`analyze`] with the track's stored grid (its PQTZ beats and BPM × 100). When the
+/// high-precision pass finds no beats, rekordbox runs key and phrase analysis on the stored grid
+/// instead (`getBeatListFromDatabase`, `CBeatAnalyzeThread::analyze` @0x1001528c4,
+/// `analysis-phrase.md` § 1.1); `Analysis::beats` stays `None` then.
+pub fn analyze_with(
+    path: impl AsRef<Path>,
+    opts: Options,
+    stored: Option<&beats::BeatGrid>,
+) -> Result<Analysis> {
     let mut dec = mb_audio::open(path.as_ref())?;
     let info = *dec.info();
     let len = info.total_samples;
@@ -212,15 +224,17 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
         }
     }
     drop(mono);
+    // High precision found no beats: key and phrase take the stored grid.
+    let mut stored = (grid_type == 2 && grid.is_none()).then(|| stored.cloned()).flatten();
     let mut phrases = None;
-    if let (Some(g), Some(p)) = (&mut grid, &phrase) {
+    if let (Some(g), Some(p)) = (grid.as_mut().or(stored.as_mut()), &phrase) {
         // The Dynamic high-precision grid is not shifted (`phrase::run`'s `urahaku`).
         phrases = phrase::run(p, g, rate, total, Some(path.as_ref()), grid_type != 2);
     }
     // The key job runs on the finished grid; `getKey` takes BPM × 100 · 0.01. Without a grid
     // only the whole-track estimate counts (no segments).
     let key = keys.map(|k| {
-        let (beats, bpm) = grid.as_ref().map_or((Vec::new(), 0.0), |g| {
+        let (beats, bpm) = grid.as_ref().or(stored.as_ref()).map_or((Vec::new(), 0.0), |g| {
             let beats = g.beats.iter().map(|b| (b.beat_in_bar, b.time_ms)).collect();
             (beats, g.bpm as f32 * 0.01)
         });

@@ -3,7 +3,7 @@
 Status: **verified: all four stages ported; PSSI produced and written.**
 - **Stages A and B are verified.** The downbeat shift moves the beat grid the way rekordbox does: 160/161 oracle-a grids are identical (PQTZ + PQT2) (§ 6).
 - **Stages C and D are verified bit for bit** against rekordbox's own routines run on the same input (§ 9): stage C's outputs on 161/161 tracks, every stage-D callee on every recorded call, and the whole result struct on 161/161 tracks.
-- **PSSI against the fixtures** (`docs/scorecards/phrase.json`): oracle-a 159/161 identical with our own analysis (the two misses are 96 kHz probes); oracle-b (high-precision Dynamic) 147/160 with our own grid (the 12 sweeps need the stored-grid fallback, § 10), 159/160 on rekordbox's stored grid.
+- **PSSI against the fixtures** (`docs/scorecards/phrase.json`): oracle-a 159/161 identical with our own analysis (the two misses are 96 kHz probes); oracle-b (high-precision Dynamic, with the stored grid where high precision finds no beats, § 1.1) 159/160 with our own grid and 159/160 on rekordbox's stored grid.
 
 Code: `crates/mb-analysis/src/phrase/`.
 - Driver and stages A/B: `mod.rs` (grid anchor, preconditions, shift, [`run`]), `filter.rs`, `mat.rs`, `rhythm.rs`, `snare.rs`, `power.rs`, `beatpos.rs`.
@@ -24,6 +24,7 @@ Tools:
 ### 1.1 Anchor
 - `fb` = beat 0's ms; `fbar = convFirstBar[beatInBar − 1]`, with `convFirstBar = {1, 4, 3, 2}` (0x10387967c).
 - With fewer than 8 beats both come from the job result instead.
+- When the high-precision job finds no beats, the thread takes the stored grid and its BPM (`getBeatListFromDatabase`); key and phrase run on it (oracle-b's 12 sweeps: the old Normal-mode grid, BPM 102.50, while the BPM column becomes 0). Code: `mb_analysis::analyze_with`, which takes the stored grid from the caller.
 - When beat 0's tempo field differs from the BPM × 100 and `beat < fb < 2·beat` (`beat = 6e6 / bpm100` ms), `fb` drops by one beat (truncated) and `fbar` steps back one (1 → 4).
 - Code: `phrase::grid_anchor`.
 
@@ -545,5 +546,4 @@ Porting notes that mattered:
 ## 10. Open questions
 - **96 kHz misses.** `wav_96k32f/click_128_offset1234`: we move the grid, rekordbox does not (§ 6), so the phrases differ. `wav_96k32f/tempo_120_to_126`: one phrase more or fewer than rekordbox on both fixtures. Both look input-side: the stream after the rewind, or the SRC phase.
 - **Key argument.** What the thread passes to `Initialize` as key: 0 fits all fixtures (byte 0x1d = 1).
-- **High precision without beats.** On the 12 `sweep_20_20k` probes, oracle-b's high-precision job found no beats. The thread then falls back to the stored grid and its BPM (`getBeatListFromDatabase`), so the phrase pass runs on the old Normal-mode grid (BPM 10250); the BPM column ends up 0. On that grid all 12 PSSI are identical. `analyse_track` has no previous grid to fall back to yet, so our own run writes no PSSI there.
 - **Phrase pass without result.** Whether rekordbox removes an earlier PSSI when a new phrase pass yields none is not observed (§ 8.1).

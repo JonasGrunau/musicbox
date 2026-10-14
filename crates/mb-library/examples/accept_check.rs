@@ -16,7 +16,7 @@
 //! - `undo-device <track id> <playlist id>`: the app's Undo of such an import (the inverse
 //!   command), with the track's copied audio, analysis and artwork folders as created files.
 
-use mb_library::{AnalysisSettings, Command, DeviceImport, Effect, Library, analyse_track};
+use mb_library::{AnalysisSettings, Command, DeviceImport, Effect, Library, analyse_track_with, stored_grid};
 use mb_masterdb::{LibraryPaths, MasterDb, backup_library, default_backup_root, derive_passphrase};
 use mb_pdb::{ExportDb, Pdb};
 use std::path::{Path, PathBuf};
@@ -112,7 +112,9 @@ fn main() -> anyhow::Result<()> {
             println!("settings: {settings:?}");
             for t in unanalysed {
                 let name = t.path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-                let analysis = analyse_track(&t.path, name, &settings)?;
+                // The stored grid (none for unanalysed tracks) is the high-precision fallback.
+                let stored = t.analysis_path.as_deref().and_then(|dat| stored_grid(dat, t.bpm_x100.map(i64::from)));
+                let analysis = analyse_track_with(&t.path, name, &settings, stored.as_ref())?;
                 println!("  {} {}: BPM {:?}, key {:?}, {} s", t.id.0, t.title, analysis.bpm_x100, analysis.key, analysis.length);
                 lib.execute(Command::ApplyAnalysis { content: t.id.clone(), analysis: Box::new(analysis) })?;
             }

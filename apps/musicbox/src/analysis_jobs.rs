@@ -4,7 +4,7 @@
 //! thread as `Command::ApplyAnalysis`, which writes the files and rows.
 
 use mb_core::DbId;
-use mb_library::{AnalysisSettings, TrackAnalysis, analyse_track};
+use mb_library::{AnalysisSettings, TrackAnalysis, analyse_track_with, stored_grid};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -18,6 +18,10 @@ pub struct Job {
     /// `FileNameL`, written into PPTH.
     pub file_name: String,
     pub title: String,
+    /// The current `.DAT` and `djmdContent.BPM`: the grid key and phrase fall back to when
+    /// high precision finds no beats.
+    pub stored_dat: Option<PathBuf>,
+    pub stored_bpm: Option<i64>,
 }
 
 /// A finished analysis.
@@ -156,7 +160,9 @@ fn worker(shared: &Shared, tx: &Sender<(u64, Finished)>, ctx: &egui::Context, se
                 s = cv.wait(s).unwrap();
             }
         };
-        let result = analyse_track(&job.audio, &job.file_name, &settings).map(Box::new).map_err(|e| e.to_string());
+        let stored = settings.high_precision.and(job.stored_dat.as_deref()).and_then(|dat| stored_grid(dat, job.stored_bpm));
+        let result =
+            analyse_track_with(&job.audio, &job.file_name, &settings, stored.as_ref()).map(Box::new).map_err(|e| e.to_string());
         {
             let mut s = lock.lock().unwrap();
             if let Some(i) = s.running.iter().position(|(id, _)| *id == job.content) {

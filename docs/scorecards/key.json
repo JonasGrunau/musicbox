@@ -25,5 +25,11 @@
     "window_choices": "1018/1018",
     "window_votes": "25/25",
     "judgement_random_inputs": "400000/400000 (result and internal state)"
+  },
+  "oracle_b_high_precision": {
+    "date": "2026-10-14",
+    "command": "MB_ORACLE=oracle-b MB_HP=dynamic cargo run --release -p mb-analysis --example key_score",
+    "own_analysis_exact": 169,
+    "note": "high-precision Dynamic grid; on the 12 sweeps (no high-precision beats) the key runs on the stored grid, as rekordbox does (getBeatListFromDatabase)"
   }
 }

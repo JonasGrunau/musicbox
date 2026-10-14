@@ -12,7 +12,7 @@
   ],
   "compared": "mood, end beat, bank, byte 0x1d and every phrase word (start beat, kind, variant flags, fill flag, fill start)",
   "inputs": {
-    "own": "our whole analysis pass: grid, phrase shift, stages A-D",
+    "own": "our whole analysis pass: grid, phrase shift, stages A-D; where high precision finds no beats, the stored grid as rekordbox takes it (mb_analysis::analyze_with)",
     "stored_grid": "rekordbox's PQTZ and djmdContent.BPM as the anchor (beat 0's tempo where the BPM column is 0)"
   },
   "oracle_a": {
@@ -39,10 +39,11 @@
     "tracks": 169,
     "with_pssi": 160,
     "own_high_precision_dynamic": {
-      "presence_matches": 157,
-      "pssi_identical": 147,
+      "presence_matches": 169,
+      "pssi_identical": 159,
       "of_pssi_tracks": 160,
-      "note": "12 misses are the sweep_20_20k probes: high precision finds no beats, rekordbox falls back to the stored grid and its BPM; analyse_track has no previous grid to fall back to"
+      "phrases_identical": "2378/2379 by index",
+      "note": "the 12 sweep_20_20k probes, where high precision finds no beats, run on the stored grid and its BPM (getBeatListFromDatabase) and now match; without that fallback they had no PSSI (147/160)"
     },
     "stored_grid": {
       "presence_matches": 169,
@@ -62,6 +63,6 @@
     "result_struct": "161/161 identical"
   },
   "targets": {
-    "pssi_identical": ">= 95%: met (oracle-a 98.8% own; oracle-b 99.4% on the stored grid)"
+    "pssi_identical": ">= 95%: met (oracle-a 159/161 own; oracle-b 159/160 own and on the stored grid)"
   }
 }

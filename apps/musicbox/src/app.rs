@@ -697,6 +697,8 @@ impl App {
                     t.file_name.clone()
                 },
                 title: t.title.clone(),
+                stored_dat: t.analysis_path.clone(),
+                stored_bpm: t.bpm_x100.map(i64::from),
             })
             .collect();
         if jobs.is_empty() {

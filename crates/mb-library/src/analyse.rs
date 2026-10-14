@@ -92,6 +92,18 @@ pub struct TrackAnalysis {
 /// Analyses the audio file at `audio`. `file_name` is the name rekordbox puts into PPTH
 /// (`?/<file name>`, `djmdContent.FileNameL`).
 pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings) -> Result<TrackAnalysis> {
+    analyse_track_with(audio, file_name, settings, None)
+}
+
+/// [`analyse_track`] with the track's stored grid ([`stored_grid`]). When the high-precision
+/// pass finds no beats, rekordbox keeps the stored grid and runs key and phrase analysis on it
+/// (`getBeatListFromDatabase`); without it they run without a grid.
+pub fn analyse_track_with(
+    audio: &Path,
+    file_name: &str,
+    settings: &AnalysisSettings,
+    stored: Option<&mb_analysis::beats::BeatGrid>,
+) -> Result<TrackAnalysis> {
     let fail = |e: &dyn std::fmt::Display| Error::Invalid(format!("{}: {e}", audio.display()));
     let info = *mb_audio::open(audio).map_err(|e| fail(&e))?.info();
     let opts = mb_analysis::Options {
@@ -101,7 +113,7 @@ pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings)
         high_precision: settings.high_precision,
         ..mb_analysis::Options::default()
     };
-    let a = mb_analysis::analyze(audio, opts).map_err(|e| fail(&e))?;
+    let a = mb_analysis::analyze_with(audio, opts, stored).map_err(|e| fail(&e))?;
     let waves = a.waveforms.unwrap_or_default();
     let grid = a.beats;
 
@@ -336,6 +348,25 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("musicbox-tmp");
     std::fs::write(&tmp, bytes).map_err(|e| io(&tmp, e))?;
     std::fs::rename(&tmp, path).map_err(|e| io(path, e))
+}
+
+/// The grid [`analyse_track_with`] falls back to: the PQTZ of the track's current `.DAT` and its
+/// `djmdContent.BPM` (`bpm_x100`). Where the column is missing or 0 (left so by an earlier
+/// high-precision pass without beats), beat 0's tempo stands in (hypothesis: oracle-b's sweeps
+/// agree with both). Reads the file only.
+pub fn stored_grid(dat: &Path, bpm_x100: Option<i64>) -> Option<mb_analysis::beats::BeatGrid> {
+    let f = AnlzFile::parse(&std::fs::read(dat).ok()?).ok()?;
+    let q = f.beat_grid()?;
+    let bpm = match bpm_x100.unwrap_or(0) {
+        v if v > 0 => i32::try_from(v).ok()?,
+        _ => i32::from(q.beats.first()?.tempo),
+    };
+    let beats = q
+        .beats
+        .iter()
+        .map(|b| mb_analysis::beats::Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms, sub_ms: 0 })
+        .collect();
+    Some(mb_analysis::beats::BeatGrid { bpm, beats })
 }
 
 /// The first section with `tag` of the file at `path`, if any.

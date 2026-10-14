@@ -24,6 +24,29 @@ pub struct OracleTrack {
 }
 
 impl OracleTrack {
+    /// The stored grid (PQTZ and `djmdContent.BPM`; beat 0's tempo where the column is 0), as
+    /// `mb_analysis::analyze_with` takes it.
+    pub fn stored_grid(&self) -> Option<mb_analysis::beats::BeatGrid> {
+        let q = self.dat.as_ref()?.beat_grid()?;
+        let bpm = match self.bpm? as i32 {
+            0 => i32::from(q.beats.first()?.tempo),
+            v => v,
+        };
+        Some(mb_analysis::beats::BeatGrid {
+            bpm,
+            beats: q
+                .beats
+                .iter()
+                .map(|b| mb_analysis::beats::Beat {
+                    beat_in_bar: b.beat_in_bar,
+                    tempo: b.tempo,
+                    time_ms: b.time_ms,
+                    sub_ms: 0,
+                })
+                .collect(),
+        })
+    }
+
     /// Body and header of the first section with `tag` in any of the three files.
     pub fn section(&self, tag: Tag) -> Option<(&[u8], &[u8])> {
         [&self.dat, &self.ext, &self.ex2]

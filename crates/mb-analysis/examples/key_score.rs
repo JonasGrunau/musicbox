@@ -2,7 +2,8 @@
 //! Two inputs per track: rekordbox's own grid (PQTZ and `djmdContent.BPM`) with our key buffer,
 //! and our whole analysis pass (our grid, phrase shift, key). Usage:
 //!   cargo run --release -p mb-analysis --example key_score -- [--verbose] [filter]
-//! (`MB_ORACLE=oracle-b` for the second fixture, `MB_THREADS` to limit threads.)
+//! (`MB_ORACLE=oracle-b` for the second fixture, `MB_HP=dynamic` for a high-precision own grid
+//! with the stored grid as fallback, `MB_THREADS` to limit threads.)
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -77,6 +78,9 @@ fn main() {
                     .is_none_or(|f| t.path.to_string_lossy().contains(f.as_str()))
         })
         .collect();
+    let hp = std::env::var("MB_HP")
+        .is_ok_and(|v| v == "dynamic")
+        .then_some(mb_analysis::hpbeat::HpMode::Dynamic);
     let next = Mutex::new(0usize);
     let rows = Mutex::new(Vec::new());
     let threads = std::env::var("MB_THREADS")
@@ -109,9 +113,12 @@ fn main() {
                         beats: true,
                         phrase: true,
                         key: true,
-                        high_precision: None,
+                        high_precision: hp,
                     };
-                    let own = mb_analysis::analyze(&t.path, opts).ok().and_then(|a| a.key);
+                    // With the stored grid as the fallback where high precision finds no beats.
+                    let own = mb_analysis::analyze_with(&t.path, opts, t.stored_grid().as_ref())
+                        .ok()
+                        .and_then(|a| a.key);
                     let full = t.path.to_string_lossy();
                     let row = Row {
                         name: full.split("/corpus/").last().unwrap_or(&full).to_string(),

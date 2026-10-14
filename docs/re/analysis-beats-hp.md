@@ -162,6 +162,7 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
   - Normal and Auto keep the Normal-mode grid and set `Analysis.high_precision_error`.
   - The model is loaded once per process.
 - **No beats.** `Analysis.beats` is `None`. `mb-library` then sets `TrackAnalysis.keep_old_grid`: `ApplyAnalysis` carries the previous PQTZ/PQT2 over and writes `BPM` 0 (`ops/analyse-track.md`).
+  - Key and phrase run on the stored grid, as in rekordbox (§ 6): `mb_analysis::analyze_with` / `mb_library::analyse_track_with` take it from the caller. The 12 sweeps then get oracle-b's key and PSSI.
 - **Preferences.** `AnalysisSettings::high_precision_from(HighPrecisionBeatAnalyze, trackHiPrecisionBeatAnalysisMode)`, with the binary's defaults 0 and 2.
 - **No phrase shift for a Dynamic grid** (urahaku, § 1). Without this gate, 57 of the 154 grids would move.
 - **Cost.** About 4–5 s per track, with three tracks in parallel on this machine.
@@ -170,7 +171,6 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
   - `hp_check {table, madmom, focus, focusin}`: developer checks against harness dumps.
 
 ## 8. Open
-- **Sweep fallback** (in progress): when high precision finds no beats, rekordbox runs key and phrase on the stored grid (§ 6). `analyse_track` has no previous grid today, so our own pass writes no PSSI and takes a whole-track key there.
 - **Modes 2 and 3:**
   - BALib v2's own beat analysis (`GetBpm`, `GetOffsetCalc`, `GetBpmHendou`);
   - model 8 over the 60 s window;

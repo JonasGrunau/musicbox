@@ -9,10 +9,9 @@
 #[path = "../tests/common/mod.rs"]
 mod common;
 
-use mb_analysis::beats::{Beat, BeatGrid};
 use mb_analysis::phrase::PhraseResult;
 use mb_anlz::Tag;
-use mb_anlz::tags::{BeatGrid as Pqtz, SongStructure};
+use mb_anlz::tags::SongStructure;
 
 /// The PSSI fields the analysis decides.
 #[derive(Debug, Clone, PartialEq)]
@@ -101,25 +100,6 @@ impl Score {
     }
 }
 
-fn rb_grid(t: &common::OracleTrack) -> Option<BeatGrid> {
-    let s = t.dat.as_ref()?.sections_with(Tag::PQTZ).next()?;
-    let q = Pqtz::decode(s).ok()?;
-    // Where high precision found no beats (oracle-b's sweeps), rekordbox kept the old grid and
-    // ran the phrase pass on it with its BPM, but stored BPM 0: take beat 0's tempo then.
-    let bpm = match t.bpm? as i32 {
-        0 => i32::from(q.beats.first()?.tempo),
-        v => v,
-    };
-    Some(BeatGrid {
-        bpm,
-        beats: q
-            .beats
-            .iter()
-            .map(|b| Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms, sub_ms: 0 })
-            .collect(),
-    })
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dump = args.iter().any(|a| a == "--dump");
@@ -152,7 +132,8 @@ fn main() {
                     .and_then(|e| e.sections_with(Tag::PSSI).next())
                     .and_then(|s| SongStructure::decode(s).ok())
                     .map(|s| Pssi::from_anlz(&s));
-                let rb = rb_grid(t)
+                let rb = t
+                    .stored_grid()
                     .and_then(|g| mb_analysis::phrase::analyze_with_grid(&t.path, &g, urahaku))
                     .map(|r| Pssi::from_result(&r));
                 let own = if rb_only {
@@ -166,7 +147,11 @@ fn main() {
                         key: false,
                         high_precision: hp,
                     };
-                    mb_analysis::analyze(&t.path, opts).ok().and_then(|a| a.phrase).map(|r| Pssi::from_result(&r))
+                    // With the stored grid as the fallback where high precision finds no beats.
+                    mb_analysis::analyze_with(&t.path, opts, t.stored_grid().as_ref())
+                        .ok()
+                        .and_then(|a| a.phrase)
+                        .map(|r| Pssi::from_result(&r))
                 };
                 out.lock().unwrap().push((k, want, rb, own));
             });
