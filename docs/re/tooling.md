@@ -33,3 +33,10 @@
   - The statically linked SQLite 3.41.1 and the DeviceSQL runtime (export.pdb).
 - **2026-10-14:** started via `open -a` or from a shell, the copy exits right after its startup backup (`sqlcipher_export('backup')`), with no crash report; on 2026-10-11 it ran a full session. Cause open (licence or integrity check).
 - **Risk:** the self-integrity check (`SecStaticCodeCheckValidity` import) or the license runtime may reject the clone. If that happens, use static RE and before/after diffs.
+
+## Driving rekordbox for reference runs (`~/re-work/tools/rbdrive/`, outside the repo)
+Used on 2026-10-14 to make `oracle-c/d/e` and `oracle-cue/*` (`fixtures/manifest.toml`), with the user's permission to use mouse and keyboard; never with the reference stick mounted.
+- `rb_start.sh` / `rb_quit.sh`: start rekordbox in the background (refuses with `/Volumes/REKORDBOX` mounted) and quit it by Apple Event, dismissing dialogs with Escape only while rekordbox is frontmost.
+- `cue_run.sh prep|select|analyse|ok|finish <run> [key=val …]`: restores a library (`SEED`, default `fixtures/oracle-a`) and the user's settings backup, sets preferences, optionally runs `PRESEED` (e.g. `cue_trend_seed`), selects all tracks, opens "Tracks analysieren", confirms, waits for the files and snapshots into `fixtures/oracle-cue/<run>`. It refuses while RBTEST is mounted. Work files and the settings backup live in `~/re-work/rbdrive-work` (`RBDRIVE_WORK`).
+- `ui` (from `ui.swift`): posts clicks, right-clicks, drags and keys at screen points, with modifier flags cleared on mouse events. `winlist` lists rekordbox's windows (id, layer, geometry, title); screenshots are taken per window only (`screencapture -l`).
+- Run steps one at a time and look at each screenshot before the next click. rekordbox can deadlock in JUCE's `SharedSession::removeTask` (device watcher or network change); then stop it with TERM after checking that no analysis is running.
