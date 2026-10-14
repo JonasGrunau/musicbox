@@ -109,6 +109,7 @@ fn main() -> anyhow::Result<()> {
                     pref("trackHiPrecisionBeatAnalysisMode").as_deref(),
                 ),
                 vocal: pref("trackAnalysisSettingsVocalDetect").is_some_and(|v| v.trim() == "1"),
+                embedding: pref("TrackAnalysisSettingsEmbedding").is_none_or(|v| v.trim() != "0"),
             };
             println!("settings: {settings:?}");
             for t in unanalysed {

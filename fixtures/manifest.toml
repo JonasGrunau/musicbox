@@ -42,3 +42,30 @@ macos = "27.0"
 contents = "ANLZ0000.DAT/.EXT of one track after a rekordbox grid edit ('move grid right' once) on the oracle-b analysis; README.txt has the row values"
 sha256_dat = "d11dbab7d0a8a5804ee26982a8f59acb539e065f0bc7ae74e1bd1ae22d30eb22"
 sha256_ext = "5ae23ab5829d23c3098c73799811672bfd681240905cd8a11d8b242cc5bf90df"
+
+[oracle-c]
+path = "fixtures/oracle-c"
+captured = "2026-10-14"
+rekordbox = "7.2.19.0342"
+macos = "27.0"
+settings = "analysis mode 3 (high precision Normal): HighPrecisionBeatAnalyze=1, trackHiPrecisionBeatAnalysisMode=0, BPM range 70-180, key/phrase/vocal ON, embedding/network OFF; see analysis-settings.txt"
+contents = "oracle-a library re-analysed by rekordbox (all tracks selected, 'Tracks analysieren')"
+notes = "rekordbox exits without a crash report on the sampler loops House3/House4/Breaks2/Breaks3 in this mode (twice, reproducible): their DAT is rewritten, EXT/2EX and rows are not. Exclude them. vs oracle-a: PQT2 162, PQTZ 161, PSSI 85, PWAV 4, PWV2 1. rekordbox's Focus debug CSVs from the runs: ~/re-work/oracle-modes/m3-run*/csv."
+
+[oracle-d]
+path = "fixtures/oracle-d"
+captured = "2026-10-14"
+rekordbox = "7.2.19.0342"
+macos = "27.0"
+settings = "analysis mode 2 (high precision Auto): HighPrecisionBeatAnalyze=1, trackHiPrecisionBeatAnalysisMode=2, BPM range 70-180, key/phrase/vocal ON, embedding/network OFF; see analysis-settings.txt"
+contents = "oracle-a library re-analysed by rekordbox (all 169 tracks)"
+notes = "vs oracle-a: PQT2 154, PQTZ 153, PSSI 74, PWAV 4, PWV2 1. Focus debug CSVs: ~/re-work/oracle-modes/m2/csv."
+
+[oracle-e]
+path = "fixtures/oracle-e"
+captured = "2026-10-14"
+rekordbox = "7.2.19.0342"
+macos = "27.0"
+settings = "analysis mode 1 (Normal-mode Dynamic): HighPrecisionBeatAnalyze=0, trackAnalysisMode=1, BPM range 70-180, key/phrase/vocal ON, embedding/network OFF; see analysis-settings.txt"
+contents = "oracle-a library re-analysed by rekordbox (all 169 tracks)"
+notes = "vs oracle-a: PQT2 166, PQTZ 166, PSSI 116, PWAV 4, PWV2 1. No debug CSVs in this mode."

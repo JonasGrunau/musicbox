@@ -297,6 +297,12 @@ pub fn file_md5(path: &Path) -> std::io::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// `embed` on the audio file at `path`: [`load_audio`], then [`Models::embed`].
+pub fn embed_file(path: &Path) -> Result<Embedding, String> {
+    let mono = load_audio(path)?;
+    Models::get()?.embed(&mono)
+}
+
 /// `load_audio` @0x10089b14c: the track at 16 kHz through rekordbox's converter, samples
 /// `0 … L − 2`, stereo as `(R + L)·0.5`.
 pub fn load_audio(path: &Path) -> Result<Vec<f32>, String> {
@@ -307,4 +313,30 @@ pub fn load_audio(path: &Path) -> Result<Vec<f32>, String> {
     let got = dec.read_frames(&mut frames);
     frames.truncate(got);
     Ok(if info.channels == 2 { frames.iter().map(|f| (f[1] + f[0]) * 0.5).collect() } else { frames.iter().map(|f| f[0]).collect() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn levels(runs: &[(u8, usize)]) -> Vec<u8> {
+        runs.iter().flat_map(|&(l, n)| std::iter::repeat_n(l, n)).collect()
+    }
+
+    #[test]
+    fn vocal_share_bridges_short_gaps() {
+        // vocal at frame 10, a 50-frame gap (2.3 s, bridged), a quieter part to the end: one part
+        // from 464.399 ms to 1 s after the last mark at 12074.376 ms
+        let v = levels(&[(0, 10), (3, 200), (0, 50), (1, 100)]);
+        let want = (12074.376 + 1000.0 - 464.399) * 0.001 / 20.0;
+        assert!((vocal_share(&v, 20) - want).abs() < 1e-12);
+        // never level 3, or shorter than 6 s: nothing counts
+        assert_eq!(vocal_share(&levels(&[(0, 10), (2, 400)]), 20), 0.0);
+        assert_eq!(vocal_share(&levels(&[(4, 100), (0, 10)]), 20), 0.0);
+        assert_eq!(vocal_share(&[], 20), 0.0);
+        // a level that never changes is one mark: its part is the added second
+        assert_eq!(vocal_share(&levels(&[(4, 1000)]), 10), 0.0);
+        // at most 1 (13.9 s of vocals over 5 s)
+        assert_eq!(vocal_share(&levels(&[(4, 300), (0, 1)]), 5), 1.0);
+    }
 }

@@ -1,0 +1,18 @@
+{
+  "scorecard": "track embedding (.3EX)",
+  "date": "2026-10-14",
+  "rekordbox": "7.2.19.0342",
+  "onnxruntime": "1.18.0 (rekordbox's own libonnxruntime, dlopen)",
+  "macos": "27.0",
+  "code": "crates/mb-analysis/src/embed/, crates/mb-nn/src/ort.rs, crates/mb-library/src/analyse.rs",
+  "spec": "docs/re/analysis-embedding.md",
+  "command": "cargo run --release -p mb-analysis --example embed_score",
+  "test": "cargo test -p mb-library --test analyse_ops embedding_pass_writes_3ex",
+  "fixtures": {
+    "sandbox-initial": {"tracks": 14, "files_identical": 14, "values_identical": 14,
+      "fields": {"d2": "14/14", "d3": "14/14", "d4": "14/14", "d5": "1856/1856 values (29 windows x 64)", "d6": "896/896", "d7": "28/28", "d8": "14/14", "d9": "14/14", "d10": "14/14 (our key)", "d11": "14/14 (BPM column)", "d12": "14/14 (our vocal detector)"}}
+  },
+  "notes": "d11 is the track's BPM column after the pass; our own grid differs from it on the 6 sampler loops (preset grids), not an embedding difference",
+  "runtime_inputs": "libonnxruntime.1.18.0.dylib and 6 ONNX models from the user's install, MD5-checked; the vocal detector's network and statistics as in vocal.json",
+  "seconds_per_track": "about 0.5 for a 3-minute MP3 (16 kHz decode + CNN), plus the vocal pass"
+}

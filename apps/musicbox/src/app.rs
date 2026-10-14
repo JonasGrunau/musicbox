@@ -176,7 +176,8 @@ impl App {
                     );
                     // Analysis preferences: `AutoGain` and `enableKeyAnalysis` (default on),
                     // `trackAnalysisSettingsSongStruct`, `HighPrecisionBeatAnalyze` with
-                    // `trackHiPrecisionBeatAnalysisMode`, `AutoAnalysis`.
+                    // `trackHiPrecisionBeatAnalysisMode`, `trackAnalysisSettingsVocalDetect`,
+                    // `TrackAnalysisSettingsEmbedding` (default on), `AutoAnalysis`.
                     self.analysis_settings = mb_library::AnalysisSettings {
                         auto_gain: pref("AutoGain").is_none_or(|v| v.trim() != "0"),
                         phrase: pref("trackAnalysisSettingsSongStruct").is_some_and(|v| v.trim() == "1"),
@@ -186,6 +187,7 @@ impl App {
                             pref("trackHiPrecisionBeatAnalysisMode").as_deref(),
                         ),
                         vocal: pref("trackAnalysisSettingsVocalDetect").is_some_and(|v| v.trim() == "1"),
+                        embedding: pref("TrackAnalysisSettingsEmbedding").is_none_or(|v| v.trim() != "0"),
                     };
                     self.auto_analysis = pref("AutoAnalysis").is_some_and(|v| v.trim() == "1");
                     self.export_source = Some(export::Source {
@@ -748,10 +750,13 @@ impl App {
         for f in finished {
             match f.result {
                 Ok(analysis) => {
-                    // The vocal pass needs rekordbox's install (model, statistics); without it the
-                    // analysis completes and keeps an earlier PVDI.
+                    // The vocal pass and the embedding need rekordbox's install (models,
+                    // statistics); without it the analysis completes and keeps an earlier PVDI
+                    // and `.3EX`.
                     if let Some(e) = &analysis.vocal_error {
                         self.analysis_note = Some(format!("no vocal analysis for {}: {e}", f.title));
+                    } else if let Some(e) = &analysis.embedding_error {
+                        self.analysis_note = Some(format!("no track embedding for {}: {e}", f.title));
                     }
                     self.run(Command::ApplyAnalysis { content: f.content, analysis })
                 }

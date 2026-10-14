@@ -45,11 +45,16 @@ pub struct AnalysisSettings {
     /// `trackAnalysisSettingsVocalDetect` (default 0): PVDI and the `ContentLink` vocal bit
     /// (`docs/re/analysis-vocal.md`).
     pub vocal: bool,
+    /// `TrackAnalysisSettingsEmbedding` (default 1): the `.3EX` track embedding and the
+    /// `ContentLink` embedding bit, with rekordbox's own ONNX models
+    /// (`docs/re/analysis-embedding.md`). Runs the vocal detector too when the track has no
+    /// PVDI, for the vocal share; its levels are written only with [`AnalysisSettings::vocal`].
+    pub embedding: bool,
 }
 
 impl Default for AnalysisSettings {
     fn default() -> Self {
-        Self { auto_gain: true, phrase: false, key: true, high_precision: None, vocal: false }
+        Self { auto_gain: true, phrase: false, key: true, high_precision: None, vocal: false, embedding: true }
     }
 }
 
@@ -96,6 +101,28 @@ pub struct TrackAnalysis {
     /// Why the vocal pass, when asked for, could not run (rekordbox's install or model
     /// missing); an earlier PVDI is kept then.
     pub vocal_error: Option<String>,
+    /// The embedding pass, when it ran; [`Command::ApplyAnalysis`] completes the `.3EX` record.
+    pub embedding: Option<TrackEmbedding>,
+    /// Why the embedding, when asked for, could not run (rekordbox's install or models
+    /// missing); an earlier `.3EX` is left as it is then.
+    pub embedding_error: Option<String>,
+}
+
+/// What the embedding pass computes from the audio (`docs/re/analysis-embedding.md`). The record
+/// takes the content ID, the `BPM` column and the files' PVDI when it is written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackEmbedding {
+    pub embedding: mb_analysis::embed::Embedding,
+    /// d3: MD5 of the audio file.
+    pub md5: String,
+    /// The vocal detector's levels from this pass; d12 comes from them when the files carry no
+    /// PVDI (`get_percentage_vocals` reads the stored PVDI otherwise).
+    pub levels: Option<Vec<u8>>,
+    /// Whole seconds (`(L − 1) / rate`), d12's denominator.
+    pub seconds: u16,
+    /// d10: the detected key code (−1 when detection found none), `None` when key analysis is
+    /// off (the library's key then).
+    pub key: Option<i64>,
 }
 
 /// Analyses the audio file at `audio`. `file_name` is the name rekordbox puts into PPTH
@@ -115,12 +142,16 @@ pub fn analyse_track_with(
 ) -> Result<TrackAnalysis> {
     let fail = |e: &dyn std::fmt::Display| Error::Invalid(format!("{}: {e}", audio.display()));
     let info = *mb_audio::open(audio).map_err(|e| fail(&e))?.info();
+    // The embedding runs for 1…1800 whole seconds (`CBeatAnalyzeThread::analyze`), and with it
+    // the vocal detector when the track has no PVDI (its share is d12).
+    let seconds = mb_analysis::embed::whole_seconds(info.total_samples, info.sample_rate);
+    let embed = settings.embedding && (mb_analysis::embed::MIN_SECONDS..=mb_analysis::embed::MAX_SECONDS).contains(&seconds);
     let opts = mb_analysis::Options {
         loudness: settings.auto_gain,
         phrase: settings.phrase,
         key: settings.key,
         high_precision: settings.high_precision,
-        vocal: settings.vocal,
+        vocal: settings.vocal || embed,
         ..mb_analysis::Options::default()
     };
     let a = mb_analysis::analyze_with(audio, opts, stored).map_err(|e| fail(&e))?;
@@ -215,9 +246,10 @@ pub fn analyse_track_with(
             TypedSection::WaveNormalize(WaveNormalize { unk_0c: 0, coefficients: waves.pwvc.to_vec() }),
         ],
     );
-    // PVDI (`write_pmai_ex2_vocal_detect`): one level per 1024 samples at 22.05 kHz.
+    // PVDI (`write_pmai_ex2_vocal_detect`): one level per 1024 samples at 22.05 kHz, only with
+    // the vocal preference (`notifyVocalDetect` is skipped for a detector run for the embedding).
     let mut ex2 = ex2;
-    if let Some(v) = &a.vocal {
+    if let Some(v) = a.vocal.as_ref().filter(|_| settings.vocal) {
         let pvdi = VocalDetect { version: 0, unk_0e: 1024, unk_10: 22050, entry_size: 1, data: v.clone() };
         ex2.sections.push(pvdi.encode());
     }
@@ -226,6 +258,26 @@ pub fn analyse_track_with(
     // High precision without beats: the grid files stay, the BPM column becomes 0 (oracle-b's
     // 12 sweeps).
     let keep_old_grid = settings.high_precision.is_some() && grid.is_none();
+    let (embedding, embedding_error) = match (embed, &a.vocal_error) {
+        (false, _) => (None, None),
+        (true, Some(e)) => (None, Some(e.clone())),
+        (true, None) => match mb_analysis::embed::embed_file(audio).and_then(|e| {
+            let md5 = mb_analysis::embed::file_md5(audio).map_err(|e| e.to_string())?;
+            Ok((e, md5))
+        }) {
+            Ok((embedding, md5)) => (
+                Some(TrackEmbedding {
+                    embedding,
+                    md5,
+                    levels: a.vocal.clone(),
+                    seconds,
+                    key: settings.key.then(|| a.key.map_or(-1, i64::from)),
+                }),
+                None,
+            ),
+            Err(e) => (None, Some(e)),
+        },
+    };
     Ok(TrackAnalysis {
         dat,
         ext,
@@ -246,7 +298,9 @@ pub fn analyse_track_with(
         keep_old_grid,
         phrase_analysed: settings.phrase,
         vocal_analysed: settings.vocal && a.vocal_error.is_none(),
-        vocal_error: a.vocal_error,
+        vocal_error: if settings.vocal { a.vocal_error } else { None },
+        embedding,
+        embedding_error,
     })
 }
 
@@ -344,6 +398,13 @@ const LINK_DONE: i64 = 0xC0600;
 const LINK_STATUS_MASK: i64 = 0x8670;
 const LINK_PHRASE: i64 = 0x10000;
 const LINK_VOCAL: i64 = 0x100000;
+const LINK_EMBEDDING: i64 = 0x200000;
+
+/// d10 from the library's key when key analysis is off: rekordbox maps the key's wheel position
+/// (1A, 1B, 2A, …) through the table at 0x103752aa0 to the analysis code; an unknown key is −1.
+fn key_code(scale_name: &str) -> i64 {
+    (0u8..24).find(|&c| mb_analysis::key::scale_name(c) == scale_name).map_or(-1, i64::from)
+}
 
 fn int(v: &Value) -> i64 {
     match v {
@@ -498,6 +559,7 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     let rel = format!("/PIONEER/USBANLZ/{}/ANLZ0000.DAT", mb_anlz::usb::local_anlz_folder(&uuid));
     let dat_path = root.join(rel.trim_start_matches('/'));
     let paths = [dat_path.clone(), dat_path.with_extension("EXT"), dat_path.with_extension("2EX")];
+    let ex3_path = dat_path.with_extension("3EX");
 
     // Sections musicbox does not compute are kept from the previous files.
     let mut ext = analysis.ext.clone();
@@ -513,9 +575,15 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
         keep_old_grid(&paths, &mut dat, &mut ext);
     }
     let new_bytes = [dat.to_bytes(), ext.to_bytes(), ex2.to_bytes()];
+    // The vocal share reads the PVDI the files carry (ours, or kept), else this pass's levels.
+    let files_pvdi = ex2.sections_with(Tag::PVDI).next().and_then(|s| VocalDetect::decode(s).ok()).map(|p| p.data);
 
     // Copy-on-write backup and the undo snapshot of the files.
-    let previous: Vec<(PathBuf, Option<Vec<u8>>)> = paths.iter().map(|p| (p.clone(), std::fs::read(p).ok())).collect();
+    let previous: Vec<(PathBuf, Option<Vec<u8>>)> = paths
+        .iter()
+        .chain(analysis.embedding.as_ref().map(|_| &ex3_path))
+        .map(|p| (p.clone(), std::fs::read(p).ok()))
+        .collect();
     if let Some(dir) = &lib.anlz_backup {
         let target = dir.join("anlz").join(Path::new(rel.trim_start_matches('/')).parent().unwrap_or(Path::new("")));
         for (p, bytes) in &previous {
@@ -566,7 +634,35 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     // B. Start: 0x4A on the first pass (0 → 74), 0x6A afterwards (104 → 106); queued link bits.
     col(&tx, "Analysed", Value::Integer((state & 0x20) | 0x4A))?;
     col(&tx, "ContentLink", Value::Integer(link | LINK_QUEUED))?;
-    // The files (the transaction is still open, so a failed write rolls the columns back).
+    // The files (the transaction is still open, so a failed write rolls the columns back). The
+    // `.3EX` comes first: `notifyEmbedding` writes it before the analysis completes.
+    let ex3_bytes = match &analysis.embedding {
+        Some(e) => {
+            let key = match e.key {
+                Some(k) => k,
+                None => match &old_key_id {
+                    Value::Text(id) if !id.is_empty() => name_of(&tx, "djmdKey", id)?,
+                    Value::Integer(n) => name_of(&tx, "djmdKey", &n.to_string())?,
+                    _ => None,
+                }
+                .map_or(-1, |n| key_code(&n)),
+            };
+            let levels = files_pvdi.as_deref().or(e.levels.as_deref()).unwrap_or_default();
+            let record = mb_analysis::embed::Record {
+                embedding: e.embedding.clone(),
+                content_id: content.0.clone(),
+                md5: e.md5.clone(),
+                vocal_share: mb_analysis::embed::vocal_share(levels, e.seconds),
+                // `BeatAnalyzeInfo`'s BPM × 100 · 0.01: the `BPM` column this pass leaves
+                bpm: analysis.bpm_x100.unwrap_or_else(|| int(&old.bpm)) as f64 * 0.01,
+                key,
+            };
+            let bytes = record.to_3ex();
+            write_file(&ex3_path, &bytes)?;
+            Some(bytes)
+        }
+        None => None,
+    };
     for (p, bytes) in paths.iter().zip(&new_bytes) {
         write_file(p, bytes)?;
     }
@@ -635,9 +731,17 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     if kept_vocal {
         final_link |= link & LINK_VOCAL;
     }
+    // The embedding bit stays from an earlier pass (completion does not clear it).
+    if ex3_bytes.is_some() {
+        final_link |= LINK_EMBEDDING;
+    }
     col(&tx, "Analysed", Value::Integer(ANALYSED_DONE))?;
     col(&tx, "ContentLink", Value::Integer(final_link))?;
-    // D. The agent's `contentFile` rows (.2EX, .DAT, .EXT), when musicbox writes in its place.
+    // D. The agent's `contentFile` rows (.3EX, .2EX, .DAT, .EXT), when musicbox writes in its
+    // place (sandbox-initial's order).
+    if let Some(bytes) = &ex3_bytes {
+        content_files.push(upsert_content_file(&tx, &uuid, &key(), &root, &rel.replace(".DAT", ".3EX"), bytes)?);
+    }
     for (ext_name, bytes) in [("2EX", &new_bytes[2]), ("DAT", &new_bytes[0]), ("EXT", &new_bytes[1])] {
         let path = rel.replace(".DAT", &format!(".{ext_name}"));
         content_files.push(upsert_content_file(&tx, &uuid, &key(), &root, &path, bytes)?);

@@ -124,8 +124,9 @@ fn analysis_files_match_rekordbox() {
 fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
     let name = t.path.file_name().unwrap().to_string_lossy().into_owned();
     let mut problems = Vec::new();
-    // oracle-a was analysed with phrase analysis on (the key follows the shifted grid).
-    let settings = AnalysisSettings { phrase: true, ..AnalysisSettings::default() };
+    // oracle-a was analysed with phrase analysis on (the key follows the shifted grid) and
+    // without the embedding (no `.3EX`, no embedding bit).
+    let settings = AnalysisSettings { phrase: true, embedding: false, ..AnalysisSettings::default() };
     let a = match analyse_track(&t.path, &t.file_name, &settings) {
         Ok(a) => a,
         Err(e) => return (name, vec![e.to_string()], false),
@@ -271,7 +272,10 @@ fn apply_and_undo() {
     assert_eq!(std::fs::read(dat.with_extension("2EX")).unwrap(), a.ex2.to_bytes());
     assert_eq!(get(&lib, "AnalysisDataPath", &first.id), Value::Text(rel.clone()));
     assert_eq!(get(&lib, "Analysed", &first.id), Value::Integer(105));
-    assert_eq!(get(&lib, "ContentLink", &first.id), Value::Integer(0xC060E));
+    // With rekordbox's models installed the embedding runs too (`.3EX`, bit 0x200000).
+    let embedded = a.embedding.is_some();
+    assert_eq!(get(&lib, "ContentLink", &first.id), Value::Integer(0xC060E | if embedded { 0x200000 } else { 0 }));
+    assert_eq!(dat.with_extension("3EX").exists(), embedded);
     assert_eq!(get(&lib, "BPM", &first.id), Value::Integer(a.bpm_x100.unwrap()));
     assert_eq!(get(&lib, "Length", &first.id), Value::Integer(a.length));
     assert_ne!(get(&lib, "AnalysisUpdated", &first.id), before_counter);
@@ -289,7 +293,7 @@ fn apply_and_undo() {
     let m = a.mixer.unwrap();
     assert_eq!(mixer, (m[0], m[1], m[2], m[3]));
     let files = content_files(&lib, &first.id);
-    assert_eq!(files.len(), 3);
+    assert_eq!(files.len(), 3 + usize::from(embedded));
     for (path, hash, size) in &files {
         let bytes = std::fs::read(root.join(path.trim_start_matches('/'))).unwrap();
         assert_eq!(*size, bytes.len() as i64);
@@ -305,13 +309,15 @@ fn apply_and_undo() {
     let old_link = get(&lib, "ContentLink", &again.id);
     let mixers_before = count(lib.connection(), "SELECT count(*) FROM djmdMixerParam WHERE rb_local_deleted = 0");
     let b = analyse_track(&again.path, &again.file_name, &AnalysisSettings::default()).unwrap();
+    let again_embedded = b.embedding.is_some();
     history.run(&mut lib, Command::ApplyAnalysis { content: DbId(again.id.clone()), analysis: Box::new(b) }).unwrap();
     let ext = AnlzFile::parse(&std::fs::read(again_dat.with_extension("EXT")).unwrap()).unwrap();
     let old = AnlzFile::parse(&old_ext).unwrap();
     assert_eq!(ext.sections_with(Tag::PSSI).next(), old.sections_with(Tag::PSSI).next());
     let ex2 = AnlzFile::parse(&std::fs::read(again_dat.with_extension("2EX")).unwrap()).unwrap();
     assert!(ex2.sections_with(Tag::PVDI).next().is_some());
-    assert_eq!(get(&lib, "ContentLink", &again.id), old_link);
+    let Value::Integer(old_bits) = old_link else { panic!("ContentLink") };
+    assert_eq!(get(&lib, "ContentLink", &again.id), Value::Integer(old_bits | if again_embedded { 0x200000 } else { 0 }));
     assert_eq!(get(&lib, "Analysed", &again.id), Value::Integer(105));
     assert_eq!(count(lib.connection(), "SELECT count(*) FROM djmdMixerParam WHERE rb_local_deleted = 0"), mixers_before);
 
@@ -320,8 +326,10 @@ fn apply_and_undo() {
     assert_eq!(std::fs::read(&again_dat).unwrap(), old_dat);
     assert_eq!(std::fs::read(again_dat.with_extension("EXT")).unwrap(), old_ext);
     assert_eq!(std::fs::read(again_dat.with_extension("2EX")).unwrap(), old_2ex);
+    assert!(!again_dat.with_extension("3EX").exists());
     history.undo(&mut lib).unwrap().unwrap();
     assert!(!dat.exists() && !dat.with_extension("EXT").exists() && !dat.with_extension("2EX").exists());
+    assert!(!dat.with_extension("3EX").exists());
     assert_eq!(get(&lib, "Analysed", &first.id), Value::Integer(0));
     assert_eq!(get(&lib, "ContentLink", &first.id), Value::Integer(14));
     assert_eq!(get(&lib, "AnalysisDataPath", &first.id), Value::Null);
@@ -541,4 +549,58 @@ fn high_precision_without_beats_uses_stored_grid() {
     // Without the stored grid there is no PSSI.
     let b = analyse_track(&t.path, &t.file_name, &settings).unwrap();
     assert!(b.ext.sections_with(Tag::PSSI).next().is_none());
+}
+
+/// The embedding on rekordbox's fresh install (`fixtures/sandbox-initial`, embedding on, vocal
+/// off): an analysis of the demo track writes a `.3EX` byte-identical to rekordbox's (no PVDI in
+/// the files, so the vocal share comes from the detector run for it), its `contentFile` row
+/// first, and `ContentLink`'s embedding bit; undo removes the file and the row. Needs the
+/// installed rekordbox (its ONNX and vocal models); skipped without it.
+#[test]
+fn embedding_pass_writes_3ex() {
+    let Some(dir) = TempLibrary::new("sandbox-initial") else {
+        eprintln!("skipped: fixtures/sandbox-initial missing");
+        return;
+    };
+    let Some((share, all)) = tracks_in("sandbox-initial") else { return };
+    let Some(t) = all.iter().find(|t| t.path.exists() && t.file_name == "Demo Track 1.mp3") else {
+        eprintln!("skipped: demo track missing");
+        return;
+    };
+    let a = analyse_track(&t.path, &t.file_name, &AnalysisSettings::default()).unwrap();
+    if let Some(e) = &a.embedding_error {
+        eprintln!("skipped: {e}");
+        return;
+    }
+    assert!(a.ex2.sections_with(Tag::PVDI).next().is_none(), "vocal off: no PVDI");
+    let theirs = std::fs::read(share.join(t.rel.trim_start_matches('/')).with_extension("3EX")).unwrap();
+    let root = dir.dir.join("share");
+    let dat = root.join(t.rel.trim_start_matches('/'));
+    std::fs::create_dir_all(dat.parent().unwrap()).unwrap();
+    for ext in ["DAT", "EXT", "2EX"] {
+        std::fs::copy(share.join(t.rel.trim_start_matches('/')).with_extension(ext), dat.with_extension(ext)).unwrap();
+    }
+    let mut lib = Library::open_unguarded(&dir.db, &dir.passphrase).unwrap();
+    lib.set_analysis_root(&root);
+    // Test setup (not an op): no `.3EX`, no embedding bit and no `contentFile` rows before.
+    lib.connection().execute("UPDATE djmdContent SET ContentLink = ContentLink & ~2097152 WHERE ID = ?1", [&t.id]).unwrap();
+    lib.connection().execute("DELETE FROM contentFile WHERE ContentID = ?1", [&t.id]).unwrap();
+    let link_before = get(&lib, "ContentLink", &t.id);
+    let mut history = History::default();
+    history.run(&mut lib, Command::ApplyAnalysis { content: DbId(t.id.clone()), analysis: Box::new(a) }).unwrap();
+    let ours = std::fs::read(dat.with_extension("3EX")).unwrap();
+    assert!(ours == theirs, "{:?}", mb_analysis::embed::msgpack::decode(&ours).map(|v| v.get("embedding").cloned()));
+    let Value::Integer(link) = get(&lib, "ContentLink", &t.id) else { panic!("ContentLink") };
+    assert_ne!(link & 0x200000, 0, "embedding bit");
+    let first_row: String = lib
+        .connection()
+        .query_row("SELECT Path FROM contentFile WHERE ContentID = ?1 AND rb_local_deleted = 0 ORDER BY rowid LIMIT 1", [&t.id], |r| r.get(0))
+        .unwrap();
+    assert!(first_row.ends_with("/ANLZ0000.3EX"), "{first_row}");
+    assert_eq!(content_files(&lib, &t.id).len(), 4);
+
+    history.undo(&mut lib).unwrap().unwrap();
+    assert!(!dat.with_extension("3EX").exists());
+    assert_eq!(get(&lib, "ContentLink", &t.id), link_before);
+    assert!(content_files(&lib, &t.id).is_empty());
 }
