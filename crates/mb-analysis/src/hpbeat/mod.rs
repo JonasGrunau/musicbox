@@ -4,6 +4,7 @@
 pub mod hmm;
 pub mod focus;
 pub mod madmom;
+pub mod range;
 
 use crate::beats::{Beat, BeatGrid};
 use mb_nn::{Model, Session};
@@ -105,9 +106,8 @@ pub struct HpGrid {
 /// - BALib v2's BPM, beat count and offset; hendou is off in Normal and BALib's verdict in Auto.
 /// - madmom: model 8 over the 60 s window, or model 7 over the whole track with hendou.
 /// - Focus: the constant path without hendou when madmom's list starts on a bar.
-/// - `convertToMicrosec`; without hendou the BPM must lie in the 70–180 range (range 1, the
-///   only one musicbox has), else `bpmToDouble`/`bpmToHalf` would rebuild the list. They are
-///   not ported, so that case is an error.
+/// - `convertToMicrosec`; without hendou a BPM outside 70–180 (range 1, the only one musicbox
+///   has) rebuilds the grid at double or half the tempo (`range`).
 pub fn grid_v2(mode: HpMode, mono: &[f32], rate: u32, total: u64, balib: crate::balib2::Analyzer) -> Result<HpGrid, String> {
     let none = |urahaku| HpGrid { grid: None, grid_type: 1, urahaku };
     let hendou_mode = match mode {
@@ -132,15 +132,10 @@ pub fn grid_v2(mode: HpMode, mono: &[f32], rate: u32, total: u64, balib: crate::
     if !f.unported.is_empty() {
         return Err(format!("Focus: not ported: {}", f.unported.join(", ")));
     }
-    let mut bpm100 = f.bpm100();
-    if !hendou {
-        let first = f.beat_list().first().map_or(0, |b| b.2);
-        let v = if bpm100 < 1 { first } else { bpm100 };
-        if !(7000..=18000).contains(&v) {
-            return Err(format!("BPM {v} outside 70–180: bpmToDouble/bpmToHalf not ported"));
-        }
-        bpm100 = v;
+    let mut grid = to_grid(&f, rate, f.bpm100());
+    if let Some(g) = grid.as_mut().filter(|_| !hendou) {
+        (g.beats, g.bpm) = range::rebuild(std::mem::take(&mut g.beats), g.bpm, rate, total);
     }
     let grid_type = if hendou { 2 } else { 1 };
-    Ok(HpGrid { grid: to_grid(&f, rate, bpm100), grid_type, urahaku })
+    Ok(HpGrid { grid: grid.filter(|g| !g.beats.is_empty()), grid_type, urahaku })
 }
