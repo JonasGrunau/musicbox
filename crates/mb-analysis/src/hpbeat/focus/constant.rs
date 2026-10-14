@@ -6,7 +6,8 @@
 //! stable stretch, the analyser's tempo checked against it, irregular stretches rebuilt as even
 //! beats, a phase anchor (from a stable stretch, or from where the low band comes in when the
 //! stretches disagree by half a beat), a uniform grid through the anchor, BALib's offset added,
-//! the grid run out to both ends of the track, and `UnitBeatAdjust::analyze` on the result.
+//! the grid run out to both ends of the track, `UnitBeatAdjust::analyze` on the result, and the
+//! bar-number vote (`vote.rs`).
 
 use super::{BeatInfo, Focus};
 use crate::balib2::adjust::UnitBeatAdjust;
@@ -435,7 +436,7 @@ impl Focus {
             self.bpm = bpm;
             self.adjust_io = Some((before, (self.bpm, self.b.v.clone())));
         }
-        self.unported.push("constant path after UnitBeatAdjust");
+        self.vote_bars(adjust);
     }
 
     /// The analyser's tempo (+0x48) checked against the reference interval (0x10117a320–

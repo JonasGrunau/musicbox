@@ -114,7 +114,8 @@ pub struct Analysis {
     pub beats: Option<beats::BeatGrid>,
     /// Key code: 0–11 major, 12–23 minor, root `code % 12` with 0 = A ([`key::scale_name`]).
     pub key: Option<u8>,
-    /// PQT2 `analysis_type`: 2 for a high-precision Dynamic grid, else 1 (`notifyBeat`).
+    /// PQT2 `analysis_type` (`notifyBeat`): 2 for a Dynamic grid (modes 1 and 4) and for an
+    /// Auto grid with tempo changes, else 1.
     pub grid_type: u8,
     /// Why the high-precision grid was not made, when it was asked for (the Normal-mode grid
     /// is kept then).
@@ -201,6 +202,11 @@ pub fn analyze_with(
         (opts.beats && opts.key).then(|| key::KeyCollector::new(rate, total, info.channels));
     // madmom's input: the `(L + R)/2` float samples
     let mut mono = (opts.beats && opts.high_precision.is_some()).then(|| Vec::with_capacity(total as usize));
+    // BALib v2's constant analyser for high-precision Normal and Auto: BPM, offset, verdict and
+    // the bands Focus's constant path reads (`analysis-beats-hp.md` § 8).
+    let mut balib_v2 = (opts.beats
+        && matches!(opts.high_precision, Some(hpbeat::HpMode::Normal | hpbeat::HpMode::Auto)))
+    .then(|| balib2::Analyzer::new(rate, total));
     let mut vocal_error = None;
     let mut voc = match opts.vocal.then(vocal::Model::get) {
         Some(Ok(m)) => Some((m, vocal::VocalDetector::new(rate, m.tables()))),
@@ -252,6 +258,9 @@ pub fn analyze_with(
         if let Some(b) = &mut beat {
             b.put(pcm);
         }
+        if let Some(b) = &mut balib_v2 {
+            b.put(pcm);
+        }
         if let Some(p) = phrase.as_mut().filter(|_| !reread_phrase) {
             p.put(pcm);
         }
@@ -293,21 +302,32 @@ pub fn analyze_with(
         }
     });
     let mut grid = beat.and_then(beats::BeatAnalyzer::finish);
-    // PQT2 type: 2 for analysis modes 1 and 4 (`notifyBeat`).
-    let (mut grid_type, mut high_precision_error) = (if dynamic { 2 } else { 1 }, None);
-    if let (Some(mode), Some(m), Some(g)) = (opts.high_precision, &mono, &grid) {
-        match hpbeat::grid(mode, m, rate, total, g) {
-            Ok(hp) => (grid, grid_type) = (hp, 2),
+    // PQT2 type (`notifyBeat`): 2 for analysis modes 1 and 4. The phrase pass's grid shift
+    // (urahaku) is off in those modes, and in modes 2 and 3 once madmom returned beats.
+    let (mut grid_type, mut urahaku, mut high_precision_error) = (if dynamic { 2 } else { 1 }, !dynamic, None);
+    let mut no_beats = dynamic && grid.is_none();
+    if let (Some(mode), Some(m)) = (opts.high_precision, &mono) {
+        let hp = match (balib_v2.take(), &grid) {
+            (Some(b), _) => hpbeat::grid_v2(mode, m, rate, total, b),
+            (None, Some(g)) => hpbeat::grid(mode, m, rate, total, g)
+                .map(|grid| hpbeat::HpGrid { grid, grid_type: 2, urahaku: false }),
+            // BALib found no beats (the job's status 4)
+            (None, None) => Ok(hpbeat::HpGrid { grid: None, grid_type: 2, urahaku: false }),
+        };
+        match hp {
+            Ok(hp) => {
+                no_beats = hp.grid.is_none();
+                (grid, grid_type, urahaku) = (hp.grid, hp.grid_type, hp.urahaku);
+            }
             Err(e) => high_precision_error = Some(e),
         }
     }
     drop(mono);
-    // A Dynamic mode found no beats: key and phrase take the stored grid.
-    let mut stored = (grid_type == 2 && grid.is_none()).then(|| stored.cloned()).flatten();
+    // A Dynamic or high-precision pass found no beats: key and phrase take the stored grid.
+    let mut stored = no_beats.then(|| stored.cloned()).flatten();
     let mut phrases = None;
     if let (Some(g), Some(p)) = (grid.as_mut().or(stored.as_mut()), &phrase) {
-        // The Dynamic high-precision grid is not shifted (`phrase::run`'s `urahaku`).
-        phrases = phrase::run(p, g, rate, total, Some(path.as_ref()), grid_type != 2);
+        phrases = phrase::run(p, g, rate, total, Some(path.as_ref()), urahaku);
     }
     // The key job runs on the finished grid; `getKey` takes BPM × 100 · 0.01. Without a grid
     // only the whole-track estimate counts (no segments).

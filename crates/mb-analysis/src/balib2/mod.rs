@@ -119,6 +119,17 @@ impl Analyzer {
     /// `Analyzer::analyze`: the beat information analysis (both passes and the verdict between
     /// them), then the envelope's downbeat choice.
     pub fn finish(mut self) -> Option<Result> {
+        self.result()
+    }
+
+    /// [`Analyzer::finish`], keeping the analyser's `UnitBeatAdjust`: Focus's constant path
+    /// reads its bands (high-precision Normal and Auto).
+    pub fn finish_with_adjust(mut self) -> (Option<Result>, adjust::UnitBeatAdjust) {
+        let r = self.result();
+        (r, self.adjust)
+    }
+
+    fn result(&mut self) -> Option<Result> {
         let raw = std::mem::take(&mut self.sensor.beats);
         let c =
             info::analyze(self.rate as i32, &mut raw.clone(), self.total).map(|r| (r.bpm, r.beats));

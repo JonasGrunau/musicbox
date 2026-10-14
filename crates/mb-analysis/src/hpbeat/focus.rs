@@ -14,6 +14,7 @@ use super::madmom::ListBeat;
 use crate::balib2::adjust::UnitBeatAdjust;
 
 mod constant;
+mod vote;
 
 /// `peakss::BeatInfo` (24 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

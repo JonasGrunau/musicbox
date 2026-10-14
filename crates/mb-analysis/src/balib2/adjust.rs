@@ -137,16 +137,28 @@ impl UnitBeatAdjust {
     /// `calcLowInteg(bpm, pos)`: the band summed over two beats from `pos`; −1 when the window
     /// passes the capacity, the BPM is zero or `pos` < −3.
     pub(crate) fn low_integ(&self, bpm: f32, pos: i32) -> f64 {
+        self.integ(&self.low, 30.0, bpm, pos)
+    }
+
+    /// `calcAllInteg(bpm, pos)` (0x10113d9ac): the full band (+0x80) summed over one beat from
+    /// `pos`, with the same −1 cases.
+    pub(crate) fn all_integ(&self, bpm: f32, pos: i32) -> f64 {
+        self.integ(&self.full, 60.0, bpm, pos)
+    }
+
+    /// `rate/4 · k / bpm` band values from `pos/4`. The values are whole numbers, so the
+    /// binary's 16-lane sum is exact in any order.
+    fn integ(&self, band: &[i16], k: f64, bpm: f32, pos: i32) -> f64 {
         if bpm.abs() <= f32::EPSILON || pos < -3 {
             return -1.0;
         }
-        let len = ((f64::from(self.rate4) * 30.0) / f64::from(bpm) + 0.5) as i32;
+        let len = ((f64::from(self.rate4) * k) / f64::from(bpm) + 0.5) as i32;
         let start = f64::from(pos).mul_add(0.25, 0.5) as i32;
         if start + len - 1 > self.cap() {
             return -1.0;
         }
         (start..start + len.max(0))
-            .map(|k| f64::from(self.low.get(k as usize).copied().unwrap_or(0)))
+            .map(|i| f64::from(band.get(i as usize).copied().unwrap_or(0)))
             .sum()
     }
 
