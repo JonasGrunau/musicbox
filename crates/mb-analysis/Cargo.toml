@@ -11,6 +11,7 @@ thiserror.workspace = true
 mb-audio = { path = "../mb-audio" }
 mb-dsp = { path = "../mb-dsp" }
 mb-nn = { path = "../mb-nn" }
+md-5 = "0.10"
 
 [dev-dependencies]
 sha2 = "0.10"

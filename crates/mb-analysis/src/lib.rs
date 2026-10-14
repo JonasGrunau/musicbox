@@ -10,6 +10,7 @@
 //! loudness meter.
 
 pub mod beats;
+pub mod embed;
 pub mod hpbeat;
 pub mod key;
 pub mod loud;

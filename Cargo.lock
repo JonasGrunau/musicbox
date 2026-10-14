@@ -2288,6 +2288,7 @@ dependencies = [
  "mb-dsp",
  "mb-masterdb",
  "mb-nn",
+ "md-5",
  "serde_json",
  "sha2",
  "thiserror 2.0.21",

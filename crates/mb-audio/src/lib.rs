@@ -176,12 +176,23 @@ fn base_reader(path: &Path) -> Result<(Box<dyn Reader>, Format, Backend)> {
 
 impl Decoder {
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with(path, None)
+    }
+
+    /// Opens `path` decoded at `rate` (through rekordbox's sample-rate converter when the file
+    /// differs), as `PcmReaderTemplate<Float2>` does when it is built with a target rate (the
+    /// embedding analysis reads at 16 kHz).
+    pub fn open_at(path: &Path, rate: u32) -> Result<Self> {
+        Self::open_with(path, Some(rate))
+    }
+
+    fn open_with(path: &Path, target: Option<u32>) -> Result<Self> {
         let (reader, format, backend) = base_reader(path)?;
         let ri = reader.info();
         if ri.length == 0 || ri.sample_rate == 0 {
             return Err(Error::Format("empty stream".into()));
         }
-        let rate = analysis_rate(ri.sample_rate);
+        let rate = target.unwrap_or_else(|| analysis_rate(ri.sample_rate));
         let reader: Box<dyn Reader> = if rate == ri.sample_rate {
             reader
         } else {
