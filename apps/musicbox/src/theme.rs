@@ -51,7 +51,12 @@ pub const STAR_OFF: Color32 = rgb(0x3A3A3A);
 // Shared sizes (4 px grid).
 pub const RADIUS: u8 = 4;
 pub const ROW_HEIGHT: f32 = 24.0;
-pub const TOP_BAR: f32 = 40.0;
+/// The top bar is also the window's title bar: macOS centres the traffic lights 16 pt from the
+/// top of a 32 pt title bar (measured on macOS 27), so the bar is 32 pt and its content is
+/// centred on the same line.
+pub const TOP_BAR: f32 = 32.0;
+/// Width the traffic lights take at the left of the top bar (they end at 68 pt), plus a gap.
+pub const TRAFFIC_LIGHTS: f32 = 80.0;
 pub const STATUS_BAR: f32 = 26.0;
 
 /// Named font families on top of egui's two: system font weights.

@@ -36,6 +36,17 @@ pub struct Source {
     pub list: List,
 }
 
+/// Commands of the native menu bar (`menu_bar.rs`); the headless tests send them directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuCommand {
+    OpenXml,
+    CloseXml,
+    ExportXml,
+    Undo,
+    Redo,
+    Quit,
+}
+
 /// Modal dialogs that collect input before a command runs.
 enum Dialog {
     Create { parent: Option<DbId>, kind: NodeKind, name: String },
@@ -72,6 +83,8 @@ pub struct App {
     /// Last editor message (status bar).
     edit_status: Option<String>,
     last_guard_check: Option<std::time::Instant>,
+    /// The running background check for rekordbox processes.
+    guard_check: Option<Receiver<Vec<String>>>,
     ctx: egui::Context,
     pub devices: Devices,
     pub source: Source,
@@ -102,6 +115,11 @@ pub struct App {
     /// Preference `AutoAnalysis`: analyse tracks that have no analysis yet (after an import).
     auto_analysis: bool,
     auto_queued: std::collections::HashSet<DbId>,
+    /// The native menu bar, when the app runs in a window (not in the headless tests).
+    #[cfg(target_os = "macos")]
+    menu_bar: Option<crate::menu_bar::MenuBar>,
+    /// Menu commands waiting for this frame.
+    menu_commands: Vec<MenuCommand>,
 }
 
 static EMPTY: std::sync::LazyLock<LibrarySnapshot> = std::sync::LazyLock::new(LibrarySnapshot::default);
@@ -129,6 +147,7 @@ impl App {
             dialog: None,
             edit_status: None,
             last_guard_check: None,
+            guard_check: None,
             ctx: ui_ctx,
             devices,
             source: Source { library: LibraryRef::Local, list: List::Collection },
@@ -143,7 +162,60 @@ impl App {
             analysis_settings: mb_library::AnalysisSettings::default(),
             auto_analysis: false,
             auto_queued: std::collections::HashSet::new(),
+            #[cfg(target_os = "macos")]
+            menu_bar: None,
+            menu_commands: Vec::new(),
         }
+    }
+
+    /// Installs the native menu bar (macOS; main thread). Without it the File, Edit and app
+    /// commands are reachable through [`App::menu_command`] only.
+    pub fn install_menu_bar(&mut self) {
+        #[cfg(target_os = "macos")]
+        match crate::menu_bar::MenuBar::install(&self.ctx) {
+            Ok(bar) => self.menu_bar = Some(bar),
+            Err(e) => self.edit_status = Some(format!("No menu bar: {e}")),
+        }
+    }
+
+    /// Runs a menu bar command (in the next frame).
+    pub fn menu_command(&mut self, command: MenuCommand) {
+        self.menu_commands.push(command);
+        self.ctx.request_repaint();
+    }
+
+    fn run_menu_commands(&mut self, ctx: &egui::Context) -> Vec<Action> {
+        #[cfg(target_os = "macos")]
+        {
+            let enabled = [true, self.xml.is_some(), self.export_source.is_some(), self.editing()];
+            if let Some(bar) = &mut self.menu_bar {
+                self.menu_commands.extend(bar.poll());
+                bar.sync(enabled);
+            }
+        }
+        let mut actions = Vec::new();
+        for command in std::mem::take(&mut self.menu_commands) {
+            match command {
+                MenuCommand::OpenXml => {
+                    let path = self.xml.as_ref().map(|x| x.path.display().to_string()).unwrap_or_default();
+                    self.dialog = Some(Dialog::XmlOpen { path });
+                }
+                MenuCommand::CloseXml => {
+                    self.xml = None;
+                    if self.source.library == LibraryRef::Xml {
+                        self.source = Source { library: LibraryRef::Local, list: List::Collection };
+                    }
+                }
+                MenuCommand::ExportXml if self.export_source.is_some() => {
+                    self.dialog = Some(Dialog::XmlExport { path: crate::xml_bridge::default_export_path() });
+                }
+                MenuCommand::ExportXml => {}
+                MenuCommand::Undo => actions.push(Action::Undo),
+                MenuCommand::Redo => actions.push(Action::Redo),
+                MenuCommand::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            }
+        }
+        actions
     }
 
     pub fn snapshot(&self, library: LibraryRef) -> &LibrarySnapshot {
@@ -256,7 +328,7 @@ impl App {
         ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
 
         match (&track, waves) {
-            (Some(_), Some(w)) => jump = waveform::show_detail(ui, w, &marks, position, 4_000.0, deck::DETAIL_HEIGHT),
+            (Some(_), Some(w)) => jump = waveform::show_detail(ui, w, &marks, position, 4_000.0, deck::DETAIL_HEIGHT, *wave_style),
             (Some(_), None) => deck::empty_well(ui, deck::DETAIL_HEIGHT, "Not analysed"),
             (None, _) => deck::empty_well(ui, deck::DETAIL_HEIGHT, ""),
         }
@@ -332,39 +404,28 @@ impl App {
         }
     }
 
-    /// Top bar: the app mark, the File menu, and the editing switch on the right.
+    /// Top bar, merged with the window's title bar: the traffic lights on the left (drawn by
+    /// macOS), the app mark, and the editing switch on the right. Dragging its empty part moves
+    /// the window; a double click zooms it.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let bar = ui.max_rect();
+        let background = ui.interact(bar, ui.id().with("title-bar"), egui::Sense::click_and_drag());
+        if background.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if background.double_clicked() {
+            let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        }
+        // Room for the traffic lights, which macOS hides in full screen.
+        let fullscreen = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            icons::show(ui, icons::Icon::Logo, 20.0, theme::ACCENT);
-            ui.label(egui::RichText::new("musicbox").font(theme::semibold(14.0)).color(theme::TEXT_STRONG));
-            ui.add_space(14.0);
-            ui.scope(|ui| {
-                // Frameless menu title, like a menu bar.
-                ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-                ui.menu_button("File", |ui| self.file_menu(ui));
-            });
+            ui.add_space(if fullscreen { 0.0 } else { theme::TRAFFIC_LIGHTS - 14.0 });
+            icons::show(ui, icons::Icon::Logo, 18.0, theme::ACCENT);
+            ui.label(egui::RichText::new("musicbox").font(theme::semibold(13.0)).color(theme::TEXT_STRONG));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.editing_switch(ui));
         });
-    }
-
-    fn file_menu(&mut self, ui: &mut egui::Ui) {
-        if ui.add_enabled(self.export_source.is_some(), egui::Button::new("Export Collection in xml format…")).clicked() {
-            self.dialog = Some(Dialog::XmlExport { path: crate::xml_bridge::default_export_path() });
-            ui.close();
-        }
-        if ui.button("Open rekordbox xml…").clicked() {
-            let path = self.xml.as_ref().map(|x| x.path.display().to_string()).unwrap_or_default();
-            self.dialog = Some(Dialog::XmlOpen { path });
-            ui.close();
-        }
-        if self.xml.is_some() && ui.button("Close rekordbox xml").clicked() {
-            self.xml = None;
-            if self.source.library == LibraryRef::Xml {
-                self.source = Source { library: LibraryRef::Local, list: List::Collection };
-            }
-            ui.close();
-        }
     }
 
     /// Status bar: the last message on the left, running jobs with their progress on the right.
@@ -472,15 +533,25 @@ impl App {
 
     /// Editor replies; also locks editing again as soon as rekordbox starts.
     fn poll_editor(&mut self, ctx: &egui::Context) {
-        if self.editor.is_some() && self.last_guard_check.is_none_or(|t| t.elapsed().as_secs() >= 2) {
+        // The process list is read on a worker thread (it takes tens of milliseconds), every 2 s.
+        if self.editor.is_some() && self.guard_check.is_none() && self.last_guard_check.is_none_or(|t| t.elapsed().as_secs() >= 2) {
             self.last_guard_check = Some(std::time::Instant::now());
-            let running = mb_masterdb::running_rekordbox();
-            if !running.is_empty() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let repaint = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(mb_masterdb::running_rekordbox());
+                repaint.request_repaint();
+            });
+            self.guard_check = Some(rx);
+            ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        }
+        if let Some(running) = self.guard_check.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.guard_check = None;
+            if self.editor.is_some() && !running.is_empty() {
                 self.editor = None;
                 self.edit_status = Some(format!("{} started; editing turned off", running.join(", ")));
                 return;
             }
-            ctx.request_repaint_after(std::time::Duration::from_secs(2));
         }
         let Some(editor) = &mut self.editor else { return };
         let mut reload = false;
@@ -1009,6 +1080,7 @@ impl eframe::App for App {
         self.poll_xml();
         self.poll_analysis();
         let mut actions = self.global_input(&ctx);
+        actions.extend(self.run_menu_commands(&ctx));
 
         egui::Panel::top("top-bar").exact_size(theme::TOP_BAR).frame(theme::bar_frame(theme::BG_DECK, 14)).show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status").exact_size(theme::STATUS_BAR).frame(theme::bar_frame(theme::BG_DECK, 14)).show(ui, |ui| self.status(ui));

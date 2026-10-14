@@ -1,6 +1,8 @@
 //! Track overview drawn from rekordbox's own analysis files (docs/re/anlz.md):
 //! PWV4 colour preview or PWV6 3-band preview from .EXT/.2EX, plus cue markers; and a zoomed
-//! detail strip (PWV5) with the PQTZ beat grid.
+//! detail strip with the PQTZ beat grid. The strip draws the 3-band scroll wave (PWV7) when the
+//! .2EX has one: PWV5 and PWV3 keep only transient peaks (a kick is a few columns, then zeros),
+//! so drawn as they are they leave gaps; PWV7 keeps each band's decay. PWV5 is the fallback.
 
 use mb_anlz::{AnlzFile, Tag};
 use mb_anlz::tags::{Beat, CueKind, CueListExt, Wave3Band, WaveColorPreview, WaveColorScroll};
@@ -11,6 +13,8 @@ pub struct TrackWaves {
     pub three_band: Option<Wave3Band>,
     /// PWV5 colour scroll wave (150 columns per second).
     pub scroll: Option<WaveColorScroll>,
+    /// PWV7 3-band scroll wave (150 columns per second) and its largest band value.
+    pub detail_bands: Option<(Wave3Band, u8)>,
     /// PQTZ beat grid from the .DAT.
     pub grid: Vec<Beat>,
     /// Cues stored in the .EXT (device tracks; collection cues live in the database).
@@ -65,6 +69,18 @@ pub enum Style {
     ThreeBand,
 }
 
+/// 3-band style colours: low, mid, high.
+const BAND_COLORS: [egui::Color32; 3] =
+    [egui::Color32::from_rgb(0x1A, 0x5F, 0xE8), egui::Color32::from_rgb(0xF0, 0x9A, 0x2C), egui::Color32::from_rgb(0xF4, 0xF4, 0xF4)];
+
+/// RGB style colour of three band amplitudes (low → red, mid → green, high → blue), scaled so the
+/// strongest channel is full, as the overview's PWV4 columns are coloured.
+fn band_rgb(bands: [u8; 3]) -> egui::Color32 {
+    let max = u16::from(*bands.iter().max().unwrap_or(&0)).max(1);
+    let scale = |v: u8| (u16::from(v) * 255 / max) as u8;
+    egui::Color32::from_rgb(scale(bands[0]), scale(bands[1]), scale(bands[2]))
+}
+
 const MEMORY_CUE: egui::Color32 = egui::Color32::from_rgb(0xE6, 0x2B, 0x2B);
 const HOT_CUE_DEFAULT: egui::Color32 = egui::Color32::from_rgb(0x2D, 0xD7, 0x28);
 
@@ -83,11 +99,19 @@ pub fn load(dat: &Path) -> Option<TrackWaves> {
     let three_band = ex2
         .as_ref()
         .and_then(|f| f.sections_with(Tag::PWV6).next().and_then(|s| Wave3Band::decode(s).ok()));
+    let detail_bands = ex2
+        .as_ref()
+        .and_then(|f| f.sections_with(Tag::PWV7).next().and_then(|s| Wave3Band::decode(s).ok()))
+        .filter(|w| !w.is_empty() && w.scroll.is_some_and(|(rate, _)| rate > 0))
+        .map(|w| {
+            let peak = w.data.iter().flat_map(|c| c.iter().copied()).max().unwrap_or(1).max(1);
+            (w, peak)
+        });
     let mut cues = Vec::new();
     for list in ext.cue_lists_ext() {
         push_cues(&mut cues, &list);
     }
-    Some(TrackWaves { color, three_band, scroll, grid, cues })
+    Some(TrackWaves { color, three_band, scroll, detail_bands, grid, cues })
 }
 
 fn push_cues(out: &mut Vec<CueMark>, list: &CueListExt) {
@@ -132,12 +156,7 @@ pub fn show_overview(
             let n = bands.len();
             let peak = bands.data.iter().flat_map(|c| c.iter().copied()).max().unwrap_or(1).max(1) as f32;
             // Draw low, then mid, then high on top, each scaled to its own height.
-            let palette = [
-                egui::Color32::from_rgb(0x1A, 0x5F, 0xE8),
-                egui::Color32::from_rgb(0xF0, 0x9A, 0x2C),
-                egui::Color32::from_rgb(0xF4, 0xF4, 0xF4),
-            ];
-            for (band, colour) in palette.iter().enumerate() {
+            for (band, colour) in BAND_COLORS.iter().enumerate() {
                 for i in 0..n {
                     let v = bands.data[i][band] as f32 / peak;
                     column(i, n, v, *colour);
@@ -193,7 +212,15 @@ pub fn show_overview(
 /// Zoomed strip around `center_ms` (± `half_span_ms`): PWV5 columns, beat grid (downbeats
 /// brighter), cue markers with loop spans, and the position line in the middle. A click returns
 /// the clicked position in ms.
-pub fn show_detail(ui: &mut egui::Ui, waves: &TrackWaves, cues: &[CueMark], center_ms: f64, half_span_ms: f64, height: f32) -> Option<f64> {
+pub fn show_detail(
+    ui: &mut egui::Ui,
+    waves: &TrackWaves,
+    cues: &[CueMark],
+    center_ms: f64,
+    half_span_ms: f64,
+    height: f32,
+    style: Style,
+) -> Option<f64> {
     let desired = egui::vec2(ui.available_width(), height);
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
     let painter = ui.painter_at(rect);
@@ -202,18 +229,47 @@ pub fn show_detail(ui: &mut egui::Ui, waves: &TrackWaves, cues: &[CueMark], cent
     let span = 2.0 * half_span_ms;
     let x_of = |ms: f64| rect.left() + rect.width() * ((ms - start) / span) as f32;
     let mid = rect.center().y;
-    if let Some(scroll) = &waves.scroll {
-        let per_ms = f64::from(scroll.columns_per_second.max(1)) / 1000.0;
+    let half = rect.height() / 2.0 - 2.0;
+    // Columns `first..last` of a wave with `rate` columns per second that fall into the strip.
+    let visible = |rate: u16, len: usize| {
+        let per_ms = f64::from(rate.max(1)) / 1000.0;
         let first = ((start * per_ms).floor().max(0.0)) as usize;
-        let last = (((start + span) * per_ms).ceil().max(0.0) as usize).min(scroll.len());
-        for i in first..last {
-            let Some(col) = scroll.column(i) else { continue };
-            let x0 = x_of(i as f64 / per_ms);
-            let x1 = x_of((i + 1) as f64 / per_ms).max(x0 + 1.0);
-            let h = f32::from(col.height) / 31.0 * (rect.height() / 2.0 - 2.0);
-            let [r, g, b] = col.rgb8();
-            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, mid - h), egui::pos2(x1, mid + h)), 0.0, egui::Color32::from_rgb(r, g, b));
+        let last = (((start + span) * per_ms).ceil().max(0.0) as usize).min(len);
+        (per_ms, first, last)
+    };
+    let bar = |x0: f32, x1: f32, h: f32, color: egui::Color32| {
+        let h = h.max(0.5);
+        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, mid - h), egui::pos2(x1, mid + h)), 0.0, color);
+    };
+    match (&waves.detail_bands, &waves.scroll) {
+        (Some((bands, peak)), _) => {
+            let (per_ms, first, last) = visible(bands.scroll.map_or(150, |(rate, _)| rate), bands.len());
+            let peak = f32::from(*peak);
+            for i in first..last {
+                let c = bands.data[i];
+                let x0 = x_of(i as f64 / per_ms);
+                let x1 = x_of((i + 1) as f64 / per_ms).max(x0 + 1.0);
+                match style {
+                    Style::ThreeBand => {
+                        for (band, colour) in BAND_COLORS.iter().enumerate() {
+                            bar(x0, x1, f32::from(c[band]) / peak * half, *colour);
+                        }
+                    }
+                    Style::Rgb => bar(x0, x1, f32::from(c[0].max(c[1]).max(c[2])) / peak * half, band_rgb(c)),
+                }
+            }
         }
+        (None, Some(scroll)) => {
+            let (per_ms, first, last) = visible(scroll.columns_per_second, scroll.len());
+            for i in first..last {
+                let Some(col) = scroll.column(i) else { continue };
+                let x0 = x_of(i as f64 / per_ms);
+                let x1 = x_of((i + 1) as f64 / per_ms).max(x0 + 1.0);
+                let [r, g, b] = col.rgb8();
+                bar(x0, x1, f32::from(col.height) / 31.0 * half, egui::Color32::from_rgb(r, g, b));
+            }
+        }
+        (None, None) => {}
     }
     for beat in &waves.grid {
         let ms = f64::from(beat.time_ms);

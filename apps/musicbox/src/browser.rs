@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap};
 use mb_core::{DbId, PlaylistKind, PlaylistNode};
 use mb_library::{Command, TrackEdit};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Col {
     Index,
     Title,
@@ -91,6 +91,72 @@ pub struct State {
     reveal_selected: bool,
     /// Another list is shown: start at its top.
     scroll_to_top: bool,
+    lookups: Lookups,
+}
+
+/// Per-snapshot lookups, built once per snapshot and reused by every rebuild and frame, so that
+/// typing a search, sorting and switching lists stay fast on large collections.
+#[derive(Default)]
+struct Lookups {
+    /// The snapshot these belong to: address, track count, first and last track ID. A reloaded
+    /// library can sit at the same address (the app's own field), so `State::invalidate` also
+    /// drops them.
+    built_for: Option<(usize, usize, Option<DbId>, Option<DbId>)>,
+    /// Track index of each content ID.
+    by_id: HashMap<DbId, usize>,
+    /// Lower-case search text of each track (the searched fields, one per line); built on the
+    /// first search.
+    haystack: Vec<String>,
+    /// Lower-case sort keys of a text column; built on the first sort by it.
+    text_keys: HashMap<Col, Vec<String>>,
+    /// Whether each track's artwork file exists; checked when its row is first shown.
+    artwork: Vec<Option<bool>>,
+}
+
+impl Lookups {
+    fn follow(&mut self, library: &LibrarySnapshot) {
+        let id = |t: Option<&mb_core::Track>| t.map(|t| t.id.clone());
+        let key = Some((std::ptr::from_ref(library) as usize, library.tracks.len(), id(library.tracks.first()), id(library.tracks.last())));
+        if self.built_for != key {
+            *self = Lookups {
+                built_for: key,
+                by_id: library.tracks.iter().enumerate().map(|(i, t)| (t.id.clone(), i)).collect(),
+                artwork: vec![None; library.tracks.len()],
+                ..Lookups::default()
+            };
+        }
+    }
+
+    fn haystack(&mut self, library: &LibrarySnapshot) -> &[String] {
+        if self.haystack.len() != library.tracks.len() {
+            self.haystack = library
+                .tracks
+                .iter()
+                .map(|t| [&t.title, &t.artist, &t.album, &t.genre, &t.label, &t.comment, &t.remixer].map(|f| f.as_str()).join("\n").to_lowercase())
+                .collect();
+        }
+        &self.haystack
+    }
+
+    fn text_keys(&mut self, library: &LibrarySnapshot, col: Col) -> &[String] {
+        self.text_keys.entry(col).or_insert_with(|| {
+            library
+                .tracks
+                .iter()
+                .map(|t| match col {
+                    Col::Title => t.title.to_lowercase(),
+                    Col::Artist => t.artist.to_lowercase(),
+                    Col::Album => t.album.to_lowercase(),
+                    _ => t.genre.to_lowercase(),
+                })
+                .collect()
+        })
+    }
+
+    fn has_artwork(&mut self, index: usize, path: Option<&std::path::Path>) -> bool {
+        let Some(slot) = self.artwork.get_mut(index) else { return false };
+        *slot.get_or_insert_with(|| path.is_some_and(std::path::Path::is_file))
+    }
 }
 
 impl Default for State {
@@ -108,6 +174,7 @@ impl Default for State {
             entry_pos: Vec::new(),
             reveal_selected: false,
             scroll_to_top: false,
+            lookups: Lookups::default(),
         }
     }
 }
@@ -115,6 +182,7 @@ impl Default for State {
 impl State {
     pub fn invalidate(&mut self) {
         self.built_for = None;
+        self.lookups = Lookups::default();
     }
 
     pub fn visible_count(&self) -> usize {
@@ -127,6 +195,7 @@ impl State {
         if self.built_for.as_ref() == Some(&key) {
             return;
         }
+        self.lookups.follow(library);
         let same_list = self.built_for.as_ref().is_some_and(|(s, .., ptr, _)| s == source && *ptr == snapshot);
         self.reveal_selected = same_list && self.selected.is_some_and(|(l, _)| l == source.library);
         self.scroll_to_top = self.built_for.as_ref().is_some_and(|(s, ..)| s != source);
@@ -143,7 +212,7 @@ impl State {
             // Smart lists are evaluated on every rebuild (rekordbox stores no entries for them);
             // their rows have no entry position, so entry edits do not apply.
             List::Playlist(id) if library.smart_lists.contains_key(id) => {
-                let by_id: HashMap<_, _> = library.tracks.iter().enumerate().map(|(i, t)| (&t.id, i)).collect();
+                let by_id = &self.lookups.by_id;
                 crate::smartlist_ui::evaluate(library, id)
                     .unwrap_or_default()
                     .iter()
@@ -156,7 +225,7 @@ impl State {
                     List::History(_) => &library.history_entries,
                     _ => &library.my_tag_entries,
                 };
-                let by_id: HashMap<_, _> = library.tracks.iter().enumerate().map(|(i, t)| (&t.id, i)).collect();
+                let by_id = &self.lookups.by_id;
                 entries
                     .get(id)
                     .map(|ids| {
@@ -170,11 +239,18 @@ impl State {
         };
         let needle = self.search.to_lowercase();
         if !needle.is_empty() {
-            rows.retain(|&(i, _)| matches_search(&library.tracks[i], &needle));
+            let haystack = self.lookups.haystack(library);
+            rows.retain(|&(i, _)| haystack[i].contains(&needle));
         }
-        if self.sort != Col::Index {
-            let tracks = &library.tracks;
-            rows.sort_by(|&(a, _), &(b, _)| compare(&tracks[a], &tracks[b], self.sort));
+        let tracks = &library.tracks;
+        match self.sort {
+            Col::Index => {}
+            Col::Title | Col::Artist | Col::Album | Col::Genre => {
+                let keys = self.lookups.text_keys(library, self.sort);
+                rows.sort_by(|&(a, _), &(b, _)| keys[a].cmp(&keys[b]));
+            }
+            Col::Key => rows.sort_by_cached_key(|&(i, _)| wheel_index(&tracks[i].key)),
+            col => rows.sort_by(|&(a, _), &(b, _)| compare(&tracks[a], &tracks[b], col)),
         }
         if !self.ascending {
             rows.reverse();
@@ -183,12 +259,6 @@ impl State {
         self.rows = rows.into_iter().map(|(i, _)| i).collect();
         self.built_for = Some(key);
     }
-}
-
-fn matches_search(t: &Track, needle: &str) -> bool {
-    [&t.title, &t.artist, &t.album, &t.genre, &t.label, &t.comment, &t.remixer]
-        .iter()
-        .any(|field| field.to_lowercase().contains(needle))
 }
 
 fn compare(a: &Track, b: &Track, col: Col) -> Ordering {
@@ -387,7 +457,10 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                     row.col(|ui| match col {
                         Col::Rating => stars(ui, track.rating),
                         Col::Color => color_bar(ui, track.color),
-                        Col::Artwork => thumbnail(ui, track.artwork_path.as_deref()),
+                        Col::Artwork => {
+                            let path = track.artwork_path.as_deref();
+                            thumbnail(ui, path.filter(|p| state.lookups.has_artwork(track_index, Some(p))));
+                        }
                         _ => {
                             let color = match col {
                                 _ if is_selected => theme::TEXT_STRONG,
@@ -612,10 +685,10 @@ fn color_bar(ui: &mut egui::Ui, color: Option<u8>) {
     }
 }
 
-/// The track's small artwork (`_s`, 80 px), or an empty tile.
+/// The track's small artwork (`_s`, 80 px) when the file exists, else nothing.
 fn thumbnail(ui: &mut egui::Ui, path: Option<&std::path::Path>) {
     let size = egui::vec2(18.0, 18.0);
-    match path.filter(|p| p.is_file()) {
+    match path {
         Some(p) => {
             ui.add(egui::Image::new(format!("file://{}", p.display())).fit_to_exact_size(size).corner_radius(2.0).show_loading_spinner(false));
         }

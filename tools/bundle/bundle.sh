@@ -13,6 +13,12 @@ APP="$ROOT/target/bundle/musicbox.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/target/release/musicbox" "$APP/Contents/MacOS/musicbox"
+# The app icon is drawn in code (apps/musicbox/src/app_icon.rs); iconutil packs it.
+ICONSET="$ROOT/target/bundle/musicbox.iconset"
+rm -rf "$ICONSET"
+cargo run --release -q -p musicbox --example app_icon -- "$ICONSET"
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/musicbox.icns"
+rm -rf "$ICONSET"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -22,6 +28,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>musicbox</string>
   <key>CFBundleIdentifier</key><string>local.musicbox.app</string>
   <key>CFBundleExecutable</key><string>musicbox</string>
+  <key>CFBundleIconFile</key><string>musicbox</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>

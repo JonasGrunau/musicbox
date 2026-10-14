@@ -2,6 +2,7 @@
 
 pub mod actions;
 pub mod analysis_jobs;
+pub mod app_icon;
 pub mod app;
 pub mod browser;
 pub mod cue_panel;
@@ -13,6 +14,8 @@ pub mod editor;
 pub mod export;
 pub mod icons;
 pub mod library;
+#[cfg(target_os = "macos")]
+pub mod menu_bar;
 pub mod mysettings_ui;
 pub mod protect;
 pub mod smartlist_ui;
@@ -21,7 +24,7 @@ pub mod tree;
 pub mod waveform;
 pub mod xml_bridge;
 
-pub use app::App;
+pub use app::{App, MenuCommand};
 
 use std::path::PathBuf;
 

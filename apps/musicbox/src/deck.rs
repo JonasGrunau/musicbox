@@ -158,9 +158,9 @@ pub fn editing_switch(ui: &mut egui::Ui, state: EditState) -> egui::Response {
         EditState::Starting => ("Editing (starting…)", Icon::Unlock, true),
         EditState::Editing => ("Editing", Icon::Unlock, true),
     };
-    let font = theme::medium(12.5);
+    let font = theme::medium(12.0);
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font, theme::TEXT);
-    let size = egui::vec2(galley.size().x + 44.0, 28.0);
+    let size = egui::vec2(galley.size().x + 40.0, 22.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, label));
     let (fill, stroke, fg) = match (on, response.hovered()) {
@@ -168,9 +168,9 @@ pub fn editing_switch(ui: &mut egui::Ui, state: EditState) -> egui::Response {
         (false, true) => (theme::BG_HOVER, theme::BG_HOVER, theme::TEXT_STRONG),
         (false, false) => (theme::BG_RAISED, theme::BG_RAISED, theme::TEXT),
     };
-    ui.painter().rect(rect, 14.0, fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-    let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(12.0, 12.0));
+    ui.painter().rect(rect, 11.0, fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 16.0, rect.center().y), egui::vec2(11.0, 11.0));
     icons::paint(ui.painter(), icon_rect, icon, if on { theme::ACCENT_HOVER } else { theme::TEXT_DIM });
-    ui.painter().galley_with_override_text_color(egui::pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0), galley, fg);
+    ui.painter().galley_with_override_text_color(egui::pos2(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0), galley, fg);
     response
 }

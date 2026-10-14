@@ -156,9 +156,8 @@ fn xml_bridge_import_undo_and_export() {
 
     // 3. Export the collection.
     let out = root.join("export.xml");
-    h.get_by_label("File").click();
-    h.run_steps(2);
-    h.get_by_label("Export Collection in xml format…").click();
+    // "File → Export Collection in xml format" lives in the native menu bar; send its command.
+    h.state_mut().menu_command(musicbox::MenuCommand::ExportXml);
     h.run_steps(3);
     h.key_press_modifiers(Modifiers::COMMAND, Key::A);
     h.get_all_by_role(Role::TextInput).find(|n| n.is_focused()).expect("path field").type_text(&out.display().to_string());

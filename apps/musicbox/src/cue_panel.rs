@@ -206,9 +206,11 @@ pub fn controls(
                 run(&mut actions, Command::SetBeatGrid { content: content.clone(), beats: new });
             }
         });
-        if let Some(b) = beats.first() {
+        // The tempo where the cursor is: dynamic grids change tempo along the track.
+        if let Some(b) = grid::nearest_beat(beats, position_ms).and_then(|i| beats.get(i)) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(format!("{:.2} BPM  ·  {} beats", b.bpm(), beats.len())).small().color(theme::TEXT_MUTED));
+                let text = format!("{:.2} BPM at the cursor  ·  {} beats", b.bpm(), beats.len());
+                ui.label(egui::RichText::new(text).small().color(theme::TEXT_MUTED));
             });
         }
     });

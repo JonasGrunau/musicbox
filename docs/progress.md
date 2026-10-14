@@ -14,6 +14,15 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | Top and status bars | app mark, File menu, editing switch (lock pill); status message with job progress bars on the right; the last message stays visible next to a load error |
 | Tests | new `tests/ui_design.rs` renders eight review frames (`MB_UI_SHOTS=<dir>`); `ui_cues` now moves the cursor on the zoomed strip (its old click landed on the overview, which starts the preview player); `ui_cues` and `ui_design` assert that nothing plays. 15/15 UI tests pass, clippy clean |
 
+Follow-up the same night:
+
+| Part | State |
+|---|---|
+| List performance | `tests/perf_lists.rs`, 50 000 tracks, release: idle 0.5 ms, scrolling 1.3 ms, a search key 2.6 ms (was 8.4), sorting 4–9 ms (was ~20), opening a 20 000-track list 2.4 ms (was 25). Per-snapshot lookups in `browser::Lookups`. The rekordbox process check moved to a worker thread. A debug build is 10–40× slower (scrolling 35–73 ms), so the local `start.sh` now runs `--release` |
+| Zoomed waveform | drawn from PWV7 (3-band scroll wave) in RGB or 3-band style. PWV5/PWV3 keep only transient peaks: in Lift Off 25 % of the columns are 0 and a kick lasts 3–4 columns, which left gaps. PWV5 is kept as the fallback. The grid line shows the tempo at the cursor (the user's dynamic grid for Lift Off starts at 165.34 BPM; that grid is rekordbox's, written Oct 11) |
+| macOS chrome | the title bar is transparent with the content under it; the 32 pt top bar is the title bar (traffic lights measured at 16 pt, ending at 68 pt), draggable, double click zooms. A native menu bar (`menu_bar.rs`, generic crate `muda`) replaces the in-window File menu; `App::menu_command` is the entry point for tests |
+| App icon | our own mark drawn in code (`app_icon.rs`), set as the window and Dock icon (the Dock showed egui's default icon before); `bundle.sh` packs it as `musicbox.icns` |
+
 Next: the CDJ-3000 test with RBTEST (unchanged).
 
 ## 2026-10-14 (later) — M6: embeddings done; reference data for analysis modes 1–3; CUE analysis started

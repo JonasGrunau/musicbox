@@ -9,14 +9,14 @@ Review renders: `MB_UI_SHOTS=<dir> cargo test -p musicbox --test ui_design`. Thi
 2. **One accent.** Blue (`ACCENT`) marks the selection, the editing state, focus and primary buttons, and nothing else.
 3. **A 4 px grid.**
    - Rows are 24 px.
-   - Bars are 40 px (top), 44 px (browser toolbar), 28 px (table header) and 26 px (status).
+   - Bars are 32 px (top bar, which is also the window's title bar), 44 px (browser toolbar), 28 px (table header) and 26 px (status).
    - Panel gutters are 14 px.
 4. **Dark seams between panels**, not light borders. Surfaces step up in lightness from the wells (waveforms, fields) to the panels, the deck and the raised controls.
 5. **Numbers align right.** BPM, time, bitrate and track number sit on the right edge of their column, like a player's list.
 
 ## Layout
 ```
-┌ top bar 40 ─ mark · File ─────────────────────────────── [lock] Read-only ┐
+┌ top bar 32 = title bar ─ ● ● ●  mark ──────────────────── [lock] Read-only ┐
 ├ deck ─────────────────────────────────────────────────────────────────────┤
 │  zoomed waveform 64 (beat grid, cues, centre playhead)                     │
 │  [art 76] title / artist · album                      BPM   KEY   TIME     │
@@ -33,10 +33,24 @@ Review renders: `MB_UI_SHOTS=<dir> cargo test -p musicbox --test ui_design`. Thi
 │ status 26: ● last message                         job progress ▬▬▬  Cancel │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
+- **Title bar.** The window's title bar is transparent and the content runs under it (`with_fullsize_content_view`), so the top bar is the title bar.
+  - The bar is 32 pt, the height macOS 27 gives the title bar. Its content is centred 16 pt from the top, on the traffic lights' line.
+  - The first 80 pt are left to the traffic lights (they end at 68 pt), except in full screen.
+  - Dragging the bar's empty part moves the window, and a double click zooms it.
+- **Menu bar** (`menu_bar.rs`, the `muda` crate). File, Edit and Window live in the macOS menu bar, not in the window:
+  - musicbox: About, Services, Hide, Hide Others, Show All, Quit (⌘Q, sent as a normal close request so the library connection shuts down).
+  - File: Open rekordbox xml… (⌘O), Close rekordbox xml, Export Collection in xml format… (⌘E), Close Window.
+  - Edit: Undo, Redo (no key equivalents: ⌘Z stays with egui, so text fields undo their own typing).
+  - Window: Minimize, Zoom, Enter Full Screen, Bring All to Front.
+  - Items that do not apply are greyed out. The headless tests send the same commands through `App::menu_command`.
+- **App icon** (`app_icon.rs`). The musicbox mark: a blue rounded tile with three dark level bars, on the macOS icon grid (an 824/1024 body with a soft shadow). It is drawn in code, used as the window and Dock icon, and packed into `musicbox.app` by `tools/bundle/bundle.sh` (example `app_icon`, then `iconutil`).
 - **Deck height** depends on what it shows, so the browser never jumps while one kind of track stays selected:
   - 170 px: no track, or a device or xml track (waveforms and info).
   - 238 px: a collection track (adds the two control rows).
 - **Empty deck.** With no track it keeps its shape: empty wells, a placeholder tile, and dashes in the readouts.
+- **Zoomed waveform.** It draws the 3-band scroll wave (PWV7, `.2EX`) in the RGB style (low, mid and high as red, green and blue, height the loudest band) or in the 3-band style.
+  - PWV5 and PWV3 keep only transient peaks: a kick is 3–4 columns, then zeros. Drawn as they are, they leave gaps between beats, so PWV5 is used only when a track has no PWV7.
+  - The grid line under the controls shows the tempo at the cursor, since dynamic grids change tempo.
 - **Position.**
   - The zoomed strip and the pads move the cursor without playing.
   - The overview seeks and plays (as before).
@@ -107,6 +121,19 @@ Windows and menus use `#242424` with a `#383838` edge, 10 px (window) or 8 px (m
   - sources: USB stick (device), document (xml);
   - controls: play, pause, search, lock and unlock, chevrons, close;
   - the app mark.
+
+## Performance
+`apps/musicbox/tests/perf_lists.rs` (run with `--release --ignored --nocapture`) times frames on 50 000 tracks with 400 playlists and a 20 000-track list:
+
+| Action | Release |
+|---|---|
+| Idle frame | 0.5 ms |
+| Scrolling | 1.3 ms |
+| Typing a search, per key | 2.6 ms |
+| Sorting | 4–9 ms |
+| Opening the 20 000-track list | 2.4 ms |
+
+Each lookup is built once per library snapshot and reused (`browser::Lookups`): the content-ID index, the lower-case search text, the sort keys of each text column, and whether each artwork file exists. A debug build is 10–40× slower (scrolling 35–73 ms per frame), so `start.sh` runs a release build. The check for a running rekordbox reads the process list on a worker thread.
 
 ## Accessibility labels the UI tests rely on
 The custom widgets report the same names the egui widgets had, so `egui_kittest` finds them by label. Do not rename them without updating `apps/musicbox/tests/`:
