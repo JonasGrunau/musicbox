@@ -31,6 +31,46 @@ fn main() {
             writeln!(f, "MADMOM bpm {} beats {} ms {}", r.bpm, r.beats.len(), t0.elapsed().as_millis()).unwrap();
             for b in &r.beats { writeln!(f, "M {} {} {}", b.pos, b.num_bar, b.bpm).unwrap(); }
         }
+        "window" => {
+            // madmom without hendou (model 8 over the 60 s window from BALib's offset) against
+            // harness runs: hp_check window <tracks.tsv> <dir> <mode>; <dir>/<id>.m<mode>.txt
+            let tracks = std::fs::read_to_string(&a[2]).unwrap();
+            let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let m8 = mb_nn::Session::open(mb_nn::Model::BeatNo8, threads).unwrap();
+            let m7 = mb_nn::Session::open(mb_nn::Model::BeatNo7, threads).unwrap();
+            let (mut same, mut total) = (0, 0);
+            for line in tracks.lines() {
+                let Some((id, path)) = line.split_once('\t') else { continue };
+                let Ok(text) = std::fs::read_to_string(format!("{}/{id}.m{}.txt", a[3], a[4])) else { continue };
+                let Some(bal) = text.lines().find(|l| l.starts_with("BALIB ")) else { continue };
+                let w: Vec<&str> = bal.split_whitespace().collect();
+                let (offset, hendou) = (w[6].parse::<i32>().unwrap(), w[8] == "1");
+                let theirs: Vec<(i32, i32, i32)> = text
+                    .lines()
+                    .filter(|l| l.starts_with("M "))
+                    .map(|l| {
+                        let v: Vec<i32> = l[2..].split_whitespace().map(|x| x.parse().unwrap()).collect();
+                        (v[0], v[1], v[2])
+                    })
+                    .collect();
+                let mbpm: i32 = text.lines().find(|l| l.starts_with("MADMOM ")).and_then(|l| l.split_whitespace().nth(4)?.parse().ok()).unwrap_or(0);
+                let Ok(mut dec) = mb_audio::open(path) else { continue };
+                let rate = dec.info().sample_rate;
+                let frames = dec.decode_all();
+                let mono: Vec<f32> = frames.iter().map(|f| (f[1] + f[0]) * 0.5).collect();
+                let r = madmom::analyze(if hendou { &m7 } else { &m8 }, &mono, rate, frames.len() - 1, offset, hendou).unwrap();
+                let ours: Vec<(i32, i32, i32)> = r.beats.iter().map(|b| (b.pos, b.num_bar, b.bpm)).collect();
+                total += 1;
+                if ours == theirs && r.bpm == mbpm {
+                    same += 1;
+                } else {
+                    let first = ours.iter().zip(&theirs).position(|(x, y)| x != y);
+                    println!("{id}: ours {} beats bpm {} vs {} bpm {}; first diff {first:?} {:?} vs {:?}", ours.len(), r.bpm, theirs.len(), mbpm,
+                        first.map(|i| ours[i]), first.map(|i| theirs[i]));
+                }
+            }
+            println!("madmom window: {same}/{total} identical");
+        }
         "dbt" => {
             // downbeat tracking on a dumped activation file (u32 rows, u32 cols, f32...)
             let b = std::fs::read(&a[2]).unwrap();

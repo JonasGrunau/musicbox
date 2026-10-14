@@ -9,6 +9,7 @@
 //! feeds the same samples to BALib (PWAV/PWV2/PWV3, beats), WaveCreator (PWV4–7, PWVC) and the
 //! loudness meter.
 
+pub mod balib2;
 pub mod beats;
 pub mod embed;
 pub mod hpbeat;
