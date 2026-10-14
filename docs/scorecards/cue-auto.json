@@ -13,7 +13,9 @@
   "test": "cargo test -p mb-library --test analyse_ops auto_cue_analysis_matches_oracle_cue (MB_ORACLE_FULL=1 for every track)",
   "fixtures": {
     "oracle-cue/A1": {"settings": "Auto, HOT CUE, limit 8, 1.1Bars on, comments on, all-zero personal tendency", "tracks": 169, "identical": 169, "cues": "962/962", "per_kind": "1/2/3/5/6/7/8/9 = 161/146/134/112/104/102/102/101, all equal"},
-    "oracle-cue/A2": {"settings": "Auto, MEMORY CUE, limit 8, otherwise as A1", "tracks": 169, "identical": 169, "cues": "962/962"}
+    "oracle-cue/A2": {"settings": "Auto, MEMORY CUE, limit 8, otherwise as A1", "tracks": 169, "identical": 169, "cues": "962/962"},
+    "oracle-cue/A3": {"settings": "as A1 with T1's personal trend", "tracks": 169, "identical": 169, "cues": "962/962"},
+    "oracle-cue/A4": {"settings": "as A1 with T2's personal trend", "tracks": 169, "identical": 169, "cues": "974/974"}
   },
   "input": "rekordbox's grid (PQTZ, PQT2 offset) and phrases (PSSI) of each run; the audio from our own decode",
   "end_to_end": {"oracle-cue/A1": {"tracks": 169, "identical": 169}},
@@ -21,5 +23,6 @@
   "stages_vs_rekordbox": "getScores and getTotalScores identical to rekordbox's own functions in a native harness on the same decode (scores bit for bit, the same 16 candidates)",
   "runtime_inputs": "samplecnn.onnx and cue_prediction_model_no_abs_position.onnx from the install (MD5-checked); nothing copied into the repo",
   "seconds_per_track": "about 0.7 (decode + CNN per phrase start), 169 tracks in 2 min for A1+A2",
-  "pending": "a non-zero personal CUE tendency ([CUE Analysis Playlist]); no reference run"
+  "personal_trend": {"command": "cargo run --release -p mb-library --example trend_score -- <T1|T2>", "oracle-cue/T1": "cue_personal_trend.json identical (17825 bytes)", "oracle-cue/T2": "identical (17881 bytes)"},
+  "pending": "the [CUE Analysis Playlist] analysis is not run by musicbox (it reads the file only)"
 }

@@ -1,6 +1,6 @@
 # CUE analysis (Intelligent Cue Creation)
 
-Status: **Manual verified on oracle-cue M1–M6** (9 runs, 169/169 tracks each, all compared `djmdCue` columns; scorecard `docs/scorecards/cue-manual.json`). **Auto verified on A1/A2** (169/169 each on rekordbox's grid and PSSI; 169/169 end to end; scorecard `docs/scorecards/cue-auto.json`). The personal CUE tendency is not modelled.
+Status: **Manual verified on oracle-cue M1–M6** (9 runs, 169/169 tracks each, all compared `djmdCue` columns; scorecard `docs/scorecards/cue-manual.json`). **Auto verified on A1/A2** (169/169 each on rekordbox's grid and PSSI; 169/169 end to end; scorecard `docs/scorecards/cue-auto.json`). The personal CUE tendency is verified too: the trend file byte-identical on T1/T2, the Auto cues with it 169/169 on A3/A4.
 
 Code: `crates/mb-library/src/cue_analysis.rs`, step E of `ApplyAnalysis` in `crates/mb-library/src/analyse.rs`, `crates/mb-analysis/src/cue.rs` (Auto scores and candidates).
 
@@ -114,14 +114,30 @@ Code: `crates/mb-analysis/src/cue.rs` (scores, candidates), `auto_plan` in `crat
   3. `FirstCue`: the first downbeat (index f − 1 as in Manual; a zero beat when past the grid). The first candidate with the same ms is dropped. That cue is created and the limit drops by 1. The cue list that `findSame` checks is re-read after this cue.
   4. The first min(limit, candidates) candidates (best first) are sorted by ms (unsigned) and each is created. `create` follows the Manual rules: memory cues are skipped within ±5 ms of the list and stop at 10 cues; hot cues take the first free pad A…P.
   5. Comment "CUE(Auto)" with `WriteComment`.
-- **Personal trend.** Built from the cues of the tracks in [CUE Analysis Playlist]: `StartPersonalTrend` @0x1014978e4 → `CAnalyzerIF::AnalyzePersonalTrend` @0x1016332c8 → `PersonalTrendAnalyzer::analyzeTrack` @0x1019178bc, `updatePersonalTrend` @0x101918a70, `MinMaxNormalization` @0x1019186b8.
-  - musicbox does not model it. The candidates equal rekordbox's only while `cue_personal_trend.json` is all zeros.
-- **Reference runs** (all-zero personal trend, empty [CUE Analysis Playlist]):
+- **Personal trend** (code: `crates/mb-analysis/src/cue/trend.rs`; verified on T1/T2 and A3/A4, § 5).
+  - **Start.** The [CUE Analysis Playlist] is an ordinary `djmdPlaylist` that rekordbox creates (`CuePlaylist::CreateCueDetectPlaylist` @0x10187d3b4; ID in `browseSetting.xml` as `cueplaylistid`, default 200000; "CUE-Analyse Wiedergabeliste" in the German UI). The tree shows it while the bool preference `CueAnalysisPlaylist` is on (default 1). Its Start button (tree message 0x46 → `TreeViewer::treeMessageAnalysisCuePersonalTrend` @0x1015799bc) runs `StartPersonalTrend` @0x1014978e4 → `CAnalyzerIF::AnalyzePersonalTrend` @0x1016332c8 over that playlist's tracks only; nothing happens while tracks are being analysed.
+  - **Replace, not accumulate.** `AnalyzePersonalTrend` clears the matrix first, so each run uses only the playlist's current tracks. An empty playlist deletes the file.
+  - **Inputs per track:**
+    - every `djmdCue` row, hot and memory, after rekordbox's clean-up (duplicate hot pads and duplicate memory cues dropped, memory cues past the 10th dropped, kind −2 dropped); only `InMsec` is used;
+    - the PQTZ beat times from the local `.DAT`;
+    - the stored PSSI from the `.EXT` (count, mood, start beats, kinds; no new phrase pass), with the end beat left at 0;
+    - the length in whole seconds.
+  - **`PersonalTrendAnalyzer::analyzeTrack`** @0x1019178bc, skipped unless the track is 30–1800 s long and has beats, phrases and cues:
+    1. Boundaries: every phrase start − 1, plus the end beat − 1 (0-based beats).
+    2. Each cue snaps to the nearest beat (the earlier one on a tie) and is kept within 100 ms. If fewer than half the cues are kept, the track adds nothing.
+    3. Each distinct kept beat finds the next boundary at or after it and counts only when the distance is in `vector_of_active_beat_to_next_structure` = {0}, i.e. the cue sits on a phrase start. Then counts[mood][s(previous kind)][s(next kind)] += 1 (previous kind 0 before the first phrase, next kind 0 at the end), with s = `structure_value_matrix` (mood 1: kinds 0–6 → 0, 1, 2, 3, 0, 4, 5; moods 2/3: kinds 0–10 → 0, 1, 2, 2, 2, 2, 2, 2, 3, 4, 5). Only rows 0–5 of the 36 (6 offsets × 6 structures) can be reached.
+    4. On the same condition, position[third] += 1, with third = ms·3/(length·1000), and 2 from the end on.
+  - **`updatePersonalTrend`** @0x101918a70: per mood, a single-precision min-max normalisation of the matrix with min and max taken together with 0 (`MinMaxNormalization` @0x1019186b8); the distribution likewise, i.e. c/max.
+  - **File** `common::PropertyPath()/cue_personal_trend.json` (the rekordbox6 folder), written whole with `replaceWithText`: an ordered JSON object with `personal_trend_matrix` (3 × 36 × 6) then `personal_trend_position_distribution` (3), 4-space indent, CRLF lines, no newline after the final `}`; numbers are the floats widened to double in shortest round-trip form (`0.0`, `0.8500000238418579`, …).
+  - **Use.** Every analysis job reads the file into `DetectCue`; `getTotalScores` adds the trend scores (T above) to the model scores.
+  - **musicbox** reads the file read-only when the library loads (`mb_library::cue_analysis::read_trend`; an unreadable file counts as all zeros) and applies it to the Auto candidates. It does not run the playlist analysis or write the file.
+- **Reference runs** (§ 5): A1/A2 with an all-zero personal trend and an empty [CUE Analysis Playlist]; A3/A4 with the trends of T1/T2.
   - A1: hot cues, limit 8, 962 cues on 161 tracks (Kind 1/2/3/5/6/7/8/9 = 161/146/134/112/104/102/102/101), all "CUE(Auto)".
   - A2: memory cues, limit 8, the same 962 positions as Kind 0.
   - The 8 tracks without cues have no candidates.
 - **Verification**
-  - On rekordbox's grid and PSSI of each run: A1 and A2 169/169, all compared columns.
+  - On rekordbox's grid and PSSI of each run: A1, A2, A3 and A4 169/169, all compared columns.
+  - The trend file of T1 and T2 byte-identical (`trend_score`).
   - End to end on our own grid and phrases: A1 169/169.
   - A dev harness outside the repo runs rekordbox's `CuePointPredictor` and `getTotalScores` on our decode and gives the same scores and candidate list.
 
@@ -138,9 +154,15 @@ Each run starts from `fixtures/oracle-a` (no cues; Normal mode, high precision o
 | M5c/M5d | M3 on the seeded library, overwrite off/on | 1128 / 1128 |
 | M6 | M2 with comments off | 1032 |
 | A1/A2 | Auto, hot/memory, limit 8 | 962 / 962 |
+| T1 | the M2 library, 24 real tracks in [CUE Analysis Playlist], Start pressed | trend file (17 825 bytes) |
+| T2 | the same with 24 chosen tracks (all moods, two skip cases) and memory cues on three | trend file (17 881 bytes) |
+| A3/A4 | Auto, hot, limit 8, with T1/T2's trend | 962 / 974 (differing from A1 on 95 / 106 tracks) |
 
 - **Seed** (`crates/mb-library/examples/cue_seed.rs`, `seed/master.db` in each M5 run): hot cue A on 3 tracks, A and B on 2, a memory cue on the first downbeat on 3, a memory cue at 0:30 on 2.
+- **T2 seed** (`crates/mb-library/examples/cue_trend_seed.rs`, `playlist-ids.txt`): the playlist's tracks added with musicbox's playlist command, plus a memory cue on the first beat and one between beats 10 and 11 on three tracks.
 
 ## 6. Open
 - The statement order of the cue writes against the completion statements (§ 2).
-- Auto with a non-zero personal tendency ([CUE Analysis Playlist], `getPersonalTrendScoreMap`): mapped, not ported, no reference run.
+- The trend analysis reads PSSI only when a `RowDataTrack` field is 1 or 6 and a flag bit is set (probably file type or source plus an analysed bit); every fixture track passes.
+- The order in which the clean-up sees the cues (musicbox uses the row order).
+- A UI string says Auto also adds tracks with cues to [CUE Analysis Playlist]; that path is not traced.
