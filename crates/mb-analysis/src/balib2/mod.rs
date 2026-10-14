@@ -6,11 +6,11 @@
 use crate::beats::BeatInfo;
 use crate::beats::{envelope, info, sensor};
 
-pub mod lowband;
+pub mod adjust;
 pub mod verdict;
 
 /// The constant-tempo `Analyzer` (`BA_CreateConst44k`/`48k`): blocks of `rate/75` frames into the
-/// sensor, the envelope and `UnitBeatAdjust`'s low band (`Analyzer::setSample` @0x10116bae8).
+/// sensor, the envelope and `UnitBeatAdjust` (`Analyzer::setSample` @0x10116bae8).
 pub struct Analyzer {
     rate: u32,
     total: i32,
@@ -20,7 +20,7 @@ pub struct Analyzer {
     pcm: Vec<[i16; 2]>,
     sensor: sensor::BeatSensor,
     envelope: envelope::UnitEnvelope,
-    low: lowband::LowBand,
+    adjust: adjust::UnitBeatAdjust,
 }
 
 /// One analysis pass's result for the development comparisons: BPM and beat list.
@@ -52,7 +52,7 @@ impl Analyzer {
             pcm: Vec::new(),
             sensor: sensor::BeatSensor::new(rate, total),
             envelope: envelope::UnitEnvelope::new(rate, total),
-            low: lowband::LowBand::new(rate, total),
+            adjust: adjust::UnitBeatAdjust::new(rate, total),
         }
     }
 
@@ -68,7 +68,7 @@ impl Analyzer {
             if self.mono.len() >= self.block || self.seen >= i64::from(self.total) {
                 self.sensor.put(&self.mono);
                 self.envelope.put(&self.pcm);
-                self.low.put(&self.pcm);
+                self.adjust.put(&self.pcm);
                 self.mono.clear();
                 self.pcm.clear();
             }
@@ -90,11 +90,23 @@ impl Analyzer {
         (raw, c, v, verdict)
     }
 
+    /// Development check: `UnitBeatAdjust::analyze` on a given BPM and list, with the bands of
+    /// the samples put so far.
+    #[doc(hidden)]
+    pub fn adjust_stage(
+        &mut self,
+        bpm: &mut f32,
+        list: &mut Vec<BeatInfo>,
+    ) -> Vec<(usize, i64, i64, [i16; 3])> {
+        self.adjust.analyze(bpm, list);
+        self.adjust.band_checks()
+    }
+
     /// Test A on the sensor's list, then the verdict on the varied list.
     fn verdict(&self, raw: &[BeatInfo], c: &Pass, v: &Pass) -> Option<verdict::Verdict> {
         let rate = self.rate as i32;
         let cb = c.as_ref().map_or(0.0, |c| c.0);
-        let a = !raw.is_empty() && lowband::judge(rate, raw, cb, self.total, &self.low);
+        let a = !raw.is_empty() && adjust::judge(rate, raw, cb, self.total, &self.adjust);
         let (vb, vl) = v.as_ref().map_or((0.0, &[][..]), |v| (v.0, &v.1[..]));
         verdict::run(rate, cb, vb, vl, a)
     }
@@ -116,7 +128,7 @@ impl Analyzer {
         self.envelope.analyze(bpm, &mut list, false);
         let bpm100 = bpm.mul_add(100.0, 0.5) as i32;
         let positions: Vec<i32> = list.iter().map(|b| b.pos).collect();
-        let offset = self.low.offset(self.rate, &positions, bpm);
+        let offset = self.adjust.offset(self.rate, &positions, bpm);
         let beats = list
             .iter()
             .map(|b| (b.pos, b.stat, (6_000_000.0f32 / b.tempo + 0.5) as i32))
