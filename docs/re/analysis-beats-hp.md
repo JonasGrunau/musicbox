@@ -5,7 +5,7 @@ Status: **verified for all three high-precision modes.** With `Options { high_pr
 - Normal (mode 3), `fixtures/oracle-c`: 162/162, PSSI 161/161 (the four sampler loops on which rekordbox crashes are excluded, and so is X-Ray's PSSI, written by the crashing process; `fixtures/manifest.toml`);
 - Auto (mode 2), `fixtures/oracle-d`: 154/154, PSSI 166/166.
 
-In modes 4 and 2 the other 12 tracks (sweeps) get no high-precision grid, in rekordbox as in musicbox (§ 6). The BPM-range rebuild for grids outside 70–180 is not ported (§ 6, § 9). Scorecards: `docs/scorecards/beats-hp.json` (mode 4), `docs/scorecards/beats-hp-v2.json` (modes 3 and 2).
+In modes 4 and 2 the other 12 tracks (sweeps) get no high-precision grid, in rekordbox as in musicbox (§ 6). The BPM-range rebuild for grids outside 70–180 is ported from the code and fuzzed against rekordbox's own function (§ 6). Scorecards: `docs/scorecards/beats-hp.json` (mode 4), `docs/scorecards/beats-hp-v2.json` (modes 3 and 2).
 
 Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`madmom.rs`, `hmm.rs`, `focus.rs`, `focus/constant.rs`, `focus/vote.rs`, `mod.rs`); `crates/mb-analysis/src/balib2/` (BALib v2 for modes 2 and 3).
 
@@ -202,7 +202,12 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
 6. `djmdContent.BPM` = `GetBpm_Focus`. PQT2 type 2 (§ 1).
 - **Modes 2 and 3.** hendou = BALib v2's verdict in mode 2, false in mode 3 (`SetBpmHendou`, job +0x30). madmom runs model 7 over the whole track with hendou, else model 8 over the 60 s window. Focus gets BALib v2's beat count and BPM, madmom's list and BPM, and the analyser's `UnitBeatAdjust` bands.
 - **`getFirstBeatPos`** @0x102328a00 reads the job's previous `DetailedBeatInfo` array (+0x58, when it has more than 7 beats): +0x88 = its first beat's ms, +0x90 = that beat's bar through `convFirstBar`. When the stored tempo differs from the new BPM and the beat lies between one and two beats in, both move one beat back. It does not touch the new grid.
-- **BPM-range rebuild** (`convertToMicrosec` without hendou). The BPM (`GetBpm_Focus`, else the first beat's tempo) is checked against `bpmRangeList[+0x7c]` (index 1 → 70–180). Below the range `bpmToDouble` @0x102329060 inserts a beat between each pair at double tempo, repeatedly; above it `bpmToHalf` @0x10232967c keeps every second beat at half tempo; both renumber the bars (`renumberBeat`) from the first beat's bar through a table, and the job BPM is doubled or halved with them. Not ported: no oracle-c/d track leaves 70–180 (min 73.97, max 180.00).
+- **BPM-range rebuild** (`convertToMicrosec` @0x102328b20 without hendou). The BPM (`GetBpm_Focus`, or the first beat's tempo when that is below 1) is checked against `bpmRangeList[+0x7c]` (index 1 → 70–180; an index outside 1–10 is reset to 1). Inside the range the list is converted plainly and the BPM is left as it is (a BPM below 1 stays). Outside it the list is converted to `DetailedBeatInfo` and rebuilt until the BPM fits, the BPM doubling or halving (truncated) with each round:
+  - `bpmToDouble` @0x102329060: each beat at twice its tempo (u16, wrapping), then a beat at its bar halfway to the next one. For the last beat it is half the previous interval on, or halfway to the end when it is the only beat; a negative interval gets +1 before the halving. Beats past the end (`total·10⁶/rate` µs) are dropped from the back. The first bar maps 1/3 → 1, 2/4 → 3.
+  - `bpmToHalf` @0x10232967c: beats 0, 2, 4, … at half their tempo; the first bar maps 1/4 → 1, 2/3 → 4.
+  - **Later rounds** pass the original beat count on. Doubling then rebuilds only the first n beats of the doubled list. A second halving reads past the halved list's buffer (undefined; musicbox stops at the list's end). Only a Focus BPM above 360 needs it, which madmom's 70–180 tempi do not produce.
+  - `renumberBeat` @0x1023297fc: bars counted on from the mapped first bar (C remainder, so 0 and 5 run on as 0, 1, 2, …). Then at most one beat a beat length before the first, when that is ≥ 0 µs, with the previous bar and the first beat's tempo. Then at most one beat after the last, when the interval fits before the end, with the next bar and the last tempo. The appended beat's ms is last + interval/1000 and its sub-ms part is last + interval mod 1000, without a carry.
+  - **Verified** with a harness call of rekordbox's `convertToMicrosec` on 25,000 random grids (35–70, 12–35, 180–360 and > 360 BPM, in range, BPM ≤ 0; 1–420 beats; first bar 0–5; 44.1/48/96 kHz). All 23,699 cases without a second halving are identical, BPM included. No oracle-c/d track leaves 70–180 (min 73.97, max 180.00). Code: `hpbeat/range.rs`; tool `range_check <cases>`.
 
 ## 7. musicbox
 - **Options.** `Options.high_precision: Option<HpMode>`.
@@ -213,7 +218,7 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
 - **No beats.** `Analysis.beats` is `None`. `mb-library` then sets `TrackAnalysis.keep_old_grid`: `ApplyAnalysis` carries the previous PQTZ/PQT2 over and writes `BPM` 0 (`ops/analyse-track.md`).
   - Key and phrase run on the stored grid, as in rekordbox (§ 6): `mb_analysis::analyze_with` / `mb_library::analyse_track_with` take it from the caller. The 12 sweeps then get oracle-b's key and PSSI.
 - **Preferences.** `AnalysisSettings::high_precision_from(HighPrecisionBeatAnalyze, trackHiPrecisionBeatAnalysisMode)`, with the binary's defaults 0 and 2.
-- **Normal and Auto.** `mb_analysis::analyze` feeds BALib v2's constant analyser (`balib2::Analyzer`) during the decode pass. `hpbeat::grid_v2` then runs the job: `finish_with_adjust` (BPM, offset, verdict, and the `UnitBeatAdjust` bands), madmom, Focus (`run_with`), `convertToMicrosec`. A BPM outside 70–180 without hendou is an error (the Normal-mode grid stays, `high_precision_error`).
+- **Normal and Auto.** `mb_analysis::analyze` feeds BALib v2's constant analyser (`balib2::Analyzer`) during the decode pass. `hpbeat::grid_v2` then runs the job: `finish_with_adjust` (BPM, offset, verdict, and the `UnitBeatAdjust` bands), madmom, Focus (`run_with`), `convertToMicrosec`. Without hendou, `hpbeat::range::rebuild` applies the BPM-range rebuild (range 1 only).
   - `HpGrid { grid, grid_type, urahaku }`; no beats keeps the stored grid for key and phrase, as in Dynamic.
 - **No phrase shift once madmom found beats** (urahaku, § 1). Without this gate, 57 of oracle-b's 154 grids would move.
 - **Cost.** About 4–5 s per track, with three tracks in parallel on this machine.
@@ -276,7 +281,7 @@ Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (ha
     - `offsetBeatPosition` @0x10113d304 shifts all beats by (index − w)·4 samples, drops beats before 0 and beats whose next shift would pass the end, and refills whole beat lengths at both ends; the beat length is `trunc(rate/4 · (0.004 · tempo))`, single precision.
 
 ## 9. Open
-- **Modes 2 and 3:** the BPM-range rebuild (`bpmToDouble`/`bpmToHalf`/`renumberBeat`); Timelock's varied BALib list in mode 2 (Focus only takes the count and BPM there, so the grid is unaffected); where +0x3940 follows the verdict.
+- **Modes 2 and 3:** where +0x3940 follows the verdict. The only static writer is `startAnalyze`, from the same request field as +0x38d0, and `execAnalyze` passes the preference mode, so hendou tracks are probably re-requested in a Dynamic mode; not found. Also Timelock's varied BALib list in mode 2 (no grid effect) and the second halving's out-of-buffer read.
 - **BALib v2's beat count** is approximated by the presence of our Normal-mode (v1) grid. This only matters if one finds beats and the other does not.
 - **Mode 1** (Normal-mode Dynamic, the BALib v1 varied analyser) is ported and verified separately: `analysis-beats.md` § 9.
 - **Stale slot:** what the whole-run start alignment's one-past-the-end read holds. This happens only near the end of the beat vector.

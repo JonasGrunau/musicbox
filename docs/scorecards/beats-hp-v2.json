@@ -33,12 +33,13 @@
     "balib2_beat_list": "mode 3 169/169, mode 2 168/169 (Timelock varied list; Focus takes only the count and BPM there)",
     "unitbeatadjust_v2": "166/166 (output list, BPM, band checksums)",
     "focus_constant_path_with_harness_inputs": "166/166 before UnitBeatAdjust, 166/166 final",
-    "madmom_model8_window": "20/20"
+    "madmom_model8_window": "20/20",
+    "bpm_range_rebuild_fuzz": "range_check on 25000 harness cases of rekordbox's convertToMicrosec: 23699/23699 identical outside repeated halving; repeated halving (BPM > 360) 170/1301, undefined in rekordbox (reads past its buffer)"
   },
   "regression": {
     "oracle_b_mode4": "154/154 + 12 (unchanged)",
     "oracle_a_normal": "see beats.json (unchanged)"
   },
   "seconds_per_track": "about 4 with phrase (3 tracks in parallel)",
-  "not_covered": ["the BPM-range rebuild for grids outside 70-180 (bpmToDouble/bpmToHalf); no oracle track leaves the range", "where the PQT2 type follows the verdict in mode 2 (+0x3940)"]
+  "not_covered": ["a real track outside 70-180 (the rebuild is checked by harness fuzz only)", "where the PQT2 type follows the verdict in mode 2 (+0x3940)"]
 }
