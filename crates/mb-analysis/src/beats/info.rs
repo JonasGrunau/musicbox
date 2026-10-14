@@ -224,12 +224,40 @@ impl Builder<'_> {
     }
 }
 
+/// Stage lists for the development check (`vtest`), in the analyser's order.
+#[cfg(test)]
+pub(crate) const STAGES: [&str; 8] =
+    ["raw", "sections", "runs8", "close", "segments", "adjusted", "walk", "corrected"];
+
+/// Stage lists for the development check (`vtest`).
+#[cfg(test)]
+pub(crate) struct Stages {
+    pub stages: Vec<(&'static str, Vec<BeatInfo>)>,
+    pub out: Option<Vec<BeatInfo>>,
+}
+
+/// `analyze` with the stage lists kept (development check).
+#[cfg(test)]
+pub(crate) fn analyze_stages(rate: i32, mut list: Vec<BeatInfo>, total: i32, varied: bool) -> Stages {
+    let mut st = vec![("raw", list.clone())];
+    let r = run(rate, &mut list, total, varied, &mut |name, v| st.push((name, v.to_vec())));
+    Stages { stages: st, out: r.map(|r| r.beats) }
+}
+
 /// `analyze(info, out, total, 4, 16, 12, false)`: the constant-tempo beat list and its BPM.
 pub(crate) fn analyze(rate: i32, list: &mut Vec<BeatInfo>, total: i32) -> Option<Result> {
-    if list.is_empty() {
-        return None;
-    }
-    // The tempo of the whole track, then drop the beats unrelated to it or to their predecessor.
+    run(rate, list, total, false, &mut |_, _| {})
+}
+
+/// `analyze(info, out, total, 4, 16, 12, true)`: the varied (Dynamic) beat list and the BPM of
+/// its longest tempo segment.
+pub(crate) fn analyze_varied(rate: i32, list: &mut Vec<BeatInfo>, total: i32) -> Option<Result> {
+    run(rate, list, total, true, &mut |_, _| {})
+}
+
+/// The constant path's segment: the tempo of the whole track, after dropping the beats unrelated
+/// to it or to their predecessor.
+fn constant_segment(list: &mut Vec<BeatInfo>, total: i32) -> Option<BeatInfo> {
     let t0 = coarse_tempo(list, 0, total)?;
     let tl = tol(t0);
     let (lo, hi) = (t0 - tl, t0 + tl);
@@ -249,18 +277,44 @@ pub(crate) fn analyze(rate: i32, list: &mut Vec<BeatInfo>, total: i32) -> Option
             list.remove(i);
         }
     }
-    if list.is_empty() {
-        return None;
-    }
-    // One segment over the whole track; its tempo from the filtered beats.
-    let mut seg = list[0];
+    let mut seg = *list.first()?;
     seg.tempo = t0;
-    if let Some(t1) = coarse_tempo(list, 0, total) {
-        seg.tempo = t1;
-        seg.beats = 0.0;
-        seg.stat = 4;
+    Some(seg)
+}
+
+/// End of segment `k`: the next segment's start, or `total` for the last.
+fn seg_end(segs: &[BeatInfo], k: usize, total: i32) -> i32 {
+    segs.get(k + 1).map_or(total, |s| s.pos)
+}
+
+/// Each segment's tempo from the BPM histograms of its beats (from the beat at the segment's
+/// start); a segment whose tempo fits the previous one's is merged into it, which is then
+/// estimated again over the longer span.
+fn reestimate(list: &[BeatInfo], segs: &mut Vec<BeatInfo>, total: i32) {
+    let mut k = 0usize;
+    while k < segs.len() {
+        let span = if k + 1 == segs.len() { total } else { segs[k + 1].pos - segs[k].pos };
+        let at = list.iter().position(|b| b.pos == segs[k].pos);
+        if let Some(t1) = at.and_then(|at| coarse_tempo(list, at, span)) {
+            segs[k].tempo = t1;
+            segs[k].beats = 0.0;
+            segs[k].stat = 4;
+            if k > 0 && near_tempo(t1, segs[k - 1].tempo - tol(segs[k - 1].tempo), segs[k - 1].tempo + tol(segs[k - 1].tempo)) {
+                segs.remove(k);
+                k -= 1;
+                continue;
+            }
+        }
+        k += 1;
     }
-    // Merge beats closer than 1/8 beat, keeping the one from the stronger call.
+}
+
+/// Merges beats closer than 1/8 of their segment's beat, keeping the one from the stronger call
+/// (strength = low byte of the first `stat` filed by that call).
+fn merge_close(rate: i32, list: &mut Vec<BeatInfo>, segs: &[BeatInfo], total: i32) {
+    if list.is_empty() {
+        return;
+    }
     let mut strength: Vec<i32> = Vec::new();
     for b in list.iter() {
         let id = (b.stat >> 8) as usize;
@@ -271,27 +325,86 @@ pub(crate) fn analyze(rate: i32, list: &mut Vec<BeatInfo>, total: i32) -> Option
             strength[id] = b.stat & 0xff;
         }
     }
-    let close = (f64::from(seg.tempo * rate as f32) * 0.000125) as i32;
     let (mut prev_pos, mut prev_stat) = (list[0].pos, list[0].stat);
     let mut i = 1;
-    while i < list.len() {
-        let e = list[i];
-        if e.pos >= total {
-            break;
-        }
-        if prev_pos.wrapping_sub(e.pos).wrapping_abs() >= close {
-            prev_pos = e.pos;
-            prev_stat = e.stat;
-            i += 1;
-        } else if strength[(prev_stat >> 8) as usize] < strength[(e.stat >> 8) as usize] {
-            list.remove(i - 1);
-            prev_pos = e.pos;
-            prev_stat = e.stat;
-        } else {
-            list.remove(i);
+    for (k, seg) in segs.iter().enumerate() {
+        let end = seg_end(segs, k, total);
+        let close = (f64::from(seg.tempo * rate as f32) * 0.000125) as i32;
+        while i < list.len() {
+            let e = list[i];
+            if e.pos >= end {
+                break;
+            }
+            if prev_pos.wrapping_sub(e.pos).wrapping_abs() >= close {
+                prev_pos = e.pos;
+                prev_stat = e.stat;
+                i += 1;
+            } else if strength[(prev_stat >> 8) as usize] < strength[(e.stat >> 8) as usize] {
+                list.remove(i - 1);
+                prev_pos = e.pos;
+                prev_stat = e.stat;
+            } else {
+                list.remove(i);
+            }
         }
     }
-    seg_adjust(rate, list, &mut seg, total);
+}
+
+/// The representative BPM: that of the longest segment (the first one's length counts from 0).
+fn representative_bpm(segs: &[BeatInfo], total: i32) -> f32 {
+    let n = segs.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mut best = if n == 1 { total } else { segs[1].pos };
+    let mut bpm = 0.0f32;
+    if best < 1 {
+        best = 0;
+    } else {
+        bpm = 60000.0 / segs[0].tempo;
+    }
+    for k in 1..n {
+        let len = seg_end(segs, k, total) - segs[k].pos;
+        if best < len {
+            best = len;
+            bpm = 60000.0 / segs[k].tempo;
+        }
+    }
+    bpm
+}
+
+/// `BeatInfoAnalyzer::analyze`, both paths. `stage` sees the intermediate lists (development).
+fn run(
+    rate: i32,
+    list: &mut Vec<BeatInfo>,
+    total: i32,
+    varied: bool,
+    stage: &mut dyn FnMut(&'static str, &[BeatInfo]),
+) -> Option<Result> {
+    if list.is_empty() {
+        return None;
+    }
+    let mut segs = if varied {
+        if !super::varied::filter(list) {
+            return None;
+        }
+        stage("sections", list);
+        super::varied::runs8(list);
+        stage("runs8", list);
+        super::varied::segments(rate, list)
+    } else {
+        vec![constant_segment(list, total)?]
+    };
+    reestimate(list, &mut segs, total);
+    merge_close(rate, list, &segs, total);
+    stage("close", list);
+    let rep = representative_bpm(&segs, total);
+    stage("segments", &segs);
+    if segs.is_empty() {
+        return None;
+    }
+    seg_adjust(rate, list, &mut segs, total);
+    stage("adjusted", &segs);
 
     let mut b = Builder {
         rate,
@@ -300,20 +413,29 @@ pub(crate) fn analyze(rate: i32, list: &mut Vec<BeatInfo>, total: i32) -> Option
         first: -1,
         last: -1,
     };
-    let anchor0 = b.build(&seg, total)?;
-    let n = b.out.len();
-    if n == 0 {
+    let mut anchor0 = 0;
+    for k in 0..segs.len() {
+        let end = seg_end(&segs, k, total);
+        let a = b.build(&segs[k], end)?;
+        if k == 0 {
+            anchor0 = a;
+        }
+    }
+    if b.out.is_empty() {
         return None;
     }
-    let _ = anchor0;
-    let mark = if b.first >= 0 {
-        b.out[b.first as usize].pos
+    stage("walk", &b.out);
+    let (mut out, bpm, mark) = if varied {
+        let mut out = std::mem::take(&mut b.out);
+        gap_correct_varied(&mut out);
+        (out, rep, anchor0)
     } else {
-        0
+        let mark = if b.first >= 0 { b.out[b.first as usize].pos } else { 0 };
+        let out = gap_correct(rate, &b.out, total, b.first, b.last);
+        let bpm = 60000.0 / out.first()?.tempo;
+        (out, bpm, mark)
     };
-    let mut out = gap_correct(rate, &b.out, total, b.first, b.last);
-    let bpm = 60000.0 / out.first()?.tempo;
-    // Bar positions: the beat at the first confirmed anchor is beat 1.
+    // Bar positions: the beat at the mark (the first confirmed anchor) is beat 1.
     let idx = if out.is_empty() {
         -1
     } else {
@@ -324,21 +446,22 @@ pub(crate) fn analyze(rate: i32, list: &mut Vec<BeatInfo>, total: i32) -> Option
         x.stat = (c + i as i32) % 4 + 1;
     }
     out.retain(|x| x.pos >= 0 && x.pos <= total);
+    stage("corrected", &out);
     Some(Result { bpm, beats: out })
 }
 
 impl Builder<'_> {
-    /// The grid walk of `analyze` (0x101192090–0x101193a48) for the single segment.
-    /// Returns the first anchor position (`sp+0x74`).
-    fn build(&mut self, seg: &BeatInfo, total: i32) -> Option<i32> {
+    /// The grid walk of `analyze` (0x101192090–0x101193a48) for one segment, ending at
+    /// `seg_end`. Returns the segment's first anchor position (`sp+0x74` for segment 0).
+    fn build(&mut self, seg: &BeatInfo, seg_end: i32) -> Option<i32> {
         let rate = self.rate;
         let p48 = f64::from(rate) * 0.001;
         let inv_rate = 1.0 / f64::from(rate);
         let inv_window = 1.0 / f64::from(WINDOW);
-        let end = f64::from(total);
-        let floor = 0i32;
-        let base0 = 0i32;
-        let mut base = base0;
+        let end = f64::from(seg_end);
+        // Beats of earlier segments stay: back-fill stops at the last one.
+        let floor = self.out.last().map_or(0, |b| b.pos);
+        let mut base = self.out.len() as i32;
         let mut tab = [-1i32; (WINDOW * 4 + 1) as usize];
         let mut g = f64::from(seg.pos);
         let t_seg = seg.tempo;
@@ -530,12 +653,29 @@ impl Builder<'_> {
     }
 }
 
-/// `segAdjust`: the grid phase (in 96-sample steps), beat spacing (16, 8 or 4) and tempo offset
-/// (0, +1, −1, +2, −2 ms) whose grid meets the beats best.
-fn seg_adjust(rate: i32, list: &[BeatInfo], seg: &mut BeatInfo, total: i32) {
+/// `segAdjust` @0x1011944ec, per segment: the grid phase (in 96-sample steps), beat spacing
+/// (16, 8 or 4) and tempo offset (0, +1, −1, +2, −2 ms) whose grid meets the beats best,
+/// searched between the neighbouring segments.
+fn seg_adjust(rate: i32, list: &[BeatInfo], segs: &mut [BeatInfo], total: i32) {
+    for k in 0..segs.len() {
+        seg_adjust_one(rate, list, segs, k, total);
+    }
+}
+
+/// A search bound near `key`: one eighth beat after the beat before the last beat at or before
+/// `key` (one eighth before the first beat when there is none), clamped to `[lo, hi]` and 0.
+fn bound(list: &[BeatInfo], key: i32, p8: i32, lo: i32, hi: i32) -> f64 {
+    let idx = (list.partition_point(|b| b.pos <= key) as i32 - 1).max(0);
+    let v = if idx >= 1 { list[idx as usize - 1].pos + p8 } else { list[idx as usize].pos - p8 };
+    f64::from(v).max(f64::from(lo)).min(f64::from(hi)).max(0.0)
+}
+
+fn seg_adjust_one(rate: i32, list: &[BeatInfo], segs: &mut [BeatInfo], k: usize, total: i32) {
+    if list.is_empty() {
+        return;
+    }
+    let seg = segs[k];
     let d0 = f64::from(rate) * 0.001;
-    let end = f64::from(total);
-    let start = 0.0f64;
     let w12 = rate / 20;
     let t0 = f64::from(seg.tempo);
     let mut first = true;
@@ -546,6 +686,12 @@ fn seg_adjust(rate: i32, list: &[BeatInfo], seg: &mut BeatInfo, total: i32) {
     'tempo: loop {
         let t = off + t0;
         let p = d0 * t;
+        let p8 = (p * 0.125) as i32;
+        let end = match segs.get(k + 1) {
+            None => f64::from(total),
+            Some(next) => bound(list, next.pos, p8, seg.pos, next.pos),
+        };
+        let start = if k == 0 { 0.0 } else { bound(list, seg.pos, p8, segs[k - 1].pos, seg.pos) };
         let w13 = (p * 0.125) as i32;
         let w = if w12 > w13 { w12 } else { w13 };
         let thresh = (f64::from(w) * (0.5 * (end - start))) / p;
@@ -622,6 +768,7 @@ fn seg_adjust(rate: i32, list: &[BeatInfo], seg: &mut BeatInfo, total: i32) {
         }
     }
     if best_ph >= 0.0 {
+        let seg = &mut segs[k];
         seg.pos = best_ph as i32;
         seg.tempo = r18 as f32;
         seg.stat = r17 as i32;
@@ -673,4 +820,81 @@ fn gap_correct(rate: i32, out: &[BeatInfo], total: i32, first: i32, last: i32) -
         d += period;
     }
     grid
+}
+
+/// `gapCorrect(out)` @0x101194b00, the varied path's: walks the beats four at a time (gaps
+/// `g1`, `g2`, `g3`) and evens out a middle gap more than 1.1× the larger neighbour (moves the
+/// third beat, or splits the span into thirds or quarters) or under 0.9× the smaller one (moves
+/// or drops the third beat, or splits into thirds).
+fn gap_correct_varied(v: &mut Vec<BeatInfo>) {
+    let step = |i: usize, n: usize| if i != n { i + 1 } else { i };
+    let mut i0 = 0usize;
+    loop {
+        let n = v.len();
+        let i1 = step(i0, n);
+        let i2 = step(i1, n);
+        let i3 = step(i2, n);
+        if i0 == n || i1 == n || i2 == n || i3 == n {
+            break;
+        }
+        let (a, b, c, d) = (v[i0].pos, v[i1].pos, v[i2].pos, v[i3].pos);
+        let g1 = f64::from(b - a);
+        let g2 = f64::from(c - b);
+        let g3 = f64::from(d - c);
+        let mx = fmaxnm(g1, g3);
+        let mn = fminnm(g3, g1);
+        if g2 / mx > 1.1 {
+            if mx == g1 && !((g2 - mx) / (mx - mn) >= 4.0) {
+                v[i2].pos = b + mx as i32;
+            } else if mn == g1 && mx.mul_add(3.0, g2) > mn * 5.0 {
+                let (m1, m2) = (mn as i32, (mn + mn) as i32);
+                v[i2].pos = b + m1;
+                if b + m1 + m2 < v[i3].pos {
+                    let mut x = v[i2];
+                    x.pos = v[i1].pos + m2;
+                    v.insert(i2, x);
+                }
+            } else {
+                let q = ((g2 + g1) + g3) / mx;
+                let span = f64::from(d - a);
+                if q < 3.3000000000000003 {
+                    v[i1].pos = a + (span * (1.0 / 3.0)) as i32;
+                    v[i2].pos = v[i0].pos + (span * (2.0 / 3.0)) as i32;
+                } else {
+                    v[i1].pos = a + (span * 0.25) as i32;
+                    v[i2].pos = v[i0].pos + (span * 0.5) as i32;
+                    let mut x = v[i2];
+                    x.pos = v[i0].pos + (span * 0.75) as i32;
+                    v.insert(i2, x);
+                }
+            }
+        } else if !(g2 / mn >= 0.9) {
+            if mn == g1 && !((mn - g2) / (mx - mn) >= 4.0) {
+                v[i2].pos = b + mn as i32;
+            } else if mx == g1 && mn.mul_add(4.0, g2) < mx * 4.0 {
+                let nb = b + mx as i32;
+                if nb >= d {
+                    v.remove(i2);
+                } else {
+                    v[i2].pos = nb;
+                }
+            } else if !(((g2 + g1) + g3) / mn > 2.7) {
+                v[i1].pos = (d + a) / 2;
+                v.remove(i2);
+            } else {
+                let span = f64::from(d - a);
+                v[i1].pos = a + (span * (1.0 / 3.0)) as i32;
+                v[i2].pos = v[i0].pos + (span * (2.0 / 3.0)) as i32;
+            }
+        }
+        i0 = step(i0, v.len());
+    }
+}
+
+/// AArch64 `fmaxnm`/`fminnm` (a NaN operand yields the other one).
+fn fmaxnm(a: f64, b: f64) -> f64 {
+    if a.is_nan() { b } else if b.is_nan() { a } else { a.max(b) }
+}
+fn fminnm(a: f64, b: f64) -> f64 {
+    if a.is_nan() { b } else if b.is_nan() { a } else { a.min(b) }
 }

@@ -18,6 +18,9 @@ pub(crate) mod envelope;
 pub(crate) mod filters;
 pub(crate) mod info;
 pub(crate) mod sensor;
+mod varied;
+#[cfg(test)]
+mod vtest;
 
 /// `peakss::BeatInfo` (24 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -68,11 +71,24 @@ pub struct BeatAnalyzer {
     sensor: sensor::BeatSensor,
     envelope: envelope::UnitEnvelope,
     adjust: adjust::UnitBeatAdjust,
+    /// The varied (Dynamic) analyser: `BA_CreateVaried44k/48k`.
+    varied: bool,
 }
 
 impl BeatAnalyzer {
     /// `total` = samples fed (`L − 1`).
     pub fn new(rate: u32, total: u64) -> Self {
+        Self::with_mode(rate, total, false)
+    }
+
+    /// The varied analyser of Normal-mode Dynamic (analysis mode 1, `BA_CreateVaried44k/48k`):
+    /// tempo segments instead of one tempo, no `UnitBeatAdjust`, no half-beat check
+    /// (`analysis-beats.md` § 9).
+    pub fn new_dynamic(rate: u32, total: u64) -> Self {
+        Self::with_mode(rate, total, true)
+    }
+
+    fn with_mode(rate: u32, total: u64, varied: bool) -> Self {
         let total = total.min(i32::MAX as u64) as i32;
         Self {
             rate,
@@ -84,6 +100,7 @@ impl BeatAnalyzer {
             sensor: sensor::BeatSensor::new(rate, total),
             envelope: envelope::UnitEnvelope::new(rate, total),
             adjust: adjust::UnitBeatAdjust::new(rate, total),
+            varied,
         }
     }
 
@@ -107,18 +124,9 @@ impl BeatAnalyzer {
     }
 
     /// `Analyzer::analyze` + `legacyBeatAnalyze`.
-    pub fn finish(mut self) -> Option<BeatGrid> {
+    pub fn finish(self) -> Option<BeatGrid> {
         let rate = self.rate as i32;
-        let mut raw = std::mem::take(&mut self.sensor.beats);
-        let r = info::analyze(rate, &mut raw, self.total)?;
-        let mut bpm = r.bpm;
-        let mut list = r.beats;
-        self.envelope.analyze(bpm, &mut list, false);
-        self.adjust.analyze(&mut bpm, &mut list);
-        if list.is_empty() {
-            return None;
-        }
-        let bpm100 = bpm.mul_add(100.0, 0.5) as i32;
+        let (bpm100, list) = self.finish_raw()?;
         let beats = list
             .iter()
             .map(|b| {
@@ -134,5 +142,26 @@ impl BeatAnalyzer {
             })
             .collect();
         Some(BeatGrid { bpm: bpm100, beats })
+    }
+
+    /// `Analyzer::analyze`: BPM × 100 (`BA_GetBpm`) and the analyser's beat list.
+    pub(crate) fn finish_raw(mut self) -> Option<(i32, Vec<BeatInfo>)> {
+        let rate = self.rate as i32;
+        let mut raw = std::mem::take(&mut self.sensor.beats);
+        let r = if self.varied {
+            info::analyze_varied(rate, &mut raw, self.total)?
+        } else {
+            info::analyze(rate, &mut raw, self.total)?
+        };
+        let mut bpm = r.bpm;
+        let mut list = r.beats;
+        self.envelope.analyze(bpm, &mut list, self.varied);
+        if !self.varied {
+            self.adjust.analyze(&mut bpm, &mut list);
+        }
+        if list.is_empty() {
+            return None;
+        }
+        Some((bpm.mul_add(100.0, 0.5) as i32, list))
     }
 }
