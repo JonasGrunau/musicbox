@@ -14,10 +14,10 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 mod adjust;
-mod envelope;
-mod filters;
-mod info;
-mod sensor;
+pub(crate) mod envelope;
+pub(crate) mod filters;
+pub(crate) mod info;
+pub(crate) mod sensor;
 
 /// `peakss::BeatInfo` (24 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
