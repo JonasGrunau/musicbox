@@ -171,7 +171,7 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
   - `hp_check {table, madmom, focus, focusin}`: developer checks against harness dumps.
 
 ## 8. BALib v2 beat analysis (modes 2/3)
-Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (harness outside the repo) on the 169 oracle tracks: the verdict flags and returned BPM 169/169, `getOffsetCalc` 169/169, the beat list 169/169 in mode 3 and 168/169 in mode 2 (Timelock (Red Sun, Harmonika Remix): v2's copy of the varied pipeline differs from v1's from beat 575). Model 8's 60 s window: 20/20. Not wired into `analyze()` yet; Focus's constant path and UnitBeatAdjust v2's `analyze` are next. Code: `crates/mb-analysis/src/balib2/` (`mod.rs`, `verdict.rs`, `lowband.rs`); examples `balib2_score`, `balib2_stages`, `hp_check window`.
+Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (harness outside the repo) on the 169 oracle tracks: the verdict flags and returned BPM 169/169, `getOffsetCalc` 169/169, the beat list 169/169 in mode 3 and 168/169 in mode 2 (Timelock (Red Sun, Harmonika Remix): v2's copy of the varied pipeline differs from v1's from beat 575). Model 8's 60 s window: 20/20. UnitBeatAdjust v2's `analyze` 166/166. Not wired into `analyze()` yet; Focus's constant path is next. Code: `crates/mb-analysis/src/balib2/` (`mod.rs`, `verdict.rs`, `adjust.rs`); examples `balib2_score`, `balib2_stages`, `balib2_uba`, `hp_check window`.
 
 - **Shared with v1.** The sensor, envelope and filters are instruction-identical to v1 (`beats::sensor`, `beats::envelope`, `beats::filters`); the sensor list is identical on every track.
 - **Two passes.** `BeatInfoAnalyzer::analyze` @0x101198e4c runs v1's constant path, then v1's varied (Dynamic) path, on the sensor list. It keeps two BPMs:
@@ -205,10 +205,26 @@ Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (ha
   - a scan finds where the low end comes in: a beat over 0.4 (or three over 0.2) after a rise > 0.15 starts a loud stretch; the first stretch reaching 12 loud beats wins; otherwise the first loud start, or the one after more than 32 quiet beats;
   - offset = rate·60·(index − 4)/BPM samples, at least 0.
 - **Hendou to the job.** Mode 3 then sets `SetBpmHendou(false)`; mode 2 reads `GetBpmHendou`.
+- **UnitBeatAdjust v2** (`balib2/adjust.rs`; `analyze` 166/166 against rekordbox's, output list, BPM and band checksums, on every track whose Focus reaches it in mode 3).
+  - **Setup.** `create` @0x10113aabc passes rate/4, so all filters are designed for the quarter rate. The unit keeps three bands: high (+0x70: 2 kHz high-pass, |·|, 1 kHz low-pass), low (+0x78: 100 Hz low-pass, |·|, 25 Hz low-pass) and full (+0x80: |·|, 1 kHz low-pass).
+  - **`analyze` @0x10113af38.** Beat count k: the beats of the first 15 minutes, `trunc(bpm/60 · (rate/4·900 − pos0/4) / (rate/4))` with a fused multiply-add, used only when the band reaches 15 minutes; otherwise k is the list length. It then runs `bpmAdjust(bpm, list, k)` and `beatPositionAdjust`.
+  - **`bpmAdjust` @0x10113aff8.** Two searches: the first starts at the first beat (quarter rate), the second half a beat later (`trunc(rate/4·30/bpm + 0.5)` samples added to each position).
+    - Each search steps from bpm − 0.05 in 0.05 BPM steps: up if the fraction is above .5, down if below, both ways if exactly .5. It continues while `getPeakBpm` asks for more.
+    - It then rescans once just below the whole BPM when the last result is within 0.05 % of it.
+    - The half-beat phase wins when the first phase scores under 96 % of it; every beat then moves by that half beat.
+    - `reflectBeatData` @0x10113c670 rebuilds the list on the winning grid only when the BPM changes at 0.001 resolution: positions are the grid ×4 and the tempo is 60000/BPM; bar numbers continue from the beat nearest the grid's first beat; the list is resized to the grid's length.
+  - **`getPeakBpm` @0x10113c028.** Scores 51·32 = 1632 tempos from the start BPM in steps of 6.25e-5 (fused multiply-add, kept within 70–180).
+    - Each score comes from `createBeatData` + `manageWave`: the grid runs from the start (positions `trunc(start + k·len + 0.5)`, fused) to the end of the track; the high band is summed in ±rate/4·0.05 windows around the inner beats of its first n positions; the score is the sum's peak.
+    - A MATLAB-style `findpeaks_x` @0x1011685c4 then runs over the score curve (peaks, prominences, half-prominence widths). With 21 or more peaks, any prominence beyond the tenth above 7.5 % of the best stops the search; the most prominent peak then sets the BPM, and the search continues only if more than half the peaks exceed 75 % of the best.
+    - The search also stops when a whole BPM falls within [start, start + 0.1], or when the best leaves 70.007–179.982.
+  - **`beatPositionAdjust` @0x10113b7d4.** Sums the high band around every inner beat, overall and per beat index mod 4.
+    - The overall sum's 32-sample moving average gives the rise start (`findBeatPositionForBeatSubAll`): the 8th consecutive rising sample after the last dip before the main peak, between the prominent peaks; else the sum's maximum.
+    - Each per-bar sum gives a candidate (`SubEach`) with reliability checks: a dip below 70 %, 20+ samples over a quarter of the range or a ratio ≥ 10, a slope/variance floor, and a min/max shape.
+    - The latest reliable per-bar rise replaces the overall one when it is more than 34 samples later.
+    - `offsetBeatPosition` @0x10113d304 shifts all beats by (index − w)·4 samples, drops beats before 0 and beats whose next shift would pass the end, and refills whole beat lengths at both ends; the beat length is `trunc(rate/4 · (0.004 · tempo))`, single precision.
 
 ## 9. Open
 - **Modes 2 and 3** (§ 8):
-  - UnitBeatAdjust v2's `analyze` (bpmAdjust, beatPositionAdjust, getPeakBpm, findBeatPositionForBeat*, findpeaks_x, calcAllInteg);
   - Focus's constant path;
   - the BPM-range rebuild and the job side (PQT2 type, phrase shift);
   - Timelock's varied list in mode 2.
