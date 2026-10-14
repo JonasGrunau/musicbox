@@ -127,11 +127,13 @@ fn cues_and_grid_from_the_deck() {
     wait(&mut h, "editing on", |h| h.query_by_label_contains("Editing on").is_some());
     shot(&mut h, "01-deck");
 
-    // Move the cursor by clicking the detail strip right of its centre line (it sits just above
-    // the cue row), then add a memory cue there.
-    let button = h.get_by_label("Memory Cue").rect();
-    click_at(&mut h, egui::pos2(button.left() + 700.0, button.top() - 30.0));
+    // Move the cursor by clicking the zoomed strip (the top of the deck, above the play button's
+    // row) right of its centre line, then add a memory cue there. A click on the overview would
+    // start the preview player instead.
+    let play = h.get_by_label("Play").rect();
+    click_at(&mut h, egui::pos2(play.left() + 700.0, play.top() - 70.0));
     h.run_steps(3);
+    assert!(h.query_by_label("Pause").is_none(), "moving the cursor must not start the preview player");
     click_button(&h, "Memory Cue");
     wait(&mut h, "memory cue", |_| cues(&lib, &content).len() == 1);
     let first = cues(&lib, &content);

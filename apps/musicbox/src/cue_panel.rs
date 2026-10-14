@@ -3,6 +3,7 @@
 
 use crate::actions::Action;
 use crate::waveform::{self, CueMark, HOT_CUE_COLORS, MEMORY_CUE_COLORS};
+use crate::{deck, theme};
 use mb_core::{DbId, Track};
 use mb_library::{Beat, Command, Cue, CueEdit, CueSlot, NewCue, grid};
 
@@ -91,22 +92,30 @@ pub fn controls(
         state.selected = None;
     }
 
-    ui.horizontal(|ui| {
+    let row = |ui: &mut egui::Ui, caption: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), deck::CONTROL_HEIGHT), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().interact_size.y = deck::CONTROL_HEIGHT;
+            ui.spacing_mut().button_padding.y = 5.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(CAPTION_WIDTH, deck::CONTROL_HEIGHT), egui::Sense::hover());
+            ui.painter().text(egui::pos2(rect.left(), rect.center().y), egui::Align2::LEFT_CENTER, caption.to_uppercase(), theme::semibold(10.0), theme::TEXT_MUTED);
+            add(ui);
+        });
+    };
+
+    row(ui, "Cue", &mut |ui| {
         ui.add_enabled_ui(editing, |ui| {
             if ui.button("Memory Cue").on_hover_text("Add a memory cue at the position").clicked() {
                 let cue = NewCue { slot: CueSlot::Memory, in_ms: pos, out_ms: None, color: None, color_table_index: None, comment: String::new() };
                 run(&mut actions, Command::AddCue { content: content.clone(), cue });
             }
         });
-        ui.separator();
+        theme::separator(ui);
+        ui.spacing_mut().item_spacing.x = 4.0;
         for pad in 0..PADS {
             let letter = (b'A' + pad) as char;
             let existing = cues.iter().find(|c| c.slot == CueSlot::Hot(pad));
-            let mut button = egui::Button::new(egui::RichText::new(letter.to_string()).strong()).min_size(egui::vec2(22.0, 18.0));
-            if let Some(c) = existing {
-                button = button.fill(waveform::hot_cue_color(c.color_table_index).gamma_multiply(0.6));
-            }
-            let response = ui.add(button);
+            let response = hot_cue_pad(ui, letter, existing, state.selected.as_ref());
             if response.clicked() {
                 match existing {
                     Some(c) => {
@@ -130,9 +139,11 @@ pub fn controls(
                 });
             }
         }
-        ui.separator();
+        ui.spacing_mut().item_spacing.x = 6.0;
+        theme::separator(ui);
         let current = state.selected.as_ref().and_then(|id| cues.iter().find(|c| &c.id == id));
         egui::ComboBox::from_id_salt("cue-list")
+            .width(170.0)
             .selected_text(current.map_or_else(|| format!("{} cue(s)", cues.len()), label))
             .show_ui(ui, |ui| {
                 for c in cues {
@@ -146,7 +157,7 @@ pub fn controls(
         if let Some(c) = current {
             ui.add_enabled_ui(editing, |ui| {
                 cue_colour_menu(ui, c, &mut actions);
-                ui.add(egui::TextEdit::singleline(&mut state.comment).hint_text("Comment").desired_width(120.0));
+                ui.add(egui::TextEdit::singleline(&mut state.comment).hint_text("Comment").desired_width(170.0).margin(egui::vec2(8.0, 4.0)));
                 if ui.button("Save Comment").clicked() && state.comment != c.comment {
                     actions.push(Action::Run(Command::EditCue { id: c.id.clone(), edit: CueEdit::Comment(state.comment.clone()) }));
                 }
@@ -157,7 +168,8 @@ pub fn controls(
         }
     });
 
-    ui.horizontal(|ui| {
+    ui.add_space(6.0);
+    row(ui, "Grid", &mut |ui| {
         ui.add_enabled_ui(editing && !beats.is_empty(), |ui| {
             let step = if ui.input(|i| i.modifiers.shift) { 10 } else { 1 };
             if ui.button("◀ Grid").on_hover_text("Move the grid 1 ms earlier (⇧: 10 ms)").clicked() {
@@ -171,8 +183,8 @@ pub fn controls(
             {
                 run(&mut actions, Command::SetBeatGrid { content: content.clone(), beats: grid::set_downbeat(beats, i) });
             }
-            ui.separator();
-            ui.add(egui::TextEdit::singleline(&mut state.bpm).hint_text("BPM").desired_width(56.0));
+            theme::separator(ui);
+            ui.add(egui::TextEdit::singleline(&mut state.bpm).hint_text("BPM").desired_width(56.0).margin(egui::vec2(8.0, 4.0)).horizontal_align(egui::Align::Max));
             if ui.button("Set BPM").clicked() {
                 let parsed = state.bpm.trim().replace(',', ".").parse::<f64>().ok().map(|b| (b * 100.0).round());
                 if let (Some(tempo), Some(anchor)) = (parsed, grid::nearest_beat(beats, position_ms))
@@ -195,10 +207,41 @@ pub fn controls(
             }
         });
         if let Some(b) = beats.first() {
-            ui.weak(format!("{:.2} BPM · {} beats", b.bpm(), beats.len()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(format!("{:.2} BPM  ·  {} beats", b.bpm(), beats.len())).small().color(theme::TEXT_MUTED));
+            });
         }
     });
     actions
+}
+
+/// Width of the "CUE" / "GRID" captions, so both rows start their controls at the same x.
+const CAPTION_WIDTH: f32 = 34.0;
+
+/// One hot-cue pad: filled with the cue's colour when set (dark letter), an empty tile when not;
+/// the selected cue's pad gets a white ring.
+fn hot_cue_pad(ui: &mut egui::Ui, letter: char, cue: Option<&Cue>, selected: Option<&String>) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, deck::CONTROL_HEIGHT), egui::Sense::click());
+    let text = letter.to_string();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &text));
+    let painter = ui.painter();
+    match cue {
+        Some(c) => {
+            let color = waveform::hot_cue_color(c.color_table_index);
+            let fill = if response.hovered() { color } else { color.gamma_multiply(0.85) };
+            painter.rect_filled(rect, theme::RADIUS, fill);
+            if selected == Some(&c.id) {
+                painter.rect_stroke(rect.expand(1.5), theme::RADIUS + 1, egui::Stroke::new(1.5, theme::TEXT_STRONG), egui::StrokeKind::Inside);
+            }
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, text, theme::semibold(12.5), egui::Color32::from_rgb(0x10, 0x10, 0x10));
+        }
+        None => {
+            let fill = if response.hovered() { theme::BG_HOVER } else { theme::BG_RAISED };
+            painter.rect_filled(rect, theme::RADIUS, fill);
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, text, theme::semibold(12.5), theme::TEXT_MUTED);
+        }
+    }
+    response
 }
 
 /// Colour menu of the selected cue: colour codes for hot cues, colour slots for memory cues.

@@ -111,11 +111,12 @@ pub fn show_overview(
     duration_ms: u32,
     style: Style,
     playhead_ms: Option<f64>,
+    height: f32,
 ) -> Option<f64> {
-    let desired = egui::vec2(ui.available_width(), 56.0);
+    let desired = egui::vec2(ui.available_width(), height);
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(0x12, 0x12, 0x12));
+    painter.rect_filled(rect, 3.0, crate::theme::BG_WELL);
     let mid = rect.center().y;
     let half = rect.height() / 2.0 - 2.0;
 
@@ -157,6 +158,8 @@ pub fn show_overview(
 
     if let (Some(ms), true) = (playhead_ms, duration_ms > 0) {
         let x = rect.left() + rect.width() * (ms as f32 / duration_ms as f32).clamp(0.0, 1.0);
+        // The part already played is dimmed, as on the players.
+        painter.rect_filled(egui::Rect::from_min_max(rect.min, egui::pos2(x, rect.bottom())), 0.0, egui::Color32::from_black_alpha(110));
         painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(1.5, egui::Color32::WHITE));
     }
     let clicked = response
@@ -190,11 +193,11 @@ pub fn show_overview(
 /// Zoomed strip around `center_ms` (± `half_span_ms`): PWV5 columns, beat grid (downbeats
 /// brighter), cue markers with loop spans, and the position line in the middle. A click returns
 /// the clicked position in ms.
-pub fn show_detail(ui: &mut egui::Ui, waves: &TrackWaves, cues: &[CueMark], center_ms: f64, half_span_ms: f64) -> Option<f64> {
-    let desired = egui::vec2(ui.available_width(), 44.0);
+pub fn show_detail(ui: &mut egui::Ui, waves: &TrackWaves, cues: &[CueMark], center_ms: f64, half_span_ms: f64, height: f32) -> Option<f64> {
+    let desired = egui::vec2(ui.available_width(), height);
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(0x0C, 0x0C, 0x0C));
+    painter.rect_filled(rect, 3.0, crate::theme::BG_WELL);
     let start = center_ms - half_span_ms;
     let span = 2.0 * half_span_ms;
     let x_of = |ms: f64| rect.left() + rect.width() * ((ms - start) / span) as f32;
@@ -243,6 +246,10 @@ pub fn show_detail(ui: &mut egui::Ui, waves: &TrackWaves, cues: &[CueMark], cent
     }
     let cx = rect.center().x;
     painter.line_segment([egui::pos2(cx, rect.top()), egui::pos2(cx, rect.bottom())], egui::Stroke::new(1.5, egui::Color32::WHITE));
+    for (y, dir) in [(rect.top(), 1.0), (rect.bottom(), -1.0)] {
+        let tip = vec![egui::pos2(cx - 4.0, y), egui::pos2(cx + 4.0, y), egui::pos2(cx, y + 4.0 * dir)];
+        painter.add(egui::Shape::convex_polygon(tip, egui::Color32::WHITE, egui::Stroke::NONE));
+    }
     response
         .clicked()
         .then(|| response.interact_pointer_pos())

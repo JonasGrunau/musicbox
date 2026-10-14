@@ -2,6 +2,20 @@
 
 Newest entry first. Each entry records what changed, what is verified, and the next action.
 
+## 2026-10-14 (night) — visual overhaul of the app
+| Part | State |
+|---|---|
+| Design concept | `docs/design.md`: principles, layout map, colour tokens, type scale, components, and the accessibility labels the UI tests rely on |
+| Theme | `theme.rs`: dark palette in rekordbox's tone (own values); the macOS system font (SF Pro, variable, read at run time; Hiragino as CJK fallback); denser egui style (24 px rows, 22 px controls), 10 px dialogs with shadows |
+| Icons | `icons.rs`: 17 painter-drawn icons (collection, list, folder, intelligent list, history, tag, device, xml, transport, search, lock, chevrons, app mark) |
+| Deck | `deck.rs` + `app.rs`: zoomed waveform on top; artwork, title, BPM/KEY/TIME readouts, round play button, overview with the played part dimmed and an RGB/3-band switch; captioned CUE and GRID rows with painted hot-cue pads (`cue_panel.rs`); an empty deck keeps its shape |
+| Browser | toolbar with list name, count and a pill search field; styled header; right-aligned numbers; key colours by circle-of-fifths position; artwork thumbnails; colour bar; the title column fills the width; switching lists starts at the top; search or sort changes keep the focused track in view |
+| Tree | full-width rows with icons, chevrons and track counts; captions DEVICES / BRIDGE; lock on protected devices |
+| Top and status bars | app mark, File menu, editing switch (lock pill); status message with job progress bars on the right; the last message stays visible next to a load error |
+| Tests | new `tests/ui_design.rs` renders eight review frames (`MB_UI_SHOTS=<dir>`); `ui_cues` now moves the cursor on the zoomed strip (its old click landed on the overview, which starts the preview player); `ui_cues` and `ui_design` assert that nothing plays. 15/15 UI tests pass, clippy clean |
+
+Next: the CDJ-3000 test with RBTEST (unchanged).
+
 ## 2026-10-14 (later) — M6: embeddings done; reference data for analysis modes 1–3; CUE analysis started
 | Part | State | Commits |
 |---|---|---|

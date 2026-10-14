@@ -22,6 +22,8 @@ The full plan is in `docs/plan.md`; progress and handoffs are in `docs/progress.
 ## UI testing
 - Drive the app only through the headless harness (`apps/musicbox/tests/ui_*.rs`, egui_kittest): click by label, type, drag/drop, render off-screen. `MB_UI_SHOTS=<dir> cargo test -p musicbox` saves the renders.
 - **Never** post OS-level mouse/keyboard events or take screen-region screenshots; they steal the user's input and can hit other apps.
+- Look and layout: `docs/design.md` (tokens in `apps/musicbox/src/theme.rs`). Review renders: `MB_UI_SHOTS=<dir> cargo test -p musicbox --test ui_design`.
+- Tests must not click the overview waveform or the play button: both start the preview player, which plays audio on the machine.
 
 ## Layout
 - `crates/mb-*` — libraries; see the architecture section of the plan.

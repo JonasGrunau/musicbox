@@ -5,6 +5,8 @@
 use crate::actions::{Action, TrackDrag};
 use crate::app::{LibraryRef, List, Source};
 use crate::devices::{DeviceState, Devices};
+use crate::icons::{self, Icon};
+use crate::theme;
 use mb_core::{DbId, LibrarySnapshot, PlaylistKind, PlaylistNode};
 use mb_library::{Command, NodeKind};
 
@@ -20,68 +22,163 @@ pub fn show(
     let targets: Vec<(usize, String, Option<String>)> =
         devices.list.iter().enumerate().map(|(i, d)| (i, d.name.clone(), d.write_refusal.clone())).collect();
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        let mut ctx = Ctx { targets: &targets, library_ref: LibraryRef::Local, library, source, editing, device: None, import_from: None, actions: &mut actions };
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.add_space(6.0);
+        let mut ctx = Ctx { targets: &targets, library_ref: LibraryRef::Local, library, source, editing, device: None, import_from: None, actions: &mut actions, depth: 0 };
         library_lists(ui, "Collection", &mut ctx);
         if !devices.list.is_empty() {
-            ui.add_space(8.0);
-            ui.weak("Devices");
+            caption_row(ui, "Devices");
         }
         for (i, device) in devices.list.iter().enumerate() {
-            let title = if device.write_refusal.is_some() { format!("{} (protected)", device.name) } else { device.name.clone() };
-            let response = egui::CollapsingHeader::new(title)
-                .id_salt(("device", &device.root))
-                .default_open(true)
-                .show(ui, |ui| match &device.state {
-                    DeviceState::Loading(_) => {
-                        ui.spinner();
-                    }
-                    DeviceState::Failed(e) => {
-                        ui.weak(e);
-                    }
-                    DeviceState::Ready(snapshot) => {
-                        let mut ctx = Ctx {
-                            targets: &[],
-                            library_ref: LibraryRef::Device(i),
-                            library: snapshot,
-                            source: &mut *source,
-                            editing: false,
-                            device: device.write_refusal.is_none().then_some(i),
-                            import_from: Some(i),
-                            actions: &mut actions,
-                        };
-                        library_lists(ui, "All Tracks", &mut ctx);
-                    }
-                });
-            response.header_response.context_menu(|ui| {
+            let id = egui::Id::new(("device", &device.root));
+            let mut open = ui.data_mut(|d| *d.get_temp_mut_or(id, true));
+            let row = Row { depth: 0, icon: Icon::Device, label: &device.name, selected: false, open: Some(open), count: None };
+            let response = row.show(ui);
+            if device.write_refusal.is_some() {
+                let lock = egui::Rect::from_center_size(egui::pos2(response.rect.right() - 16.0, response.rect.center().y), egui::vec2(12.0, 12.0));
+                icons::paint(ui.painter(), lock, Icon::Lock, theme::TEXT_MUTED);
+            }
+            let response = match &device.write_refusal {
+                Some(reason) => response.on_hover_text(reason),
+                None => response,
+            };
+            if response.clicked() {
+                open = !open;
+                ui.data_mut(|d| d.insert_temp(id, open));
+            }
+            response.context_menu(|ui| {
                 if ui.button("My Settings…").clicked() {
                     actions.push(Action::AskMySettings { device: i });
                     ui.close();
                 }
             });
-        }
-        // rekordbox's bridge view of a rekordbox.xml ("rekordbox xml").
-        if let Some((path, snapshot)) = xml {
-            ui.add_space(8.0);
-            egui::CollapsingHeader::new("rekordbox xml")
-                .id_salt("rekordbox xml")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.weak(path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            if !open {
+                continue;
+            }
+            match &device.state {
+                DeviceState::Loading(_) => {
+                    ui.horizontal(|ui| {
+                        ui.add_space(INDENT + 22.0);
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.weak("Reading…");
+                    });
+                }
+                DeviceState::Failed(e) => {
+                    ui.horizontal(|ui| {
+                        ui.add_space(INDENT + 22.0);
+                        ui.label(egui::RichText::new(e).color(theme::WARN).small());
+                    });
+                }
+                DeviceState::Ready(snapshot) => {
                     let mut ctx = Ctx {
                         targets: &[],
-                        library_ref: LibraryRef::Xml,
+                        library_ref: LibraryRef::Device(i),
                         library: snapshot,
                         source: &mut *source,
                         editing: false,
-                        device: None,
-                        import_from: None,
+                        device: device.write_refusal.is_none().then_some(i),
+                        import_from: Some(i),
                         actions: &mut actions,
+                        depth: 1,
                     };
                     library_lists(ui, "All Tracks", &mut ctx);
-                });
+                }
+            }
         }
+        // rekordbox's bridge view of a rekordbox.xml ("rekordbox xml").
+        if let Some((path, snapshot)) = xml {
+            caption_row(ui, "Bridge");
+            let id = egui::Id::new("rekordbox xml");
+            let mut open = ui.data_mut(|d| *d.get_temp_mut_or(id, true));
+            let response = Row { depth: 0, icon: Icon::Xml, label: "rekordbox xml", selected: false, open: Some(open), count: None }.show(ui);
+            let response = response.on_hover_text(path.display().to_string());
+            if response.clicked() {
+                open = !open;
+                ui.data_mut(|d| d.insert_temp(id, open));
+            }
+            if open {
+                let mut ctx = Ctx {
+                    targets: &[],
+                    library_ref: LibraryRef::Xml,
+                    library: snapshot,
+                    source: &mut *source,
+                    editing: false,
+                    device: None,
+                    import_from: None,
+                    actions: &mut actions,
+                    depth: 1,
+                };
+                library_lists(ui, "All Tracks", &mut ctx);
+            }
+        }
+        ui.add_space(8.0);
     });
     actions
+}
+
+/// Horizontal step per tree level.
+const INDENT: f32 = 14.0;
+
+/// One tree row: full width, a chevron when it opens and closes, an icon, the name and a
+/// right-aligned count. Selected rows get the selection fill and an accent edge.
+struct Row<'a> {
+    depth: usize,
+    icon: Icon,
+    label: &'a str,
+    selected: bool,
+    /// `Some(open)` for rows that expand.
+    open: Option<bool>,
+    count: Option<usize>,
+}
+
+impl Row<'_> {
+    fn show(self, ui: &mut egui::Ui) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::ROW_HEIGHT), egui::Sense::click());
+        let kind = if self.open.is_some() { egui::WidgetType::CollapsingHeader } else { egui::WidgetType::SelectableLabel };
+        response.widget_info(|| egui::WidgetInfo::selected(kind, ui.is_enabled(), self.selected, self.label));
+        if !ui.is_rect_visible(rect) {
+            return response;
+        }
+        let painter = ui.painter();
+        if self.selected {
+            painter.rect_filled(rect, 0.0, theme::SELECTION);
+            painter.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())), 0.0, theme::ACCENT);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 0.0, theme::ROW_HOVER);
+        }
+        let x = rect.left() + 10.0 + self.depth as f32 * INDENT;
+        let cy = rect.center().y;
+        if let Some(open) = self.open {
+            let chevron = egui::Rect::from_center_size(egui::pos2(x + 5.0, cy), egui::vec2(10.0, 10.0));
+            icons::paint(painter, chevron, if open { Icon::ChevronDown } else { Icon::ChevronRight }, theme::TEXT_MUTED);
+        }
+        let icon_rect = egui::Rect::from_center_size(egui::pos2(x + 22.0, cy), egui::vec2(14.0, 14.0));
+        let strong = self.selected || response.hovered();
+        icons::paint(painter, icon_rect, self.icon, if self.selected { theme::ACCENT_HOVER } else { theme::TEXT_DIM });
+        let text_left = icon_rect.right() + 8.0;
+        let mut right = rect.right() - 10.0;
+        if let Some(n) = self.count {
+            let galley = painter.layout_no_wrap(n.to_string(), egui::FontId::proportional(11.0), theme::TEXT_MUTED);
+            right -= galley.size().x;
+            painter.galley(egui::pos2(right, cy - galley.size().y / 2.0), galley, theme::TEXT_MUTED);
+            right -= 8.0;
+        }
+        let color = if strong { theme::TEXT_STRONG } else { theme::TEXT };
+        let text = egui::WidgetText::from(egui::RichText::new(self.label).color(color));
+        let galley = text.into_galley(ui, Some(egui::TextWrapMode::Truncate), (right - text_left).max(0.0), egui::TextStyle::Body);
+        ui.painter().galley(egui::pos2(text_left, cy - galley.size().y / 2.0), galley, color);
+        response
+    }
+}
+
+/// Section caption between libraries ("DEVICES").
+fn caption_row(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(14.0);
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.label(theme::caption(text));
+    });
+    ui.add_space(4.0);
 }
 
 /// "Import to Collection" on a rekordbox xml list or folder.
@@ -107,6 +204,8 @@ struct Ctx<'a> {
     /// reading only, so protected devices too).
     import_from: Option<usize>,
     actions: &'a mut Vec<Action>,
+    /// Tree level of this library's top rows.
+    depth: usize,
 }
 
 /// Which list tree of a library a section shows.
@@ -134,6 +233,24 @@ impl Section {
         }
     }
 
+    fn icon(self) -> Icon {
+        match self {
+            Self::Playlists => Icon::Playlist,
+            Self::Histories => Icon::History,
+            Self::MyTags => Icon::Tag,
+        }
+    }
+
+    /// Track count of one list.
+    fn count(self, library: &LibrarySnapshot, id: &DbId) -> Option<usize> {
+        let entries = match self {
+            Self::Playlists => &library.playlist_entries,
+            Self::Histories => &library.history_entries,
+            Self::MyTags => &library.my_tag_entries,
+        };
+        entries.get(id).map(Vec::len)
+    }
+
     fn title(self) -> &'static str {
         match self {
             Self::Playlists => "Playlists",
@@ -145,7 +262,8 @@ impl Section {
 
 fn library_lists(ui: &mut egui::Ui, label: &str, ctx: &mut Ctx) {
     let collection = Source { library: ctx.library_ref, list: List::Collection };
-    if ui.selectable_label(*ctx.source == collection, label).clicked() {
+    let row = Row { depth: ctx.depth, icon: Icon::Collection, label, selected: *ctx.source == collection, open: None, count: Some(ctx.library.tracks.len()) };
+    if row.show(ui).clicked() {
         *ctx.source = collection;
     }
     for section in [Section::Playlists, Section::Histories, Section::MyTags] {
@@ -153,19 +271,25 @@ fn library_lists(ui: &mut egui::Ui, label: &str, ctx: &mut Ctx) {
         if section.nodes(ctx.library).is_empty() && !editable {
             continue;
         }
-        let header = egui::CollapsingHeader::new(section.title())
-            .id_salt((section.title(), ctx.library_ref))
-            .default_open(section == Section::Playlists)
-            .show(ui, |ui| children(ui, section, None, ctx));
+        let id = egui::Id::new((section.title(), ctx.library_ref));
+        let mut open = ui.data_mut(|d| *d.get_temp_mut_or(id, section == Section::Playlists));
+        let header = Row { depth: ctx.depth, icon: section.icon(), label: section.title(), selected: false, open: Some(open), count: None }.show(ui);
+        if header.clicked() {
+            open = !open;
+            ui.data_mut(|d| d.insert_temp(id, open));
+        }
         if editable {
-            header.header_response.context_menu(|ui| create_menu(ui, None, ctx.actions));
+            header.context_menu(|ui| create_menu(ui, None, ctx.actions));
         } else if let Some(device) = ctx.import_from.filter(|_| section == Section::Histories) {
-            header.header_response.context_menu(|ui| {
+            header.context_menu(|ui| {
                 if ui.button("Import Histories").clicked() {
                     ctx.actions.push(Action::ImportHistories { device });
                     ui.close();
                 }
             });
+        }
+        if open {
+            children(ui, section, None, ctx.depth + 1, ctx);
         }
     }
 }
@@ -233,27 +357,40 @@ fn sorted_children<'a>(nodes: &'a [PlaylistNode], parent: Option<&DbId>) -> Vec<
     out
 }
 
-fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, ctx: &mut Ctx) {
+fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, depth: usize, ctx: &mut Ctx) {
     let editable = ctx.editing && section == Section::Playlists;
     for node in sorted_children(section.nodes(ctx.library), parent) {
         match node.kind {
             PlaylistKind::Folder => {
-                let header = egui::CollapsingHeader::new(&node.name)
-                    .id_salt((section.title(), ctx.library_ref, &node.id.0))
-                    .show(ui, |ui| children(ui, section, Some(&node.id), ctx));
+                let id = egui::Id::new((section.title(), ctx.library_ref, &node.id.0));
+                let mut open = ui.data_mut(|d| *d.get_temp_mut_or(id, false));
+                let header = Row { depth, icon: Icon::Folder, label: &node.name, selected: false, open: Some(open), count: None }.show(ui);
+                if header.clicked() {
+                    open = !open;
+                    ui.data_mut(|d| d.insert_temp(id, open));
+                }
                 if editable {
-                    header.header_response.context_menu(|ui| node_menu(ui, node, ctx.actions));
+                    header.context_menu(|ui| node_menu(ui, node, ctx.actions));
                 } else if ctx.library_ref == LibraryRef::Xml {
-                    header.header_response.context_menu(|ui| xml_menu(ui, node, ctx.actions));
+                    header.context_menu(|ui| xml_menu(ui, node, ctx.actions));
                 } else if let Some(device) = ctx.device.filter(|_| section == Section::Playlists) {
                     let path = name_path(section.nodes(ctx.library), node);
                     let import_from = ctx.import_from.unwrap_or(device);
-                    header.header_response.context_menu(|ui| device_menu(ui, import_from, Some(device), path, false, ctx.actions));
+                    header.context_menu(|ui| device_menu(ui, import_from, Some(device), path, false, ctx.actions));
+                }
+                if open {
+                    children(ui, section, Some(&node.id), depth + 1, ctx);
                 }
             }
             PlaylistKind::Playlist | PlaylistKind::Smart => {
                 let this = Source { library: ctx.library_ref, list: section.list(node.id.clone()) };
-                let response = ui.selectable_label(*ctx.source == this, &node.name);
+                let icon = match (section, node.kind) {
+                    (_, PlaylistKind::Smart) => Icon::Smart,
+                    (Section::Playlists, _) => Icon::Playlist,
+                    (other, _) => other.icon(),
+                };
+                let count = section.count(ctx.library, &node.id);
+                let response = Row { depth, icon, label: &node.name, selected: *ctx.source == this, open: None, count }.show(ui);
                 if response.clicked() {
                     *ctx.source = this;
                 }

@@ -48,11 +48,12 @@ impl MySettingsDialog {
                     (Group::Mixer, "MIXER"),
                     (Group::Device, "DJ SYSTEM"),
                 ] {
-                    ui.add_space(4.0);
-                    ui.strong(title);
+                    ui.add_space(10.0);
+                    ui.label(crate::theme::caption(title));
+                    ui.add_space(2.0);
                     egui::Grid::new(("mysettings", title))
                         .num_columns(2)
-                        .spacing([16.0, 4.0])
+                        .spacing([24.0, 6.0])
                         .show(ui, |ui| {
                             for field in FIELDS.iter().filter(|f| f.group == group) {
                                 ui.label(field.label);

@@ -157,8 +157,9 @@ impl SmartEditor {
     pub fn show(&mut self, ui: &mut egui::Ui, my_tags: &[PlaylistNode]) {
         ui.horizontal(|ui| {
             ui.label("List Name");
-            ui.text_edit_singleline(&mut self.name);
+            ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(280.0).margin(egui::vec2(8.0, 4.0)));
         });
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label("Match");
             egui::ComboBox::from_id_salt("smart-match")
@@ -202,6 +203,7 @@ impl SmartEditor {
         if let Some(i) = remove {
             self.rows.remove(i);
         }
+        ui.add_space(4.0);
         if ui.button("Add condition").clicked() {
             self.rows.push(Row::new(1));
         }
@@ -212,7 +214,7 @@ fn value_fields(ui: &mut egui::Ui, i: usize, row: &mut Row, tags: &[&PlaylistNod
     let width = 120.0;
     match row.kind() {
         ValueKind::Text | ValueKind::Number => {
-            ui.add(egui::TextEdit::singleline(&mut row.left).desired_width(width).id_salt(("smart-left", i)));
+            ui.add(egui::TextEdit::singleline(&mut row.left).desired_width(width).margin(egui::vec2(6.0, 3.0)).id_salt(("smart-left", i)));
         }
         ValueKind::Date => {
             if row.operator == op::IN_LAST || row.operator == op::NOT_IN_LAST {
@@ -224,7 +226,7 @@ fn value_fields(ui: &mut egui::Ui, i: usize, row: &mut Row, tags: &[&PlaylistNod
                         ui.selectable_value(&mut row.unit, "month".to_owned(), "month(s)");
                     });
             } else {
-                ui.add(egui::TextEdit::singleline(&mut row.left).desired_width(width).hint_text("YYYY-MM-DD").id_salt(("smart-left", i)));
+                ui.add(egui::TextEdit::singleline(&mut row.left).desired_width(width).margin(egui::vec2(6.0, 3.0)).hint_text("YYYY-MM-DD").id_salt(("smart-left", i)));
             }
         }
         ValueKind::MyTag => {
@@ -246,7 +248,7 @@ fn value_fields(ui: &mut egui::Ui, i: usize, row: &mut Row, tags: &[&PlaylistNod
     }
     if row.operator == op::IN_RANGE {
         ui.label("to");
-        ui.add(egui::TextEdit::singleline(&mut row.right).desired_width(width).id_salt(("smart-right", i)));
+        ui.add(egui::TextEdit::singleline(&mut row.right).desired_width(width).margin(egui::vec2(6.0, 3.0)).id_salt(("smart-right", i)));
     }
 }
 

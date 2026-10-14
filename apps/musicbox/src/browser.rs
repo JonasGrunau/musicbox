@@ -2,6 +2,7 @@
 
 use crate::actions::{Action, TrackDrag};
 use crate::app::{LibraryRef, List, Source};
+use crate::icons::{self, Icon};
 use crate::theme;
 use egui_extras::{Column, TableBuilder};
 use mb_core::key::{KeyNotation, display as key_display, wheel_index};
@@ -26,23 +27,47 @@ pub enum Col {
     Bitrate,
     Kind,
     Color,
+    Artwork,
 }
 
 const COLUMNS: &[(Col, &str, f32)] = &[
-    (Col::Index, "#", 40.0),
-    (Col::Color, "", 18.0),
+    (Col::Color, "", 6.0),
+    (Col::Index, "#", 30.0),
+    (Col::Artwork, "", 18.0),
     (Col::Title, "Title", 260.0),
-    (Col::Artist, "Artist", 180.0),
-    (Col::Album, "Album", 160.0),
-    (Col::Genre, "Genre", 110.0),
-    (Col::Bpm, "BPM", 56.0),
-    (Col::Key, "Key", 48.0),
-    (Col::Time, "Time", 52.0),
-    (Col::Rating, "Rating", 70.0),
-    (Col::DateAdded, "Date Added", 90.0),
+    (Col::Artist, "Artist", 150.0),
+    (Col::Album, "Album", 120.0),
+    (Col::Genre, "Genre", 84.0),
+    (Col::Bpm, "BPM", 54.0),
+    (Col::Key, "Key", 40.0),
+    (Col::Time, "Time", 42.0),
+    (Col::Rating, "Rating", 64.0),
+    (Col::DateAdded, "Date Added", 78.0),
     (Col::Bitrate, "Bitrate", 70.0),
-    (Col::Kind, "Kind", 50.0),
+    (Col::Kind, "Kind", 40.0),
 ];
+
+/// Gap between columns.
+const COLUMN_GAP: f32 = 8.0;
+/// Title width the narrow-browser scaling aims to keep.
+const TITLE_COMFORT: f32 = 220.0;
+
+impl Col {
+    /// Numbers line up on the right, like the players' lists.
+    fn right_aligned(self) -> bool {
+        matches!(self, Col::Index | Col::Bpm | Col::Time | Col::Bitrate)
+    }
+
+    /// Text columns that start narrower in a narrow browser.
+    fn shrinks(self) -> bool {
+        matches!(self, Col::Artist | Col::Album | Col::Genre)
+    }
+
+    /// Columns with no text of their own (painted cells) do not sort or resize by a label.
+    fn painted(self) -> bool {
+        matches!(self, Col::Color | Col::Artwork)
+    }
+}
 
 pub struct State {
     pub search: String,
@@ -62,6 +87,10 @@ pub struct State {
     anchor: Option<usize>,
     /// For playlist views: position of each displayed row within the playlist's entries.
     entry_pos: Vec<Option<usize>>,
+    /// The rows were re-sorted or re-filtered: bring the focused track back into view once.
+    reveal_selected: bool,
+    /// Another list is shown: start at its top.
+    scroll_to_top: bool,
 }
 
 impl Default for State {
@@ -77,6 +106,8 @@ impl Default for State {
             selection: BTreeSet::new(),
             anchor: None,
             entry_pos: Vec::new(),
+            reveal_selected: false,
+            scroll_to_top: false,
         }
     }
 }
@@ -96,7 +127,10 @@ impl State {
         if self.built_for.as_ref() == Some(&key) {
             return;
         }
-        if self.built_for.as_ref().is_none_or(|(s, .., ptr, _)| s != source || *ptr != snapshot) {
+        let same_list = self.built_for.as_ref().is_some_and(|(s, .., ptr, _)| s == source && *ptr == snapshot);
+        self.reveal_selected = same_list && self.selected.is_some_and(|(l, _)| l == source.library);
+        self.scroll_to_top = self.built_for.as_ref().is_some_and(|(s, ..)| s != source);
+        if !same_list {
             self.selection.clear();
             self.anchor = None;
             if self.selected.is_some_and(|(l, _)| l == source.library) {
@@ -173,6 +207,7 @@ fn compare(a: &Track, b: &Track, col: Col) -> Ordering {
         Col::Bitrate => a.bitrate.cmp(&b.bitrate),
         Col::Kind => a.file_type.label().cmp(b.file_type.label()),
         Col::Color => a.color.cmp(&b.color),
+        Col::Artwork => a.artwork_path.is_some().cmp(&b.artwork_path.is_some()),
     }
 }
 
@@ -186,7 +221,7 @@ fn cell_text(t: &Track, col: Col, index: usize, notation: KeyNotation) -> String
         Col::Bpm => t.bpm().map(|b| format!("{b:.2}")).unwrap_or_default(),
         Col::Key => key_display(&t.key, notation),
         Col::Time => t.length_seconds.map(|s| format!("{}:{:02}", s / 60, s % 60)).unwrap_or_default(),
-        Col::Rating | Col::Color => String::new(),
+        Col::Rating | Col::Color | Col::Artwork => String::new(),
         Col::DateAdded => t.date_added.clone(),
         Col::Bitrate => t.bitrate.map(|b| format!("{b} kbps")).unwrap_or_default(),
         Col::Kind => t.file_type.label().to_owned(),
@@ -200,23 +235,102 @@ pub struct EditCtx<'a> {
     pub playlists: &'a [PlaylistNode],
 }
 
+/// What the table lists, for the toolbar: the collection or the list's name.
+fn list_title(library: &LibrarySnapshot, source: &Source) -> String {
+    let name = |nodes: &[PlaylistNode], id: &DbId| nodes.iter().find(|n| &n.id == id).map(|n| n.name.clone());
+    match &source.list {
+        List::Collection if source.library == LibraryRef::Local => Some("Collection".to_owned()),
+        List::Collection => Some("All Tracks".to_owned()),
+        List::Playlist(id) => name(&library.playlists, id),
+        List::History(id) => name(&library.histories, id),
+        List::MyTag(id) => name(&library.my_tags, id),
+    }
+    .unwrap_or_default()
+}
+
+/// The bar above the table: list name and count on the left, search on the right.
+fn toolbar(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state: &mut State) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, theme::BG_DECK);
+    // Painted, not labels: the tree row already carries the list's name for accessibility.
+    let painter = ui.painter();
+    let title = painter.layout_no_wrap(list_title(library, source), theme::semibold(15.0), theme::TEXT_STRONG);
+    let count = state.rows.len();
+    let count = painter.layout_no_wrap(format!("{count} {}", if count == 1 { "track" } else { "tracks" }), egui::FontId::proportional(13.0), theme::TEXT_MUTED);
+    let left = rect.left() + 14.0;
+    let baseline_gap = title.size().y - count.size().y;
+    painter.galley(egui::pos2(left, rect.center().y - title.size().y / 2.0), title.clone(), theme::TEXT_STRONG);
+    painter.galley(egui::pos2(left + title.size().x + 8.0, rect.center().y - title.size().y / 2.0 + baseline_gap * 0.8), count, theme::TEXT_MUTED);
+    let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(14.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    bar.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| search_field(ui, &mut state.search));
+}
+
+/// Rounded search field with a magnifier, and a clear button while it has text.
+fn search_field(ui: &mut egui::Ui, search: &mut String) {
+    let width = 260.0_f32.min(ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
+    let focused_id = ui.id().with("search");
+    let focused = ui.memory(|m| m.has_focus(focused_id));
+    ui.painter().rect(
+        rect,
+        14.0,
+        theme::BG_WELL,
+        egui::Stroke::new(1.0, if focused { theme::ACCENT } else { theme::LINE }),
+        egui::StrokeKind::Inside,
+    );
+    icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(rect.left() + 16.0, rect.center().y), egui::vec2(13.0, 13.0)), Icon::Search, theme::TEXT_MUTED);
+    let clear = !search.is_empty();
+    let text_rect = egui::Rect::from_min_max(egui::pos2(rect.left() + 28.0, rect.top()), egui::pos2(rect.right() - if clear { 28.0 } else { 12.0 }, rect.bottom()));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    child.add(
+        egui::TextEdit::singleline(search)
+            .id(focused_id)
+            .hint_text("Search")
+            .frame(egui::Frame::NONE)
+            .background_color(egui::Color32::TRANSPARENT)
+            .desired_width(text_rect.width())
+            .vertical_align(egui::Align::Center),
+    );
+    if clear {
+        let button = egui::Rect::from_center_size(egui::pos2(rect.right() - 15.0, rect.center().y), egui::vec2(20.0, 20.0));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(button));
+        if icons::button(&mut child, Icon::Close, 20.0, theme::TEXT_DIM, "Clear search").clicked() {
+            search.clear();
+        }
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state: &mut State, edit: &EditCtx) -> Vec<Action> {
     let mut actions = Vec::new();
     let editable = edit.enabled && source.library == LibraryRef::Local;
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut state.search)
-                .hint_text("Search")
-                .desired_width(260.0),
-        );
-        if !state.search.is_empty() && ui.small_button("✕").clicked() {
-            state.search.clear();
-        }
-    });
-    ui.add_space(4.0);
     state.rebuild(library, source);
+    toolbar(ui, library, source, state);
+    state.rebuild(library, source);
+    ui.spacing_mut().item_spacing = egui::vec2(COLUMN_GAP, 0.0);
+    // Column edges show only while hovered (resize handle); rows hover in a quiet tint.
+    ui.visuals_mut().widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
+    ui.visuals_mut().widgets.hovered.bg_fill = theme::ROW_HOVER;
+    ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::new(1.0, theme::LINE);
 
-    let row_height = 20.0;
+    let row_height = theme::ROW_HEIGHT;
+    let header_height = 28.0;
+    let header_top = ui.cursor().top();
+    ui.painter().rect_filled(
+        egui::Rect::from_min_size(egui::pos2(ui.max_rect().left(), header_top), egui::vec2(ui.max_rect().width(), header_height)),
+        0.0,
+        theme::BG_BAR,
+    );
+    ui.painter().hline(ui.max_rect().x_range(), header_top + header_height - 0.5, egui::Stroke::new(1.0, theme::SEAM));
+    // The title fills what the other columns leave. Artist, album and genre start narrower when
+    // the browser is narrow (first layout only; egui remembers widths the user drags).
+    let spacing = COLUMN_GAP * (COLUMNS.len() - 1) as f32;
+    let fixed: f32 = COLUMNS.iter().filter(|(c, ..)| !c.shrinks() && *c != Col::Title).map(|(_, _, w)| w).sum();
+    let flexible: f32 = COLUMNS.iter().filter(|(c, ..)| c.shrinks()).map(|(_, _, w)| w).sum();
+    let room = ui.available_width() - fixed - spacing - 12.0 - TITLE_COMFORT;
+    let scale = (room / flexible).clamp(0.6, 1.0);
+    let reveal = std::mem::take(&mut state.reveal_selected)
+        .then(|| state.selected.and_then(|(_, i)| state.rows.iter().position(|&r| r == i)))
+        .flatten();
     let mut table = TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
@@ -224,21 +338,41 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .min_scrolled_height(0.0)
         .auto_shrink(false);
-    for (_, _, width) in COLUMNS {
-        table = table.column(Column::initial(*width).at_least(24.0).clip(true));
+    if let Some(row) = reveal {
+        table = table.scroll_to_row(row, Some(egui::Align::Center));
+    } else if std::mem::take(&mut state.scroll_to_top) {
+        table = table.vertical_scroll_offset(0.0);
+    }
+    for (col, _, width) in COLUMNS {
+        table = table.column(match col {
+            Col::Title => Column::remainder().at_least(140.0).clip(true),
+            c if c.painted() => Column::exact(*width),
+            c if c.shrinks() => Column::initial((width * scale).round()).at_least(24.0).clip(true),
+            _ => Column::initial(*width).at_least(24.0).clip(true),
+        });
     }
     let mut clicked_header = None;
     table
-        .header(row_height, |mut header| {
+        .header(header_height, |mut header| {
             for (col, label, _) in COLUMNS {
                 header.col(|ui| {
-                    let text = egui::RichText::new(*label).color(theme::TEXT_HEADER);
-                    if ui.add(egui::Label::new(text).sense(egui::Sense::click())).clicked() {
-                        clicked_header = Some(*col);
+                    let edge = ui.max_rect().right() + 5.0;
+                    let y = ui.max_rect().center().y;
+                    if !col.painted() {
+                        ui.painter().vline(edge, (y - 7.0)..=(y + 7.0), egui::Stroke::new(1.0, theme::LINE));
                     }
-                    if state.sort == *col && *col != Col::Index {
-                        sort_arrow(ui, state.ascending);
-                    }
+                    let layout = if col.right_aligned() { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) };
+                    ui.with_layout(layout, |ui| {
+                        let sorted = state.sort == *col && *col != Col::Index;
+                        let color = if sorted { theme::TEXT_STRONG } else { theme::TEXT_HEADER };
+                        let text = egui::RichText::new(*label).font(theme::medium(11.5)).color(color);
+                        if ui.add(egui::Label::new(text).sense(egui::Sense::click()).selectable(false)).clicked() {
+                            clicked_header = Some(*col);
+                        }
+                        if sorted {
+                            sort_arrow(ui, state.ascending);
+                        }
+                    });
                 });
             }
         })
@@ -252,9 +386,23 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                 for (col, _, _) in COLUMNS {
                     row.col(|ui| match col {
                         Col::Rating => stars(ui, track.rating),
-                        Col::Color => color_dot(ui, track.color),
+                        Col::Color => color_bar(ui, track.color),
+                        Col::Artwork => thumbnail(ui, track.artwork_path.as_deref()),
                         _ => {
-                            ui.add(egui::Label::new(cell_text(track, *col, display_index, state.key_notation)).truncate().selectable(false));
+                            let color = match col {
+                                _ if is_selected => theme::TEXT_STRONG,
+                                Col::Title => theme::TEXT,
+                                Col::Key => theme::key_color(&track.key),
+                                Col::Index => theme::TEXT_MUTED,
+                                _ => theme::TEXT_DIM,
+                            };
+                            let text = egui::RichText::new(cell_text(track, *col, display_index, state.key_notation)).color(color);
+                            let label = egui::Label::new(text).truncate().selectable(false);
+                            if col.right_aligned() {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.add(label));
+                            } else {
+                                ui.add(label);
+                            }
                         }
                     });
                 }
@@ -298,7 +446,12 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                 });
             });
         });
-    if let Some(col) = clicked_header {
+    if state.rows.is_empty() {
+        let message = if state.search.is_empty() { "No tracks".to_owned() } else { format!("No tracks match \u{201c}{}\u{201d}", state.search) };
+        let rect = egui::Rect::from_min_size(egui::pos2(ui.max_rect().left(), header_top + header_height + 40.0), egui::vec2(ui.max_rect().width(), 20.0));
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, message, egui::FontId::proportional(13.0), theme::TEXT_MUTED);
+    }
+    if let Some(col) = clicked_header.filter(|c| !c.painted()) {
         if state.sort == col {
             state.ascending = !state.ascending;
         } else {
@@ -449,10 +602,25 @@ fn star(painter: &egui::Painter, c: egui::Pos2, r: f32, color: egui::Color32) {
     }
 }
 
-/// rekordbox track colour slot (1 Pink … 8 Purple, `djmdColor`) as a dot.
-fn color_dot(ui: &mut egui::Ui, color: Option<u8>) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+/// rekordbox track colour slot (1 Pink … 8 Purple, `djmdColor`) as a bar at the row's start.
+fn color_bar(ui: &mut egui::Ui, color: Option<u8>) {
+    let rect = ui.max_rect();
+    ui.allocate_exact_size(egui::vec2(rect.width(), 1.0), egui::Sense::hover());
     if let Some(c) = color.and_then(theme::track_color) {
-        ui.painter().circle_filled(rect.center(), 4.0, c);
+        let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(4.0, rect.height() - 6.0));
+        ui.painter().rect_filled(bar, 2.0, c);
+    }
+}
+
+/// The track's small artwork (`_s`, 80 px), or an empty tile.
+fn thumbnail(ui: &mut egui::Ui, path: Option<&std::path::Path>) {
+    let size = egui::vec2(18.0, 18.0);
+    match path.filter(|p| p.is_file()) {
+        Some(p) => {
+            ui.add(egui::Image::new(format!("file://{}", p.display())).fit_to_exact_size(size).corner_radius(2.0).show_loading_spinner(false));
+        }
+        None => {
+            ui.allocate_exact_size(size, egui::Sense::hover());
+        }
     }
 }

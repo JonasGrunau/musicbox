@@ -4,7 +4,7 @@ use crate::editor::{Editor, Reply, Request};
 use crate::device_remove::{self, RemoveJob};
 use crate::export::{self, ExportJob};
 use crate::library::{LoadResult, spawn_load};
-use crate::{Args, browser, cue_panel, tree, waveform};
+use crate::{Args, browser, cue_panel, deck, icons, theme, tree, waveform};
 use mb_library::{Command, NodeKind};
 use mb_core::{DbId, LibrarySnapshot};
 use std::collections::HashMap;
@@ -216,74 +216,92 @@ impl App {
         }
     }
 
-    /// Selected-track header: title/artist, the overview and detail waveforms, and for collection
-    /// tracks the cue and grid controls (`cue_panel`).
+    /// The player area: the zoomed waveform, artwork, title, readouts and the overview, and for
+    /// collection tracks the cue and grid controls (`cue_panel`). Layout: docs/design.md § Deck.
     fn deck(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
         let selected = self.browser.selected;
         let track = selected.and_then(|(library, i)| self.snapshot(library).tracks.get(i)).cloned();
-        let Some(track) = track else {
-            ui.centered_and_justified(|ui| ui.weak("No track selected"));
-            return Vec::new();
-        };
         let local = selected.is_some_and(|(library, _)| library == LibraryRef::Local);
         let editing = self.editing();
-        self.deck_edit.follow(&track.id, track.bpm());
-        let waves = track.analysis_path.as_ref().and_then(|path| {
+        if let Some(t) = &track {
+            self.deck_edit.follow(&t.id, t.bpm());
+        }
+        let waves = track.as_ref().and_then(|t| t.analysis_path.as_ref()).and_then(|path| {
             self.waves.entry(path.clone()).or_insert_with(|| waveform::load(path)).as_ref()
         });
         let wave_style = &mut self.wave_style;
-        let player = self.player.as_ref().filter(|(p, _)| *p == track.path).map(|(_, pl)| pl);
+        let player = track.as_ref().and_then(|t| self.player.as_ref().filter(|(p, _)| *p == t.path)).map(|(_, pl)| pl);
         let playing = player.is_some_and(|p| p.is_playing());
         let playhead = player.map(|p| p.position_ms());
         let position = playhead.unwrap_or(self.deck_edit.cursor_ms);
         if playing {
             ui.ctx().request_repaint();
         }
-        let db_cues: &[mb_library::Cue] = if local { self.cues.get(&track.id).map_or(&[], Vec::as_slice) } else { &[] };
+        let db_cues: &[mb_library::Cue] = match &track {
+            Some(t) if local => self.cues.get(&t.id).map_or(&[], Vec::as_slice),
+            _ => &[],
+        };
         let marks = match (local, waves) {
             (true, _) => cue_panel::marks(db_cues),
             (false, Some(w)) => w.cues.clone(),
             (false, None) => Vec::new(),
         };
-        let duration = cue_panel::duration_ms(&track, waves);
+        let duration = track.as_ref().map_or(0, |t| cue_panel::duration_ms(t, waves));
         let mut play_clicked = false;
         let mut seek_to = None;
         let mut jump = None;
         let mut actions = Vec::new();
         let deck_edit = &mut self.deck_edit;
-        ui.horizontal(|ui| {
-            artwork(ui, track.artwork_path.as_deref(), 76.0);
+        let notation = self.browser.key_notation;
+        ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
+
+        match (&track, waves) {
+            (Some(_), Some(w)) => jump = waveform::show_detail(ui, w, &marks, position, 4_000.0, deck::DETAIL_HEIGHT),
+            (Some(_), None) => deck::empty_well(ui, deck::DETAIL_HEIGHT, "Not analysed"),
+            (None, _) => deck::empty_well(ui, deck::DETAIL_HEIGHT, ""),
+        }
+        ui.add_space(deck::PAD);
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), deck::INFO_HEIGHT), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+            deck::artwork(ui, track.as_ref().and_then(|t| t.artwork_path.as_deref()), deck::INFO_HEIGHT);
+            ui.add_space(4.0);
             ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    play_clicked = ui.button(if playing { "Pause" } else { "Play" }).clicked();
-                    ui.strong(&track.title);
-                    ui.label(&track.artist);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.selectable_value(wave_style, waveform::Style::ThreeBand, "3-Band");
-                        ui.selectable_value(wave_style, waveform::Style::Rgb, "RGB");
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 42.0), egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.x = 18.0;
+                    deck::readouts(ui, track.as_ref(), notation, position, duration);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.add_space(1.0);
+                        deck::title_block(ui, track.as_ref());
                     });
                 });
-                match waves {
-                    Some(w) => seek_to = waveform::show_overview(ui, w, &marks, duration, *wave_style, Some(position)),
-                    None => {
-                        ui.weak("Not analysed");
-                    }
-                }
+                ui.add_space(2.0);
+                ui.horizontal_centered(|ui| {
+                    play_clicked = deck::play_button(ui, playing, track.is_some()).clicked();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        deck::wave_style_switch(ui, wave_style);
+                        match waves {
+                            Some(w) => seek_to = waveform::show_overview(ui, w, &marks, duration, *wave_style, Some(position), 32.0),
+                            None => deck::empty_well(ui, 32.0, ""),
+                        }
+                    });
+                });
             });
         });
-        if local && let Some(w) = waves {
-            jump = waveform::show_detail(ui, w, &marks, position, 4_000.0);
-            actions = cue_panel::controls(ui, &track, db_cues, &w.grid, duration, position, editing, deck_edit, &mut jump);
+        if let (Some(track), true, Some(w)) = (&track, local, waves) {
+            ui.add_space(deck::PAD);
+            actions = cue_panel::controls(ui, track, db_cues, &w.grid, duration, position, editing, deck_edit, &mut jump);
         }
         if let Some(ms) = jump {
             // Moving the position: the open player seeks (and keeps its play state), otherwise
             // only the cursor moves; nothing starts playing.
-            match self.player.as_ref().filter(|(p, _)| *p == track.path) {
+            match track.as_ref().and_then(|t| self.player.as_ref().filter(|(p, _)| *p == t.path)) {
                 Some((_, player)) if player.is_playing() => player.play_from_ms(ms),
                 Some((_, player)) => player.seek_ms(ms),
                 None => self.deck_edit.cursor_ms = ms,
             }
         }
+        let Some(track) = track else { return actions };
         let space = ui.ctx().input(|i| i.key_pressed(egui::Key::Space)) && !ui.ctx().egui_wants_keyboard_input();
         if (play_clicked || space) && playhead.is_none() && self.deck_edit.cursor_ms > 0.0 && seek_to.is_none() {
             seek_to = Some(self.deck_edit.cursor_ms);
@@ -314,79 +332,113 @@ impl App {
         }
     }
 
+    /// Top bar: the app mark, the File menu, and the editing switch on the right.
+    fn top_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            icons::show(ui, icons::Icon::Logo, 20.0, theme::ACCENT);
+            ui.label(egui::RichText::new("musicbox").font(theme::semibold(14.0)).color(theme::TEXT_STRONG));
+            ui.add_space(14.0);
+            ui.scope(|ui| {
+                // Frameless menu title, like a menu bar.
+                ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+                ui.menu_button("File", |ui| self.file_menu(ui));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.editing_switch(ui));
+        });
+    }
+
+    fn file_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.add_enabled(self.export_source.is_some(), egui::Button::new("Export Collection in xml format…")).clicked() {
+            self.dialog = Some(Dialog::XmlExport { path: crate::xml_bridge::default_export_path() });
+            ui.close();
+        }
+        if ui.button("Open rekordbox xml…").clicked() {
+            let path = self.xml.as_ref().map(|x| x.path.display().to_string()).unwrap_or_default();
+            self.dialog = Some(Dialog::XmlOpen { path });
+            ui.close();
+        }
+        if self.xml.is_some() && ui.button("Close rekordbox xml").clicked() {
+            self.xml = None;
+            if self.source.library == LibraryRef::Xml {
+                self.source = Source { library: LibraryRef::Local, list: List::Collection };
+            }
+            ui.close();
+        }
+    }
+
+    /// Status bar: the last message on the left, running jobs with their progress on the right.
     fn status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
-            ui.menu_button("File", |ui| {
-                if ui.add_enabled(self.export_source.is_some(), egui::Button::new("Export Collection in xml format…")).clicked() {
-                    self.dialog = Some(Dialog::XmlExport { path: crate::xml_bridge::default_export_path() });
-                    ui.close();
-                }
-                if ui.button("Open rekordbox xml…").clicked() {
-                    let path = self.xml.as_ref().map(|x| x.path.display().to_string()).unwrap_or_default();
-                    self.dialog = Some(Dialog::XmlOpen { path });
-                    ui.close();
-                }
-                if self.xml.is_some() && ui.button("Close rekordbox xml").clicked() {
-                    self.xml = None;
-                    if self.source.library == LibraryRef::Xml {
-                        self.source = Source { library: LibraryRef::Local, list: List::Collection };
-                    }
-                    ui.close();
-                }
-            });
-            self.editing_switch(ui);
-            ui.separator();
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let dot = |ui: &mut egui::Ui, color: egui::Color32| {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 3.5, color);
+            };
             if self.loading.is_some() {
-                ui.spinner();
-                ui.label("Loading library…");
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.label(egui::RichText::new("Loading library…").small().color(theme::TEXT_DIM));
             } else if let Some(e) = &self.error {
-                ui.colored_label(egui::Color32::from_rgb(0xFF, 0x50, 0x50), e);
+                dot(ui, theme::DANGER);
+                ui.add(egui::Label::new(egui::RichText::new(e).small().color(theme::DANGER)).truncate());
             } else {
-                ui.label(format!("{} tracks", self.browser.visible_count()));
+                dot(ui, if self.editing() { theme::ACCENT } else { theme::TEXT_MUTED });
+                if self.edit_status.is_none() {
+                    let count = format!("{} tracks in the collection", self.library.tracks.len());
+                    ui.label(egui::RichText::new(count).small().color(theme::TEXT_DIM));
+                }
+            }
+            // The last message stays visible next to a load error.
+            if let Some(message) = &self.edit_status {
+                ui.add(egui::Label::new(egui::RichText::new(message).small().color(theme::TEXT_DIM)).truncate());
             }
             if let LibraryRef::Device(i) = self.source.library
                 && let Some(DeviceState::Failed(e)) = self.devices.list.get(i).map(|d| &d.state)
             {
-                ui.colored_label(egui::Color32::from_rgb(0xFF, 0xB9, 0x37), e);
+                ui.label(egui::RichText::new(e).small().color(theme::WARN));
             }
-            if let Some(p) = self.analysis.as_ref().and_then(|q| q.progress()) {
-                ui.separator();
-                ui.spinner();
-                ui.label(format!("Analysing {}/{} {}", p.done, p.total, p.running.first().map(String::as_str).unwrap_or("")));
-                if ui.small_button("Cancel analysis").clicked() {
-                    self.apply(vec![Action::CancelAnalysis]);
-                }
-            }
-            if let Some(job) = &self.export {
-                ui.separator();
-                ui.spinner();
-                let text = match &job.progress {
-                    Some(p) => format!(
-                        "Exporting to {}: {}/{} {}",
-                        job.device_name,
-                        p.tracks_done,
-                        p.tracks_total,
-                        p.current.as_deref().unwrap_or("")
-                    ),
-                    None => format!("Exporting to {}…", job.device_name),
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let job = |ui: &mut egui::Ui, text: String, fraction: Option<f32>| {
+                    if let Some(f) = fraction {
+                        ui.add(egui::ProgressBar::new(f).desired_width(120.0).desired_height(6.0).fill(theme::ACCENT));
+                    } else {
+                        ui.add(egui::Spinner::new().size(12.0));
+                    }
+                    ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::TEXT_DIM)).truncate());
                 };
-                ui.label(text);
-                if ui.small_button("Cancel").clicked() {
-                    job.cancel();
+                if let Some(job_state) = &self.export {
+                    if ui.small_button("Cancel").clicked() {
+                        job_state.cancel();
+                    }
+                    let (text, fraction) = match &job_state.progress {
+                        Some(p) => (
+                            format!("Exporting to {}: {}/{} {}", job_state.device_name, p.tracks_done, p.tracks_total, p.current.as_deref().unwrap_or("")),
+                            Some(p.tracks_done as f32 / p.tracks_total.max(1) as f32),
+                        ),
+                        None => (format!("Exporting to {}…", job_state.device_name), None),
+                    };
+                    job(ui, text, fraction);
+                } else if let Some(job_state) = &self.remove {
+                    job(ui, format!("Removing from {}…", job_state.device_name), None);
+                } else if let Some(job_state) = &self.xml_export {
+                    job(ui, format!("Exporting {}…", job_state.path.display()), None);
                 }
-            } else if let Some(job) = &self.remove {
-                ui.separator();
-                ui.spinner();
-                ui.label(format!("Removing from {}…", job.device_name));
-            } else if let Some(job) = &self.xml_export {
-                ui.separator();
-                ui.spinner();
-                ui.label(format!("Exporting {}…", job.path.display()));
-            } else if let Some(msg) = &self.edit_status {
-                ui.separator();
-                ui.weak(msg);
-            }
+                if let Some(p) = self.analysis.as_ref().and_then(|q| q.progress()) {
+                    if ui.small_button("Cancel analysis").clicked() {
+                        self.apply(vec![Action::CancelAnalysis]);
+                    }
+                    let text = format!("Analysing {}/{} {}", p.done, p.total, p.running.first().map(String::as_str).unwrap_or(""));
+                    job(ui, text, Some(p.done as f32 / p.total.max(1) as f32));
+                }
+            });
         });
+    }
+
+    /// The selected collection track has analysis files to edit cues and grid on.
+    fn waves_ready(&mut self) -> bool {
+        let Some((LibraryRef::Local, i)) = self.browser.selected else { return false };
+        let Some(path) = self.library.tracks.get(i).and_then(|t| t.analysis_path.clone()) else { return false };
+        self.waves.entry(path.clone()).or_insert_with(|| waveform::load(&path)).is_some()
     }
 
     fn editing(&self) -> bool {
@@ -395,14 +447,14 @@ impl App {
 
     /// Off by default; turning it on opens the write connection (which backs the library up).
     fn editing_switch(&mut self, ui: &mut egui::Ui) {
-        let mut on = self.editor.is_some();
-        let label = match &self.editor {
-            Some(e) if !e.ready => "Editing (starting…)",
-            Some(_) => "Editing",
-            None => "Read-only",
+        let state = match &self.editor {
+            Some(e) if !e.ready => deck::EditState::Starting,
+            Some(_) => deck::EditState::Editing,
+            None => deck::EditState::ReadOnly,
         };
-        if ui.toggle_value(&mut on, label).changed() {
-            if on {
+        let response = deck::editing_switch(ui, state).on_hover_text("Editing writes to the library; it backs the library up first");
+        if response.clicked() {
+            if self.editor.is_none() {
                 let running = mb_masterdb::running_rekordbox();
                 if !running.is_empty() {
                     self.edit_status = Some(format!("Quit {} first", running.join(", ")));
@@ -797,11 +849,11 @@ impl App {
             Dialog::ConfirmXmlImport { .. } => "Import from rekordbox xml",
             Dialog::MySettings(_) => "My Settings",
         };
-        egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+        egui::Window::new(title).collapsible(false).resizable(false).min_width(380.0).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             match dialog {
                 Dialog::Create { name, .. } | Dialog::Rename { name, .. } => {
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let edit = ui.text_edit_singleline(name);
+                    let edit = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY).margin(egui::vec2(8.0, 5.0)));
                     if !edit.has_focus() && !enter {
                         edit.request_focus();
                     }
@@ -832,7 +884,7 @@ impl App {
                 Dialog::XmlExport { path } | Dialog::XmlOpen { path } => {
                     ui.label("File:");
                     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let edit = ui.add(egui::TextEdit::singleline(path).desired_width(420.0));
+                    let edit = ui.add(egui::TextEdit::singleline(path).desired_width(460.0).margin(egui::vec2(8.0, 5.0)));
                     if !edit.has_focus() && !enter {
                         edit.request_focus();
                     }
@@ -851,9 +903,10 @@ impl App {
                     }
                 }
             }
-            ui.horizontal(|ui| {
-                submit |= ui.button("OK").clicked();
-                cancel |= ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
+            ui.add_space(16.0);
+            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 28.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                submit |= ui.add(theme::primary_button("OK")).clicked();
+                cancel |= ui.add(theme::secondary_button("Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
             });
         });
         if submit && matches!(&self.dialog, Some(Dialog::Smart(e)) if !e.valid()) {
@@ -939,24 +992,6 @@ impl App {
     }
 }
 
-/// Track artwork, preferring the 240 px `_m` variant that rekordbox writes next to the small one.
-fn artwork(ui: &mut egui::Ui, path: Option<&std::path::Path>, size: f32) {
-    let larger = path.map(|p| {
-        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-        p.with_file_name(format!("{stem}_m.jpg"))
-    });
-    let chosen = larger.filter(|p| p.is_file()).or_else(|| path.map(|p| p.to_path_buf())).filter(|p| p.is_file());
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    match chosen {
-        Some(p) => {
-            egui::Image::new(format!("file://{}", p.display())).corner_radius(2.0).paint_at(ui, rect);
-        }
-        None => {
-            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0x30, 0x30, 0x30));
-        }
-    }
-}
-
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_loading();
@@ -975,20 +1010,24 @@ impl eframe::App for App {
         self.poll_analysis();
         let mut actions = self.global_input(&ctx);
 
-        egui::Panel::bottom("status").exact_size(22.0).show(ui, |ui| self.status(ui));
-        let local_track = self.browser.selected.is_some_and(|(library, _)| library == LibraryRef::Local);
-        let deck_actions = egui::Panel::top("deck").exact_size(if local_track { 186.0 } else { 96.0 }).show(ui, |ui| self.deck(ui)).inner;
+        egui::Panel::top("top-bar").exact_size(theme::TOP_BAR).frame(theme::bar_frame(theme::BG_DECK, 14)).show(ui, |ui| self.top_bar(ui));
+        egui::Panel::bottom("status").exact_size(theme::STATUS_BAR).frame(theme::bar_frame(theme::BG_DECK, 14)).show(ui, |ui| self.status(ui));
+        let local_track = self.browser.selected.is_some_and(|(library, i)| library == LibraryRef::Local && i < self.library.tracks.len());
+        let controls = local_track && self.waves_ready();
+        let deck_frame = egui::Frame::new().fill(theme::BG_DECK).inner_margin(egui::Margin::symmetric(14, deck::PAD as i8));
+        let deck_actions = egui::Panel::top("deck").exact_size(deck::height(controls)).frame(deck_frame).show(ui, |ui| self.deck(ui)).inner;
         actions.extend(deck_actions);
         let editing = self.editing();
         egui::Panel::left("tree")
             .resizable(true)
-            .default_size(230.0)
-            .size_range(160.0..=420.0)
+            .default_size(240.0)
+            .size_range(180.0..=420.0)
+            .frame(egui::Frame::new().fill(theme::BG_PANEL))
             .show(ui, |ui| {
                 let xml = self.xml.as_ref().map(|x| (x.path.as_path(), &x.snapshot));
                 actions.extend(tree::show(ui, &self.library, &self.devices, xml, &mut self.source, editing))
             });
-        egui::CentralPanel::default().show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG_PANEL)).show(ui, |ui| {
             let library = match self.source.library {
                 LibraryRef::Local => &self.library,
                 LibraryRef::Device(i) => self.devices.list.get(i).and_then(|d| d.snapshot()).unwrap_or(&EMPTY),
