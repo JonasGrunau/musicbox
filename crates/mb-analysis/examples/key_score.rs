@@ -109,6 +109,7 @@ fn main() {
                         beats: true,
                         phrase: true,
                         key: true,
+                        high_precision: None,
                     };
                     let own = mb_analysis::analyze(&t.path, opts).ok().and_then(|a| a.key);
                     let full = t.path.to_string_lossy();

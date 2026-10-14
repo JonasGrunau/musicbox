@@ -189,7 +189,7 @@ impl Builder<'_> {
     }
 
     /// Beats `seg_band + 1 … 1` periods before the anchor, skipping those before `floor`.
-    /// Returns the updated output count base (`local_1b0`).
+    /// Returns the updated output count base.
     #[allow(clippy::too_many_arguments)]
     fn back_fill(
         &mut self,

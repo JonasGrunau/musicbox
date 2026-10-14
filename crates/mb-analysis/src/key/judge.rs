@@ -163,7 +163,7 @@ impl Judge {
         for &k in k1 {
             hist[k as usize] += 1;
         }
-        // local_a0: 7 keys, then 7 counts (30 for an empty bin).
+        // 7 keys, then 7 counts (30 for an empty bin).
         let mut a = [0i32; 14];
         for i in 0..7 {
             let mut best = 0usize;

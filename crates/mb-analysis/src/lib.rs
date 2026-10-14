@@ -10,6 +10,7 @@
 //! loudness meter.
 
 pub mod beats;
+pub mod hpbeat;
 pub mod key;
 pub mod loud;
 pub mod loudness;
@@ -71,6 +72,9 @@ pub struct Options {
     pub phrase: bool,
     /// Key (`enableKeyAnalysis`); needs `beats` (`analysis-key.md`).
     pub key: bool,
+    /// High-precision beat analysis (`HighPrecisionBeatAnalyze`, mode from
+    /// `trackHiPrecisionBeatAnalysisMode`); needs `beats` (`analysis-beats-hp.md`).
+    pub high_precision: Option<hpbeat::HpMode>,
 }
 
 impl Default for Options {
@@ -81,6 +85,7 @@ impl Default for Options {
             beats: true,
             phrase: true,
             key: true,
+            high_precision: None,
         }
     }
 }
@@ -93,6 +98,13 @@ pub struct Analysis {
     pub beats: Option<beats::BeatGrid>,
     /// Key code: 0–11 major, 12–23 minor, root `code % 12` with 0 = A ([`key::scale_name`]).
     pub key: Option<u8>,
+    /// PQT2 `analysis_type`: 2 for a high-precision Dynamic grid, else 1 (`notifyBeat`).
+    pub grid_type: u8,
+    /// Why the high-precision grid was not made, when it was asked for (the Normal-mode grid
+    /// is kept then).
+    pub high_precision_error: Option<String>,
+    /// The phrase analysis result (PSSI), when it ran and rekordbox would store it.
+    pub phrase: Option<phrase::PhraseResult>,
 }
 
 /// Analyses the waveforms of the audio file at `path`.
@@ -105,6 +117,7 @@ pub fn analyze_waveforms(path: impl AsRef<Path>) -> Result<Waveforms> {
             beats: false,
             phrase: false,
             key: false,
+            high_precision: None,
         },
     )?;
     Ok(a.waveforms.unwrap_or_default())
@@ -135,6 +148,8 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
     let mut phrase = (opts.beats && opts.phrase).then(|| phrase::PhraseAnalyzer::new(rate, total));
     let mut keys =
         (opts.beats && opts.key).then(|| key::KeyCollector::new(rate, total, info.channels));
+    // madmom's input: the `(L + R)/2` float samples
+    let mut mono = (opts.beats && opts.high_precision.is_some()).then(|| Vec::with_capacity(total as usize));
     let block = block_len(rate);
     let mut frames = vec![[0.0f32; 2]; block];
     let mut pcm = vec![[0i16; 2]; block];
@@ -150,6 +165,9 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
                 mb_audio::analysis_i16(src[0]),
                 mb_audio::analysis_i16(src[1]),
             ];
+        }
+        if let Some(m) = &mut mono {
+            m.extend(frames[..got].iter().map(|f| (f[1] + f[0]) * 0.5));
         }
         let pcm = &pcm[..got];
         if let Some((zoom, wave, loud)) = &mut waves {
@@ -186,8 +204,18 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
         }
     });
     let mut grid = beat.and_then(beats::BeatAnalyzer::finish);
+    let (mut grid_type, mut high_precision_error) = (1, None);
+    if let (Some(mode), Some(m), Some(g)) = (opts.high_precision, &mono, &grid) {
+        match hpbeat::grid(mode, m, rate, total, g) {
+            Ok(hp) => (grid, grid_type) = (hp, 2),
+            Err(e) => high_precision_error = Some(e),
+        }
+    }
+    drop(mono);
+    let mut phrases = None;
     if let (Some(g), Some(p)) = (&mut grid, &phrase) {
-        phrase::run(p, g, rate, total);
+        // The Dynamic high-precision grid is not shifted (`phrase::run`'s `urahaku`).
+        phrases = phrase::run(p, g, rate, total, Some(path.as_ref()), grid_type != 2);
     }
     // The key job runs on the finished grid; `getKey` takes BPM × 100 · 0.01. Without a grid
     // only the whole-track estimate counts (no segments).
@@ -203,5 +231,8 @@ pub fn analyze(path: impl AsRef<Path>, opts: Options) -> Result<Analysis> {
         loudness: meter.map(loudness::LoudnessAnalyzer::finish),
         beats: grid,
         key,
+        grid_type,
+        high_precision_error,
+        phrase: phrases,
     })
 }

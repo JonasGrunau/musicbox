@@ -172,11 +172,16 @@ impl App {
                         pref("KeyStringSetting").and_then(|v| v.trim().parse().ok()),
                     );
                     // Analysis preferences: `AutoGain` and `enableKeyAnalysis` (default on),
-                    // `trackAnalysisSettingsSongStruct`, `AutoAnalysis`.
+                    // `trackAnalysisSettingsSongStruct`, `HighPrecisionBeatAnalyze` with
+                    // `trackHiPrecisionBeatAnalysisMode`, `AutoAnalysis`.
                     self.analysis_settings = mb_library::AnalysisSettings {
                         auto_gain: pref("AutoGain").is_none_or(|v| v.trim() != "0"),
                         phrase: pref("trackAnalysisSettingsSongStruct").is_some_and(|v| v.trim() == "1"),
                         key: pref("enableKeyAnalysis").is_none_or(|v| v.trim() != "0"),
+                        high_precision: mb_library::AnalysisSettings::high_precision_from(
+                            pref("HighPrecisionBeatAnalyze").as_deref(),
+                            pref("trackHiPrecisionBeatAnalysisMode").as_deref(),
+                        ),
                     };
                     self.auto_analysis = pref("AutoAnalysis").is_some_and(|v| v.trim() == "1");
                     self.export_source = Some(export::Source {

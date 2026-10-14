@@ -89,7 +89,7 @@ pub fn qsort3(v: &mut [f32], idx: &mut [i32]) {
     }
 }
 
-/// The degree table `local_4f0[key][d]`: the 1-based pitch class of degree `d` of `key`.
+/// The degree table `[key][d]`: the 1-based pitch class of degree `d` of `key`.
 fn deg(key: usize, d: usize) -> i32 {
     const MAJOR: [usize; 7] = [0, 2, 4, 5, 7, 9, 11];
     const MINOR: [usize; 7] = [0, 2, 3, 5, 7, 8, 10];
@@ -256,7 +256,7 @@ fn whole_rules(r: &[i32; 12], short: bool, b0: usize, s: usize) -> (usize, usize
     if swap { (s, b) } else { (b, s) }
 }
 
-/// The whole-track harmonic relation of `B` and `S` (`bVar69`).
+/// The whole-track harmonic relation of `B` and `S`.
 fn harmonic_whole(b: usize, s: usize) -> bool {
     let hb = harmonic(b);
     let hs = harmonic(s);
@@ -419,9 +419,9 @@ fn window_profile(m: &[f32], frames: usize, start: usize, win: usize) -> [f32; 1
 pub struct Trace {
     /// Whole-track profile.
     pub profile: [f32; 12],
-    /// Per-window rule result (`pvVar76`).
+    /// Per-window rule result.
     pub window_keys: Vec<i32>,
-    /// Accepted window votes (`piVar77`).
+    /// Accepted window votes.
     pub votes: Vec<i32>,
     /// Per window: ranking, `B`, `S`.
     pub windows: Vec<([i32; 12], usize, usize)>,

@@ -48,7 +48,7 @@ impl Synth {
             if t >= end - 1e-9 {
                 return t;
             }
-            let accent = if beat % 4 == 0 { 1.41 } else { 1.0 };
+            let accent = if beat.is_multiple_of(4) { 1.41 } else { 1.0 };
             self.kick(t, 0.6 * accent * gain);
             self.hat(t + period / 2.0, 0.15 * gain);
             beat += 1;

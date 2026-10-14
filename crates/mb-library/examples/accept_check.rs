@@ -104,6 +104,10 @@ fn main() -> anyhow::Result<()> {
                 auto_gain: pref("AutoGain").is_none_or(|v| v.trim() != "0"),
                 phrase: pref("trackAnalysisSettingsSongStruct").is_some_and(|v| v.trim() == "1"),
                 key: pref("enableKeyAnalysis").is_none_or(|v| v.trim() != "0"),
+                high_precision: AnalysisSettings::high_precision_from(
+                    pref("HighPrecisionBeatAnalyze").as_deref(),
+                    pref("trackHiPrecisionBeatAnalysisMode").as_deref(),
+                ),
             };
             println!("settings: {settings:?}");
             for t in unanalysed {

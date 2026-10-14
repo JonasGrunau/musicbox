@@ -11,27 +11,29 @@
 // Ported loops index several parallel arrays the way the binary does.
 #![allow(clippy::needless_range_loop)]
 
+mod adjust;
 mod beatpos;
-// Stage D, paused (`analysis-phrase.md` § 7): ported pieces not wired in yet.
-#[allow(dead_code)]
 mod blocks;
-// Stage D, paused (`analysis-phrase.md` § 7): ported pieces not wired in yet.
-#[allow(dead_code)]
 mod d_feat;
 mod feat;
 mod filter;
 mod hp;
+mod intro;
 mod spec;
-// Stage D, paused (`analysis-phrase.md` § 7): ported pieces not wired in yet.
-#[allow(dead_code)]
 mod genre;
 mod mat;
+mod melo;
 mod power;
+#[cfg(test)]
+mod replay;
 mod rhythm;
 mod snare;
 pub mod stage_c;
+pub mod stage_d;
+mod verse;
 
 use crate::beats::BeatGrid;
+pub use adjust::PhraseResult;
 
 /// `CBeatAnalyzeThread::analyze()::convFirstBar` (0x10387967c).
 const CONV_FIRST_BAR: [i32; 4] = [1, 4, 3, 2];
@@ -128,16 +130,24 @@ impl PhraseAnalyzer {
     /// Stage B for the grid's `(bpm, fb, fbar)`; `None` where `Sub_Main_B` fails. Only the
     /// parts the downbeat depends on.
     pub fn downbeat(&self, bpm100: i32, fb_ms: i32, fbar: i32) -> Option<Downbeat> {
-        self.sub_main_b(bpm100, fb_ms, fbar, false).map(|b| b.down)
+        self.sub_main_b(bpm100, fb_ms, fbar, false, true).map(|b| b.down)
     }
 
-    /// `Sub_Main_B` (@0x100b80b04) with the outputs stage D reads (development aid; stage D
-    /// is not finished, `analysis-phrase.md` § 7).
-    pub fn stage_b(&self, bpm100: i32, fb_ms: i32, fbar: i32) -> Option<BOut> {
-        self.sub_main_b(bpm100, fb_ms, fbar, true)
+    /// `Sub_Main_B` (@0x100b80b04) with the outputs stage D reads. `urahaku` is the thread's
+    /// grid-shift flag (+0x3908): without it `Initialize` sets +0xc2/+0xc3 and B keeps `fb` and
+    /// `fbar` (no first-beat or bar correction).
+    pub fn stage_b(&self, bpm100: i32, fb_ms: i32, fbar: i32, urahaku: bool) -> Option<BOut> {
+        self.sub_main_b(bpm100, fb_ms, fbar, true, urahaku)
     }
 
-    fn sub_main_b(&self, bpm100: i32, fb_ms: i32, fbar: i32, for_d: bool) -> Option<BOut> {
+    fn sub_main_b(
+        &self,
+        bpm100: i32,
+        fb_ms: i32,
+        fbar: i32,
+        for_d: bool,
+        corrections: bool,
+    ) -> Option<BOut> {
         if !self.done {
             return None;
         }
@@ -164,17 +174,23 @@ impl PhraseAnalyzer {
         let bar_snares = snare::detect_for_bar(&bars, fs, bpm, fb_ms, &beats, &pattern);
         let bp =
             beatpos::beatpos_correction(x, fs, bpm, fb_ms, &pattern, beats.len() as i32, &snares)?;
-        // +0xc2 is clear when the thread's phrase flag (+0x3908) is set, as it is here.
-        let fb2 = bp.fb_ms;
-        let beats2 = rhythm::beats_samples(n, fs, bpm, fb2);
-        rhythm::RhythmPattern::new(fs).analyze(x, bpm, fb2, fs)?;
+        // +0xc2 is clear when the thread's grid-shift flag (+0x3908) is set: the corrected
+        // first beat replaces `fb`.
+        let (fb2, beats2) = if corrections {
+            let beats2 = rhythm::beats_samples(n, fs, bpm, bp.fb_ms);
+            rhythm::RhythmPattern::new(fs).analyze(x, bpm, bp.fb_ms, fs)?;
+            (bp.fb_ms, beats2)
+        } else {
+            (fb_ms, beats)
+        };
         let bar_pos = if for_d {
             let n30 = ((fs * 30.0) as usize).min(self.dec.len());
             beatpos::bar_position(&self.dec[..n30], bpm, fb2, fs)
         } else {
             0
         };
-        let bar = if bar_snares.count < 1 || bp.steady {
+        // +0xc3 (set without the grid-shift flag) skips the bar correction too.
+        let bar = if !corrections || bar_snares.count < 1 || bp.steady {
             fbar
         } else {
             beatpos::bar_start_correction(
@@ -281,16 +297,80 @@ pub fn apply(grid: &mut BeatGrid, fb: i64, fbar: i32, down: Option<Downbeat>) {
     }
 }
 
-/// The thread's phrase step for one analysed grid: anchor, preconditions, stage B, shift.
-pub fn run(p: &PhraseAnalyzer, grid: &mut BeatGrid, rate: u32, total: u64) {
-    let Some((bpm100, fb, fbar)) = grid_anchor(grid) else {
-        return;
-    };
+/// The thread's phrase step for one analysed grid: anchor, preconditions, stage B, shift. With
+/// `path`, stages C and D follow on a second read of the file (`Analyze_CD`); the result is
+/// returned when rekordbox would store it as PSSI ([`PhraseResult::stored`]).
+///
+/// `urahaku` is the thread's grid-shift flag (+0x3908, `AnalyzeJobManager::SetUrahaku`
+/// @0x1022fb028): set when beats are analysed outside the Dynamic modes. Without it the grid
+/// is not shifted and stage B keeps the anchor.
+pub fn run(
+    p: &PhraseAnalyzer,
+    grid: &mut BeatGrid,
+    rate: u32,
+    total: u64,
+    path: Option<&std::path::Path>,
+    urahaku: bool,
+) -> Option<PhraseResult> {
+    let (bpm100, fb, fbar) = grid_anchor(grid)?;
     if !runs(rate, total, bpm100, fb, fbar) {
-        return;
+        return None;
     }
-    let down = p.downbeat(bpm100, fb as i32, fbar);
-    apply(grid, fb, fbar, down);
+    if urahaku {
+        let down = p.downbeat(bpm100, fb as i32, fbar);
+        apply(grid, fb, fbar, down);
+        down?;
+    }
+    let b = p.stage_b(bpm100, fb as i32, fbar, urahaku)?;
+    let c = stage_c(path?, bpm100, b.down)?;
+    let d = stage_d::DIn {
+        bpm: bpm100 as f64 * 0.01,
+        rate: rate as f64,
+        fs8: rate as f64 * 0.125,
+        // `Initialize`'s key argument: 0 as far as observed (PSSI byte 0x1d is 1 on every
+        // oracle track, `analysis-phrase.md` § 8.1).
+        key: 0,
+        total: total as i32,
+        fb0: fb as i32,
+        fb: b.down.fb_ms,
+        bar: b.down.bar,
+        kick6: b.kick6,
+        snares: &b.snares,
+        bar_pos: b.bar_pos,
+    };
+    stage_d::sub_main_d(&c, &d).filter(PhraseResult::stored)
+}
+
+/// The phrase analysis of the file at `path` for an existing grid (e.g. one rekordbox
+/// stored): stage A on a first read, then [`run`] on a copy of the grid.
+pub fn analyze_with_grid(path: &std::path::Path, grid: &BeatGrid, urahaku: bool) -> Option<PhraseResult> {
+    let mut dec = mb_audio::open(path).ok()?;
+    let info = *dec.info();
+    if info.total_samples < 2 {
+        return None;
+    }
+    let total = info.total_samples - 1;
+    let mut p = PhraseAnalyzer::new(info.sample_rate, total);
+    let block = 2 * info.sample_rate as usize;
+    let mut frames = vec![[0.0f32; 2]; block];
+    let mut pcm = vec![[0i16; 2]; block];
+    let mut pos = 0u64;
+    while pos < total {
+        let n = ((total - pos) as usize).min(block);
+        let got = dec.read_frames(&mut frames[..n]);
+        if got == 0 {
+            break;
+        }
+        for (dst, src) in pcm[..got].iter_mut().zip(&frames[..got]) {
+            *dst = [
+                mb_audio::analysis_i16(src[0]),
+                mb_audio::analysis_i16(src[1]),
+            ];
+        }
+        p.put(&pcm[..got]);
+        pos += got as u64;
+    }
+    run(&p, &mut grid.clone(), info.sample_rate, total, Some(path), urahaku)
 }
 
 /// Stage C on a second read of the track (as the thread re-reads it for `Analyze_CD`).

@@ -3,9 +3,10 @@
 //!
 //! 1. `analysis_files_match_rekordbox`: the `.DAT`/`.EXT`/`.2EX` built by `analyse_track` equal
 //!    rekordbox's local files section by section (tag order, headers, bodies), with phrase
-//!    analysis on as rekordbox had it, except PSSI and PVDI (not computed yet) and a grid the
-//!    two phrase passes place differently (same BPM and beat count, shifted; the 96 kHz click
-//!    probe, `analysis-phrase.md`). The `djmdContent` columns, the `djmdMixerParam` row and the
+//!    analysis on as rekordbox had it, except PVDI (not computed yet), a grid the two phrase
+//!    passes place differently (same BPM and beat count, shifted; the 96 kHz click probe,
+//!    `analysis-phrase.md`) and the PSSI of the two 96 kHz probes the phrase scorecard lists as
+//!    misses. The `djmdContent` columns, the `djmdMixerParam` row and the
 //!    key equal rekordbox's. Probes by default, every track with `MB_ORACLE_FULL=1`.
 //! 2. `apply_and_undo`: on a temp copy of the library, a first analysis (track reset to the
 //!    imported state) and a re-analysis (rekordbox's files present) write the files, rows and
@@ -108,7 +109,7 @@ fn analysis_files_match_rekordbox() {
     }
     let identical = results.iter().filter(|(_, p, s)| p.is_empty() && !s).count();
     eprintln!(
-        "{} tracks: {identical} identical apart from PSSI/PVDI, {shifted} with a shifted grid, {} failures",
+        "{} tracks: {identical} identical apart from PVDI, {shifted} with a shifted grid, {} failures",
         results.len(),
         failures.len()
     );
@@ -131,7 +132,7 @@ fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
         if ours.header != theirs.header {
             problems.push(format!("{ext} PMAI header"));
         }
-        let want: Vec<_> = theirs.sections.iter().filter(|s| s.tag != Tag::PSSI && s.tag != Tag::PVDI).collect();
+        let want: Vec<_> = theirs.sections.iter().filter(|s| s.tag != Tag::PVDI).collect();
         let tags = |v: &[&mb_anlz::Section]| v.iter().map(|s| s.tag.to_string()).collect::<Vec<_>>().join(" ");
         let got: Vec<_> = ours.sections.iter().collect();
         if tags(&got) != tags(&want) {
@@ -149,6 +150,9 @@ fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
                     grid_shift = true;
                     continue;
                 }
+            }
+            if g.tag == Tag::PSSI && known_phrase_miss(&t.path) {
+                continue;
             }
             if g.tag == Tag::PVBR {
                 let (x, y) = (mb_anlz::tags::Vbr::decode(g).unwrap(), mb_anlz::tags::Vbr::decode(w).unwrap());
@@ -172,6 +176,13 @@ fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
         problems.push(format!("key {:?} vs {:?}", a.key, t.key));
     }
     (name, problems, grid_shift)
+}
+
+/// The two oracle-a tracks whose PSSI the phrase pass does not reproduce: the 96 kHz click
+/// probe (its grid is shifted differently) and the 96 kHz tempo ramp (`docs/scorecards/phrase.json`).
+fn known_phrase_miss(path: &Path) -> bool {
+    let p = path.to_string_lossy();
+    p.contains("/wav_96k32f/") && (p.contains("click_128_offset1234") || p.contains("tempo_120_to_126"))
 }
 
 fn theirs_grid_len(share: &Path, rel: &str) -> Option<usize> {
@@ -407,3 +418,45 @@ fn first_analysis_adds_artwork() {
     dir.verify_loads();
 }
 
+
+/// With the phrase setting on, a re-analysis writes our own PSSI (equal to rekordbox's on a
+/// probe) and sets `ContentLink`'s phrase bit, without carrying the old section over.
+#[test]
+fn phrase_pass_writes_pssi() {
+    let Some(dir) = TempLibrary::new("oracle-a") else {
+        eprintln!("skipped: fixtures/oracle-a missing");
+        return;
+    };
+    let Some((share, all)) = tracks() else { return };
+    let Some(t) = all.iter().find(|t| {
+        t.path.exists()
+            && t.path.to_string_lossy().contains("/probes/wav_44k16/")
+            && load(&share, &t.rel, "EXT").is_some_and(|f| f.sections_with(Tag::PSSI).next().is_some())
+    }) else {
+        eprintln!("skipped: corpus audio missing");
+        return;
+    };
+    let root = dir.dir.join("share");
+    let dat = root.join(t.rel.trim_start_matches('/'));
+    std::fs::create_dir_all(dat.parent().unwrap()).unwrap();
+    for ext in ["DAT", "EXT", "2EX"] {
+        std::fs::copy(share.join(t.rel.trim_start_matches('/')).with_extension(ext), dat.with_extension(ext)).unwrap();
+    }
+    // Test setup (not an op): no PSSI and no phrase bit before, so both must come from the pass.
+    let mut old = load(&share, &t.rel, "EXT").unwrap();
+    old.sections.retain(|s| s.tag != Tag::PSSI);
+    std::fs::write(dat.with_extension("EXT"), old.to_bytes()).unwrap();
+    let mut lib = Library::open_unguarded(&dir.db, &dir.passphrase).unwrap();
+    lib.set_analysis_root(&root);
+    lib.connection().execute("UPDATE djmdContent SET ContentLink = ContentLink & ~65536 WHERE ID = ?1", [&t.id]).unwrap();
+
+    let settings = AnalysisSettings { phrase: true, ..AnalysisSettings::default() };
+    let a = analyse_track(&t.path, &t.file_name, &settings).unwrap();
+    History::default().run(&mut lib, Command::ApplyAnalysis { content: DbId(t.id.clone()), analysis: Box::new(a) }).unwrap();
+    let ext = AnlzFile::parse(&std::fs::read(dat.with_extension("EXT")).unwrap()).unwrap();
+    let theirs = load(&share, &t.rel, "EXT").unwrap();
+    assert_eq!(ext.sections_with(Tag::PSSI).count(), 1);
+    assert_eq!(ext.sections_with(Tag::PSSI).next(), theirs.sections_with(Tag::PSSI).next());
+    let Value::Integer(link) = get(&lib, "ContentLink", &t.id) else { panic!("ContentLink") };
+    assert_ne!(link & 0x10000, 0, "phrase bit");
+}

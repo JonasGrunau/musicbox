@@ -1,0 +1,12 @@
+[package]
+name = "mb-nn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "rekordbox's own TensorFlow 2.16.1 runtime and models, loaded from the user's install at run time (never bundled)"
+
+[dependencies]
+thiserror.workspace = true
+libloading = "0.8"
+md-5 = "0.10"

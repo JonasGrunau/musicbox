@@ -102,6 +102,44 @@ pub fn scramble_vocal_detect(data: &mut [u8]) {
     }
 }
 
+
+/// Builds the USB copy of a local analysis file, as `ExportAnalysisData*` does: PPTH becomes the
+/// device path (`/Contents/…`), PSSI and PVDI are stored scrambled, every other section is copied
+/// unchanged. Verified byte-exact against rekordbox's own export (`rbdiff anlz-export`, oracle-a:
+/// 157 tracks × DAT/EXT/2EX).
+pub fn to_usb(local: &crate::AnlzFile, device_path: &str) -> crate::AnlzFile {
+    use crate::tags::{Path, SongStructure, VocalDetect};
+    let sections = local
+        .sections
+        .iter()
+        .map(|s| match &s.tag.0 {
+            b"PPTH" => match Path::decode(s) {
+                Ok(mut p) => {
+                    p.path = device_path.to_owned();
+                    p.encode()
+                }
+                Err(_) => s.clone(),
+            },
+            b"PSSI" => match SongStructure::decode(s) {
+                Ok(mut p) => {
+                    p.scrambled = true;
+                    p.encode()
+                }
+                Err(_) => s.clone(),
+            },
+            b"PVDI" => match VocalDetect::decode(s) {
+                Ok(mut v) => {
+                    v.version |= 0x8000;
+                    v.encode()
+                }
+                Err(_) => s.clone(),
+            },
+            _ => s.clone(),
+        })
+        .collect();
+    crate::AnlzFile { header: local.header.clone(), sections }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,41 +199,4 @@ mod tests {
         scramble_vocal_detect(&mut data);
         assert_eq!(data, plain);
     }
-}
-
-/// Builds the USB copy of a local analysis file, as `ExportAnalysisData*` does: PPTH becomes the
-/// device path (`/Contents/…`), PSSI and PVDI are stored scrambled, every other section is copied
-/// unchanged. Verified byte-exact against rekordbox's own export (`rbdiff anlz-export`, oracle-a:
-/// 157 tracks × DAT/EXT/2EX).
-pub fn to_usb(local: &crate::AnlzFile, device_path: &str) -> crate::AnlzFile {
-    use crate::tags::{Path, SongStructure, VocalDetect};
-    let sections = local
-        .sections
-        .iter()
-        .map(|s| match &s.tag.0 {
-            b"PPTH" => match Path::decode(s) {
-                Ok(mut p) => {
-                    p.path = device_path.to_owned();
-                    p.encode()
-                }
-                Err(_) => s.clone(),
-            },
-            b"PSSI" => match SongStructure::decode(s) {
-                Ok(mut p) => {
-                    p.scrambled = true;
-                    p.encode()
-                }
-                Err(_) => s.clone(),
-            },
-            b"PVDI" => match VocalDetect::decode(s) {
-                Ok(mut v) => {
-                    v.version |= 0x8000;
-                    v.encode()
-                }
-                Err(_) => s.clone(),
-            },
-            _ => s.clone(),
-        })
-        .collect();
-    crate::AnlzFile { header: local.header.clone(), sections }
 }

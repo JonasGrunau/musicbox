@@ -507,8 +507,11 @@ impl StageC {
         put(&mut o.hihat, done, &hh);
         let (lines, count) = self.cqt.frames(&self.buf8, self.state == 2);
         if self.block == 1 {
-            o.cqt_first =
-                (fs8 * 0.00390625 * ((f64::from(bar - 1) * 60.0) / bpm + 0.0 * 0.001)) as i32;
+            // `IntroEndFind_a` @0x100dafb90 rounds up (`fcvtps`); its ms argument is 0 here.
+            o.cqt_first = (fs8
+                * 0.00390625
+                * 0.0f64.mul_add(0.001, (f64::from(bar - 1) * 60.0) / bpm))
+                .ceil() as i32;
         }
         o.cqt_frames += count as i32;
         let end = o.cqt_frames as usize;

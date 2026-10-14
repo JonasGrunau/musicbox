@@ -70,7 +70,7 @@ Getters/setters @0x10024e72c–0x10024f01c. The object holds MYSETTING at +0x08 
 | 11 | INDICATOR (brightness) | 0–2 shown as 1–3 | 2 |
 
 **Paired settings** (the "optional" flag of `generalSettingDefine` is set on 3, 7, 13, 15; exactly one of each pair is enabled after an edit):
-- **MONO SPLIT (A):** STEREO / MONO SPLIT write setting 3 = 0 / 1 and disable 13; NONE writes 13 = 2 and disables 3. Reading: setting 13's value when it is enabled, else setting 3's. (*Hypothesis:* the value written to 13 is 2; the decompiler lost the argument, 2 is the only value consistent with the read side.) A model check (`bVar2`) in front of this read is not decoded.
+- **MONO SPLIT (A):** STEREO / MONO SPLIT write setting 3 = 0 / 1 and disable 13; NONE writes 13 = 2 and disables 3. Reading: setting 13's value when it is enabled, else setting 3's. (*Hypothesis:* the value written to 13 is 2; the decompiler lost the argument, 2 is the only value consistent with the read side.) A model check in front of this read is not decoded.
 - **Talk over LEVEL:** −∞ disables 7 and writes 15 = 4 (its only valid value); −24…−6 dB write 7 = 0…3 and disable 15. Reading: 7 enabled → menu 1 + value; else 15 enabled → −∞; else −18dB. The level labels are inline short strings in `__GLOBAL__sub_I_MySettingsEditor.cpp` @0x101af7024.
 - **Mic echo BEAT:** 16 and 17 are always written together.
 

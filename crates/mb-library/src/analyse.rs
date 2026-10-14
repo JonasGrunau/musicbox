@@ -10,15 +10,15 @@
 //!    [`Command::RestoreAnalysis`](crate::Command::RestoreAnalysis), puts the previous files and
 //!    columns back.
 //!
-//! Sections musicbox does not compute yet (PSSI phrase, PVDI vocal) are carried over from the
-//! previous analysis files when the track had them, and left out otherwise, as
-//! `write_pmai_ext`/`write_pmai_ex2` leave out a section whose data is missing.
+//! Sections musicbox does not compute (PVDI vocal, and PSSI phrase when the phrase pass is off)
+//! are carried over from the previous analysis files when the track had them, and left out
+//! otherwise, as `write_pmai_ext`/`write_pmai_ex2` leave out a section whose data is missing.
 
 use crate::lookup::{NameTable, find_or_create, name_of};
 use crate::{Command, DbId, Effect, Error, Library, Result, xml_sync};
 use mb_anlz::tags::{
-    BeatGrid, CueKind, CueList, CueListExt, ExtBeatGrid, Path as PathTag, SeekPoint, SeekTable, TypedSection, Vbr, Wave3Band,
-    WaveColorPreview, WaveColorScroll, WaveNormalize, WavePreview, WaveScroll,
+    BeatGrid, CueKind, CueList, CueListExt, ExtBeatGrid, Path as PathTag, Phrase, SeekPoint, SeekTable, SongStructure, TypedSection,
+    Vbr, Wave3Band, WaveColorPreview, WaveColorScroll, WaveNormalize, WavePreview, WaveScroll,
 };
 use mb_anlz::{AnlzFile, FileHeader, Section, Tag};
 use mb_masterdb::{CounterColumn, OrphanTable};
@@ -38,11 +38,26 @@ pub struct AnalysisSettings {
     pub phrase: bool,
     /// `enableKeyAnalysis`: detect the key (`docs/re/analysis-key.md`) and write `KeyID`.
     pub key: bool,
+    /// `HighPrecisionBeatAnalyze`: the high-precision beat grid in the given mode
+    /// (`docs/re/analysis-beats-hp.md`); `None` for the Normal-mode grid.
+    pub high_precision: Option<mb_analysis::hpbeat::HpMode>,
 }
 
 impl Default for AnalysisSettings {
     fn default() -> Self {
-        Self { auto_gain: true, phrase: false, key: true }
+        Self { auto_gain: true, phrase: false, key: true, high_precision: None }
+    }
+}
+
+impl AnalysisSettings {
+    /// [`AnalysisSettings::high_precision`] from the preferences `HighPrecisionBeatAnalyze`
+    /// (default 0) and `trackHiPrecisionBeatAnalysisMode` (default 2, Auto), as `execAnalyze`
+    /// reads them.
+    pub fn high_precision_from(enabled: Option<&str>, mode: Option<&str>) -> Option<mb_analysis::hpbeat::HpMode> {
+        if enabled?.trim() != "1" {
+            return None;
+        }
+        Some(mb_analysis::hpbeat::HpMode::from_pref(mode.and_then(|v| v.trim().parse().ok()).unwrap_or(2)))
     }
 }
 
@@ -67,6 +82,11 @@ pub struct TrackAnalysis {
     /// The local artwork made from the file's embedded picture (`analyse-track.md` § Artwork),
     /// written only when the track has no artwork yet.
     pub artwork: Option<mb_usb::artwork::LocalArtworkSet>,
+    /// High precision found no beats: rekordbox leaves the previous grid (PQTZ, PQT2) in place.
+    pub keep_old_grid: bool,
+    /// The phrase pass ran: `ext` holds its PSSI when it found phrases, and an earlier PSSI is
+    /// not carried over.
+    pub phrase_analysed: bool,
 }
 
 /// Analyses the audio file at `audio`. `file_name` is the name rekordbox puts into PPTH
@@ -78,6 +98,7 @@ pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings)
         loudness: settings.auto_gain,
         phrase: settings.phrase,
         key: settings.key,
+        high_precision: settings.high_precision,
         ..mb_analysis::Options::default()
     };
     let a = mb_analysis::analyze(audio, opts).map_err(|e| fail(&e))?;
@@ -119,7 +140,9 @@ pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings)
         TypedSection::CueListExt(CueListExt::empty(CueKind::Memory)),
     ];
     if let Some(g) = &grid {
-        ext.push(TypedSection::ExtBeatGrid(ExtBeatGrid::from_beats(&beats, g.beats.iter().map(|b| b.sub_ms).collect())));
+        let mut pqt2 = ExtBeatGrid::from_beats(&beats, g.beats.iter().map(|b| b.sub_ms).collect());
+        pqt2.analysis_type = a.grid_type;
+        ext.push(TypedSection::ExtBeatGrid(pqt2));
     }
     ext.push(TypedSection::WaveColorScroll(WaveColorScroll {
         unk_0c: 0,
@@ -142,7 +165,22 @@ pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings)
                 .collect(),
         }));
     }
-    // PSSI (phrase) goes here once `mb-analysis` computes it (`analysis-beats.md` § 8).
+    // PSSI: `set_pmai_ext_song_struct_data` @0x100f26a7c (`analysis-phrase.md` § 8).
+    if let Some(r) = &a.phrase {
+        ext.push(TypedSection::SongStructure(SongStructure {
+            scrambled: false,
+            unk_0c: 0,
+            mood: r.mood as u16,
+            unk_14: 0,
+            unk_18: 0,
+            end_beat: r.end_beat as u16,
+            bank: r.bank as u8,
+            unk_1d: r.unk_14 as u8,
+            unk_1e: 0,
+            unk_1f: 0,
+            phrases: r.rows().into_iter().map(|words| Phrase { words }).collect(),
+        }));
+    }
     let ext = AnlzFile::from_typed(FileHeader::default(), &ext);
 
     // .2EX (`write_pmai_ex2`): PPTH PWV7 PWV6 PWVC [PVDI].
@@ -157,11 +195,14 @@ pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings)
     );
 
     let (sample_rate, bit_rate, bit_depth) = stream_columns(audio, &info);
+    // High precision without beats: the grid files stay, the BPM column becomes 0 (oracle-b's
+    // 12 sweeps).
+    let keep_old_grid = settings.high_precision.is_some() && grid.is_none();
     Ok(TrackAnalysis {
         dat,
         ext,
         ex2,
-        bpm_x100: grid.as_ref().filter(|g| !g.beats.is_empty()).map(|g| i64::from(g.bpm)),
+        bpm_x100: if keep_old_grid { Some(0) } else { grid.as_ref().filter(|g| !g.beats.is_empty()).map(|g| i64::from(g.bpm)) },
         sample_rate,
         bit_rate,
         bit_depth,
@@ -174,6 +215,8 @@ pub fn analyse_track(audio: &Path, file_name: &str, settings: &AnalysisSettings)
         }),
         key: a.key.map(|k| mb_analysis::key::scale_name(k).to_owned()),
         artwork: crate::tags::embedded_picture(audio).and_then(|p| mb_usb::artwork::local_set(&p).ok()),
+        keep_old_grid,
+        phrase_analysed: settings.phrase,
     })
 }
 
@@ -301,6 +344,18 @@ fn old_section(path: &Path, tag: Tag) -> Option<Section> {
     f.sections_with(tag).next().cloned()
 }
 
+/// The previous PQTZ and PQT2 in place of the new (empty) grid, as rekordbox leaves them when
+/// the high-precision pass finds no beats (`analysis-beats-hp.md` § 6).
+fn keep_old_grid(paths: &[PathBuf; 3], dat: &mut AnlzFile, ext: &mut AnlzFile) {
+    if let (Some(old), Some(s)) = (old_section(&paths[0], Tag::PQTZ), dat.sections.iter_mut().find(|s| s.tag == Tag::PQTZ)) {
+        *s = old;
+    }
+    if let Some(old) = old_section(&paths[1], Tag::PQT2) {
+        let at = ext.sections.iter().position(|s| s.tag == Tag::PWV5).unwrap_or(ext.sections.len());
+        ext.sections.insert(at, old);
+    }
+}
+
 /// `ID` of a `contentFile` row: the content UUID, `_`, the path with `/` percent-encoded
 /// (`common.md` § Agent-written `contentFile` rows).
 fn content_file_id(uuid: &str, path: &str) -> String {
@@ -398,9 +453,15 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     // Sections musicbox does not compute are kept from the previous files.
     let mut ext = analysis.ext.clone();
     let mut ex2 = analysis.ex2.clone();
-    let kept_phrase = old_section(&paths[1], Tag::PSSI).inspect(|s| ext.sections.push(s.clone())).is_some();
+    let own_phrase = ext.sections_with(Tag::PSSI).next().is_some();
+    let kept_phrase = !analysis.phrase_analysed
+        && old_section(&paths[1], Tag::PSSI).inspect(|s| ext.sections.push(s.clone())).is_some();
     let kept_vocal = old_section(&paths[2], Tag::PVDI).inspect(|s| ex2.sections.push(s.clone())).is_some();
-    let new_bytes = [analysis.dat.to_bytes(), ext.to_bytes(), ex2.to_bytes()];
+    let mut dat = analysis.dat.clone();
+    if analysis.keep_old_grid {
+        keep_old_grid(&paths, &mut dat, &mut ext);
+    }
+    let new_bytes = [dat.to_bytes(), ext.to_bytes(), ex2.to_bytes()];
 
     // Copy-on-write backup and the undo snapshot of the files.
     let previous: Vec<(PathBuf, Option<Vec<u8>>)> = paths.iter().map(|p| (p.clone(), std::fs::read(p).ok())).collect();
@@ -507,11 +568,15 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
         tx.increment_counter(content.as_str(), CounterColumn::TrackInfoUpdated)?;
         key_snapshot = Some((old_key_id.clone(), old_name));
     }
-    // Phrase and vocal: only what the files still carry (here: kept from an earlier analysis).
+    // Phrase and vocal: only what the files carry (phrase: ours, or kept from an earlier
+    // analysis; `setAnalyzedSongStructToContentLink` sets 0x10000).
     let mut final_link = ((link | LINK_QUEUED) & !LINK_STATUS_MASK) | 0xE | LINK_DONE;
     final_link &= !(LINK_PHRASE | LINK_VOCAL);
     if kept_phrase {
         final_link |= link & LINK_PHRASE;
+    }
+    if own_phrase {
+        final_link |= LINK_PHRASE;
     }
     if kept_vocal {
         final_link |= link & LINK_VOCAL;

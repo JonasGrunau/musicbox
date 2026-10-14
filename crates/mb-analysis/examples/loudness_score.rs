@@ -44,6 +44,7 @@ fn main() {
                         beats: false,
                         phrase: false,
                         key: false,
+                        high_precision: None,
                     };
                     let r = mb_analysis::analyze(&t.path, opts).map(|a| a.loudness.unwrap());
                     rows.lock().unwrap().push((t, r));

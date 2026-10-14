@@ -12,6 +12,11 @@ pub fn square_sum(x: &[f64]) -> f64 {
     lanes(x, |acc, v| v.mul_add(v, acc))
 }
 
+/// `Σ |m − x|` in [`sum`]'s lane order (the vectorised `fabd` loops of `IntroEndJudge`).
+pub fn abs_dev_sum(x: &[f64], m: f64) -> f64 {
+    lanes(x, |acc, v| (m - v).abs() + acc)
+}
+
 fn lanes(x: &[f64], f: impl Fn(f64, f64) -> f64) -> f64 {
     let n = x.len();
     if n == 0 {

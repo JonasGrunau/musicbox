@@ -372,7 +372,7 @@ When a job finishes, `exportProcessChange` @0x1009bf758 writes the log, and the 
 - `<art>_s.jpg`: 80×80.
 - `<art>_m.jpg`: 240×240.
 - `<art>_l.jpg`: 320×320.
-- **Square variants:** a non-square source is first centred (aspect kept) on a square canvas of side max(w, h) filled with **opaque black** (`DAT_1055527d0` = `juce::Colours::black` 0xFF000000, set in `__GLOBAL__sub_I_analyzer_if.cpp` @0x101634684), then rescaled to the target size with high-quality resampling (`create_rescaled_image` @0x1016233a4).
+- **Square variants:** a non-square source is first centred (aspect kept) on a square canvas of side max(w, h) filled with **opaque black** (the global @0x1055527d0 = `juce::Colours::black` 0xFF000000, set in `__GLOBAL__sub_I_analyzer_if.cpp` @0x101634684), then rescaled to the target size with high-quality resampling (`create_rescaled_image` @0x1016233a4).
 - `create_small_arts_if_not_exists` @0x1009bb8a4 regenerates missing `_s`/`_m` files (and `_l` when needed) before an export.
 
 **Device files** (`export_artwork` @0x1009bb078):

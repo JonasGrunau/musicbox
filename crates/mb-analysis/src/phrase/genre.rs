@@ -115,7 +115,8 @@ pub fn tenkei_genre1(bpm: f64, kick6: bool) -> i32 {
 
 /// `CalcTrackLowPowerRatio(low, all, n)`: √(Σlow/Σall), per bar (16 quarters from the start)
 /// the low/full ratio and the low sum, and their average (under 128 beats) or the largest
-/// 16-bar mean.
+/// 16-bar mean. Stage D reads `ratio` and `bar_low`; the replay test checks all of them.
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct LowPowerRatio {
     pub ratio: f64,
     pub bar_ratio: Vec<f64>,
@@ -410,26 +411,17 @@ pub fn fade_out(low: &[f64], all: &[f64]) -> i32 {
             r[j] = s / e2[j];
         }
     }
-    let mut m = e2[0];
-    for &v in &e2[1..] {
-        if m <= v {
-            m = v;
-        }
-    }
-    if m * 0.001 <= e2[15] || !(e2[15] < e2[14]) || !(m <= r[14]) {
+    // `fmaxnm` / `fminnm` chains (asm @0x101847ba0).
+    let m = e2.iter().copied().fold(e2[0], f64::max);
+    if m * 0.001 <= e2[15] || e2[14] <= e2[15] {
         return 0;
     }
-    let mut rm = r[0];
-    for &v in &r[2..12] {
-        if rm <= v {
-            rm = v;
-        }
-    }
-    if r[14] <= rm && e2[14] < e2[13] && m <= r[13] && r[13] <= rm && e2[13] < e2[12] {
-        i32::from(m <= r[12] && r[12] <= rm)
-    } else {
-        0
-    }
+    let rmin = r[..12].iter().copied().fold(r[0], f64::min);
+    let rmax = r[..12].iter().copied().fold(r[0], f64::max);
+    let inside = |v: f64| !(rmin > v) && !(v > rmax);
+    i32::from(
+        inside(r[14]) && e2[14] < e2[13] && inside(r[13]) && e2[13] < e2[12] && rmin <= r[12] && r[12] <= rmax,
+    )
 }
 
 /// `Genre12FinalJudge(genre, n, peaks, quarter_peaks)`: genre 2 becomes 1 when the low-band
@@ -545,4 +537,303 @@ pub fn secure_points(peaks: &[f64], bar: i32) -> Vec<i32> {
     }
     out.sort_unstable();
     out
+}
+
+/// Bar means of the beat peaks from the first downbeat (`count = max(nb − 1, 1)` bars, the
+/// rest 0), as several stage-D judges build them.
+fn bar_means(peaks: &[f64], bar: i32) -> Vec<f64> {
+    let n = peaks.len() as i32;
+    let nb = mat::cdiv(n, 4).max(0) as usize;
+    let mut v = vec![0.0f64; nb];
+    if n > 7 {
+        let count = (nb as i32 - 1).max(1) as usize;
+        let mut i = bar - 1;
+        for d in v.iter_mut().take(count) {
+            *d = sum_ij(peaks, i, i + 3) * 0.25;
+            i += 4;
+        }
+    }
+    v
+}
+
+/// Flattens bar-to-bar changes under 10 % (or under 0.05) onto the previous value.
+fn flatten_small(v: &mut [f64], n_peaks: i32) {
+    if n_peaks <= 7 || v.is_empty() {
+        return;
+    }
+    let count = (v.len() as i32 - 1).max(1) as usize;
+    let mut prev = v[0];
+    for k in 1..=count.min(v.len() - 1) {
+        let d = (prev - v[k]).abs();
+        if !(prev * 0.1 <= d) || d < 0.05 {
+            v[k] = prev;
+        }
+        prev = v[k];
+    }
+}
+
+/// `SongStructureAna_Type_Genre_Judge(peaks, bar, duration, secure, labels1, labels2,
+/// &genre, &mood)` @0x1005ed3b4, for genre-2 tracks: short dips in the bar level are filled
+/// (asm @0x1005ed6f8), and the spread of the largest level steps (peak height × width of the
+/// sorted steps, mirrored), the "up" labels (31) and the build-ups (32/33) decide between mood
+/// 1 (genre 1) and mood 2.
+pub fn type_genre_judge(
+    peaks: &[f64],
+    bar: i32,
+    dur: f64,
+    labels1: &[i32],
+    labels2: &[i32],
+    genre: &mut i32,
+    mood: &mut i32,
+) -> Option<()> {
+    let n = peaks.len() as i32;
+    let (max31, max32, high, mid) = if dur <= 600.0 {
+        (2, 1, 3.0, 1.5)
+    } else {
+        ((dur * 0.00667) as i32, (dur * 0.00333) as i32, dur * 0.00833, dur * 0.00417)
+    };
+    let mut lvl = bar_means(peaks, bar);
+    flatten_small(&mut lvl, n);
+    let nb = lvl.len();
+    let mut c8 = vec![0.0f64; nb];
+    if n > 3 {
+        for (d, &v) in c8.iter_mut().zip(&lvl) {
+            *d = 1.0 - v;
+        }
+    }
+    let mut e8 = c8.clone();
+    let mut pk = super::d_feat::findpeaks_ex(&c8)?;
+    let last = nb as i32 - 1;
+    let c = |i: i32| c8[i as usize];
+    let count = pk.vals.len();
+    let mut left = 0i32;
+    let mut right = 0i32;
+    if count >= 3 {
+        let mut u = count - 2;
+        loop {
+            if pk.widths[u] >= 4.0 {
+                pk.vals.remove(u);
+                pk.locs.remove(u);
+                pk.widths.remove(u);
+                pk.proms.remove(u);
+            } else {
+                let l = pk.locs[u];
+                // Left foot: walk left while the next value is lower (kept when the start is
+                // reached).
+                let mut j = 0;
+                while l + j >= 2 {
+                    let (a, b) = (c(l - 1 + j), c(l - 2 + j));
+                    j -= 1;
+                    if !(a > b) {
+                        left = l + j;
+                        break;
+                    }
+                }
+                // Over a plateau, then down to the right foot (the previous foot when the
+                // end is reached).
+                let mut q = l - 1;
+                let top = loop {
+                    if q >= last {
+                        break l;
+                    }
+                    let (a, b) = (c(q), c(q + 1));
+                    q += 1;
+                    if !(a <= b) {
+                        break q - 1;
+                    }
+                };
+                let mut steps = top.max(last) - top;
+                let mut k = top;
+                right = loop {
+                    if steps == 0 {
+                        break right;
+                    }
+                    let (a, b) = (c(k), c(k + 1));
+                    steps -= 1;
+                    if !(a > b) {
+                        break k;
+                    }
+                    k += 1;
+                };
+                if left < right && left + 1 != right {
+                    let v = e8[left as usize];
+                    for d in &mut e8[(left + 1) as usize..right as usize] {
+                        *d = v;
+                    }
+                }
+            }
+            if u <= 1 {
+                break;
+            }
+            u -= 1;
+        }
+    }
+    let count = pk.vals.len();
+    if count >= 1 && pk.locs[0] >= 1 {
+        let l0 = pk.locs[0];
+        let mut x = l0;
+        let left0 = loop {
+            if x < 2 {
+                break 0;
+            }
+            let (a, b) = (c(x - 1), c(x - 2));
+            x -= 1;
+            if !(a > b) {
+                break x;
+            }
+        };
+        let (top, _) = rise(&c8, l0 - 1, last);
+        let r = fall(&c8, top, last).unwrap_or(right);
+        fill(&mut e8, &c8, left0, r);
+        left = left0;
+        if count >= 2 {
+            let l = pk.locs[pk.locs.len() - 1];
+            let mut x = l;
+            while x >= 2 {
+                let (a, b) = (c(x - 1), c(x - 2));
+                x -= 1;
+                if !(a > b) {
+                    left = x;
+                    break;
+                }
+            }
+            let (top, _) = rise(&c8, l - 1, last);
+            let r = fall(&c8, top, last).unwrap_or(last);
+            fill(&mut e8, &c8, left, r);
+        }
+    }
+    if n >= 4 {
+        for v in &mut e8 {
+            *v = 1.0 - *v;
+        }
+    }
+    flatten_small(&mut e8, n);
+    // The bar-to-bar steps without the first 16 and the last 17, sorted descending.
+    let mut steps = vec![0.0f64; nb];
+    if n > 7 {
+        let count = (nb as i32 - 1).max(1) as usize;
+        for k in 0..count.min(nb.saturating_sub(1)) {
+            steps[k] = e8[k + 1] - e8[k];
+        }
+    }
+    if steps.len() > 34 {
+        let keep = steps.len() - 17;
+        steps.truncate(keep);
+        steps.drain(..16);
+    }
+    steps.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let m = steps.len();
+    let half = m / 2;
+    let odd = (m & !1) as i32 - 1;
+    let mut up = vec![0.0f64; m];
+    let mut down = vec![0.0f64; m];
+    if (half as i32) < odd {
+        for t in 0..half - 1 {
+            up[half + t] = steps[t];
+            down[half + t] = -steps[m - 1 - t];
+        }
+    }
+    if m > 1 {
+        for t in 0..half {
+            up[half - 1 - t] = steps[t];
+            down[half - 1 - t] = -steps[m - 1 - t];
+        }
+    }
+    let p1 = super::d_feat::findpeaks_ex(&up)?;
+    let p2 = super::d_feat::findpeaks_ex(&down)?;
+    let n31 = labels1.iter().filter(|&&v| v == 31).count() as i32;
+    let n32 = labels2
+        .windows(2)
+        .filter(|w| w[1] == 32 || (w[1] == 33 && w[0] != 10))
+        .count() as i32;
+    let score = p2.widths[0].mul_add(p2.vals[0], p1.widths[0] * p1.vals[0]);
+    if score >= high || n31 >= max31 || n32 >= max32 {
+        *genre = 1;
+        *mood = 1;
+    } else {
+        *mood = if score < mid { 2 } else { 1 };
+    }
+    Some(())
+}
+
+/// From `p`, over rising values to the top (`(p, p)` when the end is reached first).
+fn rise(c: &[f64], p: i32, last: i32) -> (i32, bool) {
+    let mut q = p;
+    loop {
+        if q >= last {
+            return (p, false);
+        }
+        let (a, b) = (c[q as usize], c[q as usize + 1]);
+        q += 1;
+        if !(a <= b) {
+            return (q - 1, true);
+        }
+    }
+}
+
+/// From `top`, down to the foot; `None` when the end is reached.
+fn fall(c: &[f64], top: i32, last: i32) -> Option<i32> {
+    let mut steps = top.max(last) - top;
+    let mut k = top;
+    loop {
+        if steps == 0 {
+            return None;
+        }
+        let (a, b) = (c[k as usize], c[k as usize + 1]);
+        steps -= 1;
+        if !(a > b) {
+            return Some(k);
+        }
+        k += 1;
+    }
+}
+
+/// Fills a dip between feet `l` and `r`: from `l` with `e[l]` when `c[l] > c[r]`, else
+/// after `l` with `e[r]`.
+fn fill(e: &mut [f64], c: &[f64], l: i32, r: i32) {
+    if c[l as usize] > c[r as usize] {
+        if l < r {
+            let v = e[l as usize];
+            for d in &mut e[l as usize..r as usize] {
+                *d = v;
+            }
+        }
+    } else if l + 1 < r {
+        let v = e[r as usize];
+        for d in &mut e[(l + 1) as usize..r as usize] {
+            *d = v;
+        }
+    }
+}
+
+/// `DetectSlowrock(a, b, bpm)` @0x10111d2f8: two 16th-note hit patterns (one byte per
+/// 16th) show the slow-rock figure — a shared hit, five empty steps, an off-beat hit in `b`
+/// only, five more empty steps, a shared hit — at least twice, one bar (16 steps ±1) apart.
+pub fn detect_slowrock(a: &[u8], b: &[u8]) -> i32 {
+    let n = a.len().min(b.len());
+    if a.is_empty() || b.is_empty() || n <= 32 {
+        return 0;
+    }
+    let both = |i: usize, v: u8| a[i] == v && b[i] == v;
+    let off = |i: usize| (a[i] == 0 && b[i] == 1) as i32;
+    let mut count = 0;
+    let mut last = 0usize;
+    for i in 0..n - 32 {
+        if !(both(i, 1) && (2..=6).all(|k| both(i + k, 0))) {
+            continue;
+        }
+        if off(i + 7) + off(i + 8) + off(i + 9) == 0 || !(10..=14).all(|k| both(i + k, 0)) {
+            continue;
+        }
+        if (15..=17).filter(|&k| both(i + k, 1)).count() == 0 {
+            continue;
+        }
+        if i == last || i + 1 == last || i + 2 == last {
+            count += 1;
+            last = 0;
+        } else {
+            last = i + 17;
+        }
+    }
+    (count > 1) as i32
 }

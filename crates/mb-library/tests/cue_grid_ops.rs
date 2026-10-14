@@ -248,7 +248,7 @@ fn grid_shift_matches_rekordbox_byte_for_byte() {
         .unwrap();
     let root = private_anlz(&dir, &rel);
     lib.set_analysis_root(&root);
-    lib.set_anlz_backup(&dir.dir.join("backup"));
+    lib.set_anlz_backup(dir.dir.join("backup"));
     let dat = root.join(rel.trim_start_matches('/'));
     let ext = dat.with_extension("EXT");
     let old = read(&dat).beat_grid().unwrap();

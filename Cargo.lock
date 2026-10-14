@@ -2287,7 +2287,9 @@ dependencies = [
  "mb-audio",
  "mb-dsp",
  "mb-masterdb",
+ "mb-nn",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -2372,6 +2374,15 @@ dependencies = [
  "sysinfo",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "mb-nn"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+ "md-5",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -10,8 +10,10 @@ description = "Track analysis matching rekordbox 7.2.19: waveforms, auto-gain, N
 thiserror.workspace = true
 mb-audio = { path = "../mb-audio" }
 mb-dsp = { path = "../mb-dsp" }
+mb-nn = { path = "../mb-nn" }
 
 [dev-dependencies]
+sha2 = "0.10"
 anyhow.workspace = true
 mb-anlz = { path = "../mb-anlz" }
 mb-masterdb = { path = "../mb-masterdb" }

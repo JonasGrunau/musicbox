@@ -355,8 +355,9 @@ fn int_sum(v: &[f64]) -> f64 {
 }
 
 /// `findpeaks_ex(x)`: MATLAB-style local maxima (a rise followed by a fall or flat), with
-/// 1-based locations, the prominence against the left side only, and the width at half
-/// prominence with linear interpolation.
+/// 1-based locations, the prominence against the higher of the two bases (the minimum on each
+/// side up to the next higher value), and the width at half prominence with linear
+/// interpolation.
 pub struct Peaks {
     pub vals: Vec<f64>,
     pub locs: Vec<i32>,
@@ -415,8 +416,23 @@ pub fn findpeaks_ex(x: &[f64]) -> Option<Peaks> {
             return None;
         }
         let lo = (left - 1).max(0) as usize;
-        let mn = mat::min_val(&x[lo..(lo + cnt as usize).min(x.len())]);
-        proms[u] = v - mn;
+        let left_min = mat::min_val(&x[lo..(lo + cnt as usize).min(x.len())]);
+        // The right base: up to the first higher value (or the end).
+        let mut right = len;
+        for p in loc..=len {
+            if v < x[(p - 1) as usize] {
+                right = p;
+                break;
+            }
+        }
+        let rcnt = right - loc + 1;
+        if rcnt < 0 {
+            return None;
+        }
+        let ro = (loc - 1).max(0) as usize;
+        let right_min = mat::min_val(&x[ro..(ro + rcnt as usize).min(x.len())]);
+        // `fmaxnm`: the higher of the two bases.
+        proms[u] = v - left_min.max(right_min);
     }
     let mut widths = vec![0.0; n];
     let mut right = 0i32;

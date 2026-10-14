@@ -215,6 +215,7 @@ pub fn up_simpleloop(
 }
 
 /// The four per-block outputs of `Up4_8_16Ana` (+ the relabelled list).
+#[derive(Debug, Clone, Default)]
 pub struct UpOut {
     pub labels: Vec<i32>,
     pub a: Vec<i32>,

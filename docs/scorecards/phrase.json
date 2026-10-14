@@ -1,0 +1,67 @@
+{
+  "scorecard": "phrase analysis (SongStructureAnalyze stages A-D) -> PSSI",
+  "date": "2026-10-14",
+  "rekordbox": "7.2.19.0342",
+  "macos": "27.0",
+  "code": "crates/mb-analysis/src/phrase/ (stage_d.rs, adjust.rs: result -> PSSI rows), crates/mb-library/src/analyse.rs (PSSI in .EXT, ContentLink 0x10000)",
+  "spec": "docs/re/analysis-phrase.md",
+  "command": "cargo run --release -p mb-analysis --example phrase_score -- [--dump]  (MB_ORACLE=oracle-b MB_HP=dynamic for the second fixture)",
+  "tests": [
+    "cargo test --release -p mb-library --test analyse_ops  (PSSI in the .EXT for the probes; MB_ORACLE_FULL=1 for all tracks; phrase_pass_writes_pssi for the ContentLink bit)",
+    "phrase::replay (MB_PHRASE_TRACE / MB_PHRASE_D, traces outside the repo): every stage-D callee and the whole result against rekordbox's own routines"
+  ],
+  "compared": "mood, end beat, bank, byte 0x1d and every phrase word (start beat, kind, variant flags, fill flag, fill start)",
+  "inputs": {
+    "own": "our whole analysis pass: grid, phrase shift, stages A-D",
+    "stored_grid": "rekordbox's PQTZ and djmdContent.BPM as the anchor (beat 0's tempo where the BPM column is 0)"
+  },
+  "oracle_a": {
+    "fixture": "Normal mode, phrase on (grid shifted)",
+    "tracks": 169,
+    "with_pssi": 161,
+    "own": {
+      "presence_matches": 169,
+      "pssi_identical": 159,
+      "of_pssi_tracks": 161,
+      "phrases_identical": "2432/2436 by index"
+    },
+    "stored_grid": {
+      "pssi_identical": 152,
+      "note": "the stored grid is already shifted: on the 7 click_128_offset1234 probes the shifted first beat fails the one-beat precondition, so this input cannot reproduce them"
+    },
+    "misses": [
+      "wav_96k32f/click_128_offset1234: our grid shift differs (analysis-phrase.md § 6), so the phrases differ",
+      "wav_96k32f/tempo_120_to_126: one phrase more than rekordbox (also on oracle-b); input side, the harness running rekordbox's code on our stream gives our result"
+    ]
+  },
+  "oracle_b": {
+    "fixture": "high-precision Dynamic: no grid shift, stage B keeps the anchor (urahaku off)",
+    "tracks": 169,
+    "with_pssi": 160,
+    "own_high_precision_dynamic": {
+      "presence_matches": 157,
+      "pssi_identical": 147,
+      "of_pssi_tracks": 160,
+      "note": "12 misses are the sweep_20_20k probes: high precision finds no beats, rekordbox falls back to the stored grid and its BPM; analyse_track has no previous grid to fall back to"
+    },
+    "stored_grid": {
+      "presence_matches": 169,
+      "pssi_identical": 159,
+      "of_pssi_tracks": 160,
+      "phrases_identical": "2378/2379 by index"
+    },
+    "misses": [
+      "wav_96k32f/tempo_120_to_126 (as on oracle-a)"
+    ]
+  },
+  "against_rekordbox_routines": {
+    "set": "oracle-a, 161 tracks with PSSI, rekordbox's routines run on our analysis stream",
+    "stage_c_outputs": "161/161 identical",
+    "stage_d_callees": "every recorded call identical (about 400 000 calls, 60+ functions)",
+    "stage_d_inputs_in_order": "161/161",
+    "result_struct": "161/161 identical"
+  },
+  "targets": {
+    "pssi_identical": ">= 95%: met (oracle-a 98.8% own; oracle-b 99.4% on the stored grid)"
+  }
+}
