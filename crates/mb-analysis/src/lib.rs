@@ -15,6 +15,7 @@ pub mod key;
 pub mod loud;
 pub mod loudness;
 pub mod phrase;
+pub mod vocal;
 pub mod wavecreator;
 pub mod zoom;
 
@@ -75,6 +76,9 @@ pub struct Options {
     /// High-precision beat analysis (`HighPrecisionBeatAnalyze`, mode from
     /// `trackHiPrecisionBeatAnalysisMode`); needs `beats` (`analysis-beats-hp.md`).
     pub high_precision: Option<hpbeat::HpMode>,
+    /// Vocal detection (`trackAnalysisSettingsVocalDetect`, default off), with rekordbox's own
+    /// network and statistics from the installed app (`analysis-vocal.md`).
+    pub vocal: bool,
 }
 
 impl Default for Options {
@@ -86,6 +90,7 @@ impl Default for Options {
             phrase: true,
             key: true,
             high_precision: None,
+            vocal: false,
         }
     }
 }
@@ -105,6 +110,11 @@ pub struct Analysis {
     pub high_precision_error: Option<String>,
     /// The phrase analysis result (PSSI), when it ran and rekordbox would store it.
     pub phrase: Option<phrase::PhraseResult>,
+    /// PVDI: one vocal level (0–4) per 1024 samples at 22.05 kHz, when vocal detection ran and
+    /// gave a result.
+    pub vocal: Option<Vec<u8>>,
+    /// Why vocal detection, when asked for, gave nothing (rekordbox's install or model missing).
+    pub vocal_error: Option<String>,
 }
 
 /// Analyses the waveforms of the audio file at `path`.
@@ -118,6 +128,7 @@ pub fn analyze_waveforms(path: impl AsRef<Path>) -> Result<Waveforms> {
             phrase: false,
             key: false,
             high_precision: None,
+            vocal: false,
         },
     )?;
     Ok(a.waveforms.unwrap_or_default())
@@ -162,6 +173,15 @@ pub fn analyze_with(
         (opts.beats && opts.key).then(|| key::KeyCollector::new(rate, total, info.channels));
     // madmom's input: the `(L + R)/2` float samples
     let mut mono = (opts.beats && opts.high_precision.is_some()).then(|| Vec::with_capacity(total as usize));
+    let mut vocal_error = None;
+    let mut voc = match opts.vocal.then(vocal::Model::get) {
+        Some(Ok(m)) => Some((m, vocal::VocalDetector::new(rate, m.tables()), Vec::with_capacity(block_len(rate)))),
+        Some(Err(e)) => {
+            vocal_error = Some(e);
+            None
+        }
+        None => None,
+    };
     let block = block_len(rate);
     let mut frames = vec![[0.0f32; 2]; block];
     let mut pcm = vec![[0i16; 2]; block];
@@ -198,6 +218,16 @@ pub fn analyze_with(
         }
         if let Some(k) = &mut keys {
             k.put(pcm);
+        }
+        if let Some((_, det, buf)) = &mut voc {
+            // the thread's mono mix of the 16-bit samples (`CBeatAnalyzeThread::analyze`)
+            buf.clear();
+            if info.channels == 2 {
+                buf.extend(pcm.iter().map(|s| (f32::from(s[1]) + f32::from(s[0])) * 0.5));
+            } else {
+                buf.extend(pcm.iter().map(|s| f32::from(s[0])));
+            }
+            det.put(buf);
         }
         pos += got as u64;
     }
@@ -248,5 +278,14 @@ pub fn analyze_with(
         grid_type,
         high_precision_error,
         phrase: phrases,
+        vocal: match voc.map(|(m, det, _)| m.detect(det)) {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => {
+                vocal_error = Some(e);
+                None
+            }
+            None => None,
+        },
+        vocal_error,
     })
 }

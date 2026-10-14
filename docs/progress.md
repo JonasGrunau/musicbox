@@ -2,13 +2,13 @@
 
 Newest entry first. Each entry records what changed, what is verified, and the next action.
 
-## 2026-10-14 — M6: high precision and phrase done; vocal in progress
+## 2026-10-14 — M6: high precision, phrase and vocal done
 | Part | State | Commits |
 |---|---|---|
 | High-precision beats, Dynamic (mode 4) | rekordbox's own TensorFlow 2.16.1 + models loaded at run time (`mb-nn`, nothing bundled); madmom + bar HMM + BALib v2 Focus; oracle-b PQTZ/PQT2/BPM 154/154; 12 sweeps without beats keep the old grid with BPM 0, as rekordbox. Normal/Auto modes (2/3) not ported. Spec `analysis-beats-hp.md`, scorecard `beats-hp.json` | 998d497, fcdd72b |
 | Phrase (PSSI) | stages A–D ported, stage D equal to rekordbox's own code on 161/161; PSSI written by `analyse_track` (ContentLink 0x10000) when the phrase preference is on; oracle-a 159/161, oracle-b (HP) 159/160; misses = 96 kHz probes (decoded-input side) | 998d497, a6ad190 |
 | Stored-grid fallback | when HP finds no beats, key and phrase run on the stored grid, as rekordbox does (oracle-b sweeps: key and PSSI right) | a6ad190 |
-| Vocal (PVDI) | in progress (worker) | – |
+| Vocal (PVDI) | rekordbox's own vocal network (the plain `vd_param_raw.pb` it ships; nothing decrypted) and the learned feature statistics read MD5-checked from the installed executable at run time; PVDI identical 169/169 on oracle-a and oracle-b, every stage bit-identical to rekordbox's VocalDetector; `trackAnalysisSettingsVocalDetect`, ContentLink 0x100000; the app notes when the pass is skipped | (this commit) |
 | ONNX: `.3EX` embeddings, auto-cue | queued after vocal (optional; both off in the user's preferences); `.3EX` ground truth: 14 files in sandbox-initial; auto-cue has none yet | – |
 
 Workers' doc/scorecard files are written by the coordinator: a hook stops subagents from writing report files, and it is not bypassed.

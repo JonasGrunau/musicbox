@@ -10,15 +10,16 @@
 //!    [`Command::RestoreAnalysis`](crate::Command::RestoreAnalysis), puts the previous files and
 //!    columns back.
 //!
-//! Sections musicbox does not compute (PVDI vocal, and PSSI phrase when the phrase pass is off)
-//! are carried over from the previous analysis files when the track had them, and left out
-//! otherwise, as `write_pmai_ext`/`write_pmai_ex2` leave out a section whose data is missing.
+//! Sections musicbox does not compute (PVDI when the vocal pass is off or cannot run, PSSI when
+//! the phrase pass is off) are carried over from the previous analysis files when the track had
+//! them, and left out otherwise, as `write_pmai_ext`/`write_pmai_ex2` leave out a section whose
+//! data is missing.
 
 use crate::lookup::{NameTable, find_or_create, name_of};
 use crate::{Command, DbId, Effect, Error, Library, Result, xml_sync};
 use mb_anlz::tags::{
     BeatGrid, CueKind, CueList, CueListExt, ExtBeatGrid, Path as PathTag, Phrase, SeekPoint, SeekTable, SongStructure, TypedSection,
-    Vbr, Wave3Band, WaveColorPreview, WaveColorScroll, WaveNormalize, WavePreview, WaveScroll,
+    Vbr, VocalDetect, Wave3Band, WaveColorPreview, WaveColorScroll, WaveNormalize, WavePreview, WaveScroll,
 };
 use mb_anlz::{AnlzFile, FileHeader, Section, Tag};
 use mb_masterdb::{CounterColumn, OrphanTable};
@@ -41,11 +42,14 @@ pub struct AnalysisSettings {
     /// `HighPrecisionBeatAnalyze`: the high-precision beat grid in the given mode
     /// (`docs/re/analysis-beats-hp.md`); `None` for the Normal-mode grid.
     pub high_precision: Option<mb_analysis::hpbeat::HpMode>,
+    /// `trackAnalysisSettingsVocalDetect` (default 0): PVDI and the `ContentLink` vocal bit
+    /// (`docs/re/analysis-vocal.md`).
+    pub vocal: bool,
 }
 
 impl Default for AnalysisSettings {
     fn default() -> Self {
-        Self { auto_gain: true, phrase: false, key: true, high_precision: None }
+        Self { auto_gain: true, phrase: false, key: true, high_precision: None, vocal: false }
     }
 }
 
@@ -87,6 +91,11 @@ pub struct TrackAnalysis {
     /// The phrase pass ran: `ext` holds its PSSI when it found phrases, and an earlier PSSI is
     /// not carried over.
     pub phrase_analysed: bool,
+    /// The vocal pass ran: `ex2` holds its PVDI, and an earlier PVDI is not carried over.
+    pub vocal_analysed: bool,
+    /// Why the vocal pass, when asked for, could not run (rekordbox's install or model
+    /// missing); an earlier PVDI is kept then.
+    pub vocal_error: Option<String>,
 }
 
 /// Analyses the audio file at `audio`. `file_name` is the name rekordbox puts into PPTH
@@ -111,6 +120,7 @@ pub fn analyse_track_with(
         phrase: settings.phrase,
         key: settings.key,
         high_precision: settings.high_precision,
+        vocal: settings.vocal,
         ..mb_analysis::Options::default()
     };
     let a = mb_analysis::analyze_with(audio, opts, stored).map_err(|e| fail(&e))?;
@@ -205,6 +215,12 @@ pub fn analyse_track_with(
             TypedSection::WaveNormalize(WaveNormalize { unk_0c: 0, coefficients: waves.pwvc.to_vec() }),
         ],
     );
+    // PVDI (`write_pmai_ex2_vocal_detect`): one level per 1024 samples at 22.05 kHz.
+    let mut ex2 = ex2;
+    if let Some(v) = &a.vocal {
+        let pvdi = VocalDetect { version: 0, unk_0e: 1024, unk_10: 22050, entry_size: 1, data: v.clone() };
+        ex2.sections.push(pvdi.encode());
+    }
 
     let (sample_rate, bit_rate, bit_depth) = stream_columns(audio, &info);
     // High precision without beats: the grid files stay, the BPM column becomes 0 (oracle-b's
@@ -229,6 +245,8 @@ pub fn analyse_track_with(
         artwork: crate::tags::embedded_picture(audio).and_then(|p| mb_usb::artwork::local_set(&p).ok()),
         keep_old_grid,
         phrase_analysed: settings.phrase,
+        vocal_analysed: settings.vocal && a.vocal_error.is_none(),
+        vocal_error: a.vocal_error,
     })
 }
 
@@ -487,7 +505,9 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     let own_phrase = ext.sections_with(Tag::PSSI).next().is_some();
     let kept_phrase = !analysis.phrase_analysed
         && old_section(&paths[1], Tag::PSSI).inspect(|s| ext.sections.push(s.clone())).is_some();
-    let kept_vocal = old_section(&paths[2], Tag::PVDI).inspect(|s| ex2.sections.push(s.clone())).is_some();
+    let own_vocal = ex2.sections_with(Tag::PVDI).next().is_some();
+    let kept_vocal = !analysis.vocal_analysed
+        && old_section(&paths[2], Tag::PVDI).inspect(|s| ex2.sections.push(s.clone())).is_some();
     let mut dat = analysis.dat.clone();
     if analysis.keep_old_grid {
         keep_old_grid(&paths, &mut dat, &mut ext);
@@ -608,6 +628,9 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     }
     if own_phrase {
         final_link |= LINK_PHRASE;
+    }
+    if own_vocal {
+        final_link |= LINK_VOCAL;
     }
     if kept_vocal {
         final_link |= link & LINK_VOCAL;

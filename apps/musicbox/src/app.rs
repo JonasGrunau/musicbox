@@ -89,6 +89,8 @@ pub struct App {
     device_import: Option<(PathBuf, bool)>,
     /// What the stick-side part of the last device import did (joined into the status line).
     device_import_note: Option<String>,
+    /// Why the last analysis skipped a pass (vocal), shown with the next status message.
+    analysis_note: Option<String>,
     /// The opened rekordbox.xml and its loader / the running XML export.
     xml: Option<crate::xml_bridge::XmlLibrary>,
     xml_loading: Option<Receiver<Result<crate::xml_bridge::XmlLibrary, String>>>,
@@ -119,6 +121,7 @@ impl App {
             remove: None,
             device_import: None,
             device_import_note: None,
+            analysis_note: None,
             xml: None,
             xml_loading: None,
             xml_export: None,
@@ -182,6 +185,7 @@ impl App {
                             pref("HighPrecisionBeatAnalyze").as_deref(),
                             pref("trackHiPrecisionBeatAnalysisMode").as_deref(),
                         ),
+                        vocal: pref("trackAnalysisSettingsVocalDetect").is_some_and(|v| v.trim() == "1"),
                     };
                     self.auto_analysis = pref("AutoAnalysis").is_some_and(|v| v.trim() == "1");
                     self.export_source = Some(export::Source {
@@ -433,11 +437,8 @@ impl App {
                     return;
                 }
                 Reply::Done { message, changed } => {
-                    let note = self.device_import_note.take();
-                    self.edit_status = Some(match note {
-                        Some(n) => format!("{message}; {n}"),
-                        None => message,
-                    });
+                    let notes: Vec<String> = [self.device_import_note.take(), self.analysis_note.take()].into_iter().flatten().collect();
+                    self.edit_status = Some(if notes.is_empty() { message } else { format!("{message}; {}", notes.join("; ")) });
                     reload |= changed;
                 }
                 Reply::DeviceEffect(effect) => {
@@ -746,7 +747,14 @@ impl App {
         let finished = queue.poll();
         for f in finished {
             match f.result {
-                Ok(analysis) => self.run(Command::ApplyAnalysis { content: f.content, analysis }),
+                Ok(analysis) => {
+                    // The vocal pass needs rekordbox's install (model, statistics); without it the
+                    // analysis completes and keeps an earlier PVDI.
+                    if let Some(e) = &analysis.vocal_error {
+                        self.analysis_note = Some(format!("no vocal analysis for {}: {e}", f.title));
+                    }
+                    self.run(Command::ApplyAnalysis { content: f.content, analysis })
+                }
                 Err(e) => self.edit_status = Some(format!("Analysis of {} failed: {e}", f.title)),
             }
         }

@@ -136,6 +136,7 @@ fn oracle_keys() {
             phrase: true,
             key: true,
             high_precision: None,
+            vocal: false,
         };
         let a = mb_analysis::analyze(&t.path, opts).expect("analyze");
         assert_eq!(

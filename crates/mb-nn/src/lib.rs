@@ -51,7 +51,9 @@ pub enum Model {
     BeatNo7,
     /// `models/detect_beat/model8`: the network of the other high-precision modes.
     BeatNo8,
-    /// `vd_param.pb`: the vocal detector's frozen graph (`Discriminator::inference`).
+    /// `vd_param_raw.pb`: the vocal detector's frozen graph as a plain `GraphDef`. rekordbox
+    /// itself loads the encrypted copy `vd_param.pb` (`tf_utils::LoadGraph` @0x1013a3d08);
+    /// musicbox only uses the plain file the app ships next to it and never decrypts anything.
     Vocal,
 }
 
@@ -61,7 +63,7 @@ impl Model {
         match self {
             Model::BeatNo7 => "models/detect_beat/model7",
             Model::BeatNo8 => "models/detect_beat/model8",
-            Model::Vocal => "vd_param.pb",
+            Model::Vocal => "vd_param_raw.pb",
         }
     }
 
@@ -79,7 +81,7 @@ impl Model {
                 ("variables/variables.data-00000-of-00001", "dfb57914726bf38e6dac829a2f82c1fb"),
                 ("variables/variables.index", "f4835efea6bc04a64ca1103b9b95729a"),
             ],
-            Model::Vocal => &[("", "13217b009062598a322f3427bb7cd21b")],
+            Model::Vocal => &[("", "93bff1a226507e1cffea8020921a5ab8")],
         }
     }
 }
@@ -122,6 +124,78 @@ pub fn verify(model: Model) -> Result<()> {
         .map_err(Error::Runtime)
 }
 
+/// rekordbox's main executable inside the app.
+const EXECUTABLE: &str = "Contents/MacOS/rekordbox";
+
+/// A byte range of rekordbox's executable that an analysis takes at run time (values derived
+/// from rekordbox's training data are never copied into musicbox): virtual address in the arm64
+/// slice, length and the MD5 of the bytes in rekordbox 7.2.19.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExeRegion {
+    pub vmaddr: u64,
+    pub len: usize,
+    pub md5: &'static str,
+}
+
+/// Reads `region` from the installed rekordbox executable: the arm64 slice of the universal
+/// binary, the address mapped through its segment load commands, the bytes checked against the
+/// recorded MD5 (a different build is refused).
+pub fn executable_bytes(region: ExeRegion) -> Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = app_path().join(EXECUTABLE);
+    let io = |e: std::io::Error| Error::Io(path.clone(), e);
+    let bad = |what: &str| Error::Runtime(format!("{}: {what}", path.display()));
+    let mut f = std::fs::File::open(&path).map_err(io)?;
+    let mut head = [0u8; 4096];
+    let n = f.read(&mut head).map_err(io)?;
+    let be = |o: usize| u32::from_be_bytes(head[o..o + 4].try_into().unwrap());
+    // the arm64 slice of a universal binary, or a thin arm64 Mach-O
+    let slice = match be(0) {
+        0xcafe_babe => (0..be(4) as usize)
+            .map(|i| 8 + 20 * i)
+            .take_while(|&o| o + 20 <= n)
+            .find(|&o| be(o) == 0x0100_000c)
+            .map(|o| u64::from(be(o + 8)))
+            .ok_or_else(|| bad("no arm64 slice"))?,
+        _ => 0,
+    };
+    let mut mh = [0u8; 32];
+    f.seek(SeekFrom::Start(slice)).map_err(io)?;
+    f.read_exact(&mut mh).map_err(io)?;
+    let le = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    if le(&mh, 0) != 0xfeed_facf || le(&mh, 4) != 0x0100_000c {
+        return Err(bad("not an arm64 Mach-O"));
+    }
+    let (ncmds, size) = (le(&mh, 16) as usize, le(&mh, 20) as usize);
+    let mut cmds = vec![0u8; size];
+    f.read_exact(&mut cmds).map_err(io)?;
+    let q = |o: usize| u64::from_le_bytes(cmds[o..o + 8].try_into().unwrap());
+    let (end, mut p, mut at) = (region.vmaddr + region.len as u64, 0usize, None);
+    for _ in 0..ncmds {
+        if p + 8 > size {
+            break;
+        }
+        let (cmd, len) = (le(&cmds, p), le(&cmds, p + 4) as usize);
+        // LC_SEGMENT_64: vmaddr, vmsize, fileoff, filesize at +24
+        if cmd == 0x19 && p + 56 <= size {
+            let (vm, off, fsize) = (q(p + 24), q(p + 40), q(p + 48));
+            if vm <= region.vmaddr && end <= vm + fsize {
+                at = Some(slice + off + (region.vmaddr - vm));
+            }
+        }
+        p += len.max(8);
+    }
+    let at = at.ok_or_else(|| bad("address outside the file-backed segments"))?;
+    let mut data = vec![0u8; region.len];
+    f.seek(SeekFrom::Start(at)).map_err(io)?;
+    f.read_exact(&mut data).map_err(io)?;
+    let found: String = Md5::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+    if found != region.md5 {
+        return Err(Error::Checksum { path, found, expected: region.md5 });
+    }
+    Ok(data)
+}
+
 // --- TensorFlow C API (tensorflow/c/c_api.h, 2.16) ---
 
 #[repr(C)]
@@ -132,6 +206,7 @@ struct TfOutput {
 
 type Ptr = *mut c_void;
 const TF_FLOAT: c_int = 1;
+const TF_INT32: c_int = 3;
 
 struct Api {
     _lib: Library,
@@ -306,6 +381,13 @@ pub struct Tensor {
     pub data: Vec<f32>,
 }
 
+/// One input of [`Session::run_feeds`].
+#[derive(Debug, Clone, Copy)]
+pub enum Feed<'a> {
+    F32(&'a Tensor),
+    I32 { dims: &'a [i64], data: &'a [i32] },
+}
+
 /// A loaded graph with its session. `TFWrapper::Model` keeps one per analysis.
 pub struct Session {
     api: &'static Api,
@@ -337,11 +419,14 @@ fn config_proto(threads: usize) -> Vec<u8> {
     p
 }
 
-fn session_options(api: &Api, threads: usize) -> Result<Ptr> {
+/// The `ConfigProto` `Discriminator::inference` @0x100b812d0 passes for the vocal model:
+/// intra-op 0 (TensorFlow's default pool), inter-op 1.
+const VOCAL_CONFIG: [u8; 4] = [2 << 3, 0, 5 << 3, 1];
+
+fn session_options(api: &Api, cfg: &[u8]) -> Result<Ptr> {
     let st = Status::new(api);
     // SAFETY: valid options handle; the proto bytes outlive the call.
     let opts = unsafe { (api.new_session_options)() };
-    let cfg = config_proto(threads);
     unsafe { (api.set_config)(opts, cfg.as_ptr().cast(), cfg.len(), st.1) };
     if let Err(e) = st.check() {
         // SAFETY: created above.
@@ -352,16 +437,16 @@ fn session_options(api: &Api, threads: usize) -> Result<Ptr> {
 }
 
 impl Session {
-    /// Loads one of rekordbox's models (`TFWrapper::Model::Pimpl` @0x10340520c: tag `serve`;
-    /// the vocal model is a frozen graph). `threads` = `std::thread::hardware_concurrency()` in
-    /// rekordbox.
+    /// Loads one of rekordbox's models (`TFWrapper::Model::Pimpl` @0x10340520c: tag `serve`,
+    /// `threads` = `std::thread::hardware_concurrency()` in rekordbox). The vocal model is a
+    /// frozen graph with the discriminator's own session configuration (`threads` unused).
     pub fn open(model: Model, threads: usize) -> Result<Session> {
         verify(model)?;
         match model {
             Model::Vocal => {
                 let path = model_path(model);
                 let pb = std::fs::read(&path).map_err(|e| Error::Io(path, e))?;
-                Self::frozen_graph(&pb, threads)
+                Self::frozen_graph_with(&pb, &VOCAL_CONFIG)
             }
             _ => Self::saved_model(&model_path(model), threads),
         }
@@ -373,7 +458,7 @@ impl Session {
         let dir_c = CString::new(dir.as_os_str().as_encoded_bytes()).map_err(|e| Error::Tf(e.to_string()))?;
         let tag = c"serve";
         let tags = [tag.as_ptr()];
-        let opts = session_options(api, threads)?;
+        let opts = session_options(api, &config_proto(threads))?;
         let st = Status::new(api);
         // SAFETY: valid handles; strings live across the call.
         let graph = unsafe { (api.new_graph)() };
@@ -399,6 +484,10 @@ impl Session {
 
     /// Imports a frozen `GraphDef` and opens a session on it.
     pub fn frozen_graph(pb: &[u8], threads: usize) -> Result<Session> {
+        Self::frozen_graph_with(pb, &config_proto(threads))
+    }
+
+    fn frozen_graph_with(pb: &[u8], cfg: &[u8]) -> Result<Session> {
         let api = api()?;
         let st = Status::new(api);
         // SAFETY: the buffer copies `pb`; all handles are freed below.
@@ -414,7 +503,7 @@ impl Session {
             unsafe { (api.delete_graph)(graph) };
             return Err(e);
         }
-        let opts = session_options(api, threads)?;
+        let opts = session_options(api, cfg)?;
         let session = unsafe { (api.new_session)(graph, opts, st.1) };
         unsafe { (api.delete_session_options)(opts) };
         if let Err(e) = st.check() {
@@ -440,6 +529,12 @@ impl Session {
 
     /// Runs the graph: feeds `inputs` (tensor name → f32 tensor) and fetches `outputs`.
     pub fn run(&self, inputs: &[(&str, &Tensor)], outputs: &[&str]) -> Result<Vec<Tensor>> {
+        let feeds: Vec<(&str, Feed<'_>)> = inputs.iter().map(|(n, t)| (*n, Feed::F32(t))).collect();
+        self.run_feeds(&feeds, outputs)
+    }
+
+    /// Like [`Session::run`], with f32 or i32 inputs.
+    pub fn run_feeds(&self, inputs: &[(&str, Feed<'_>)], outputs: &[&str]) -> Result<Vec<Tensor>> {
         let api = self.api;
         let mut in_ops = Vec::with_capacity(inputs.len());
         let mut in_vals: Vec<Ptr> = Vec::with_capacity(inputs.len());
@@ -459,10 +554,13 @@ impl Session {
                     return Err(e);
                 }
             };
-            let bytes = t.data.len() * 4;
-            // SAFETY: allocates `bytes` and copies the data into it.
-            let tt = unsafe { (api.allocate_tensor)(TF_FLOAT, t.dims.as_ptr(), t.dims.len() as c_int, bytes) };
-            unsafe { std::ptr::copy_nonoverlapping(t.data.as_ptr(), (api.tensor_data)(tt).cast::<f32>(), t.data.len()) };
+            let (ty, dims, src, n): (c_int, &[i64], *const u8, usize) = match t {
+                Feed::F32(t) => (TF_FLOAT, &t.dims, t.data.as_ptr().cast(), t.data.len()),
+                Feed::I32 { dims, data } => (TF_INT32, dims, data.as_ptr().cast(), data.len()),
+            };
+            // SAFETY: allocates `4·n` bytes and copies the 4-byte elements into it.
+            let tt = unsafe { (api.allocate_tensor)(ty, dims.as_ptr(), dims.len() as c_int, n * 4) };
+            unsafe { std::ptr::copy_nonoverlapping(src, (api.tensor_data)(tt).cast::<u8>(), n * 4) };
             in_ops.push(op);
             in_vals.push(tt);
         }

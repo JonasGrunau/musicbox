@@ -114,6 +114,7 @@ fn main() {
                         phrase: true,
                         key: true,
                         high_precision: hp,
+                        vocal: false,
                     };
                     // With the stored grid as the fallback where high precision finds no beats.
                     let own = mb_analysis::analyze_with(&t.path, opts, t.stored_grid().as_ref())

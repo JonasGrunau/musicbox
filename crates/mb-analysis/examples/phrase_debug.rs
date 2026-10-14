@@ -16,6 +16,7 @@ fn main() {
         phrase: false,
         key: false,
         high_precision: None,
+        vocal: false,
     };
     let a = mb_analysis::analyze(&path, opts).expect("analyze");
     let grid = a.beats.expect("grid");

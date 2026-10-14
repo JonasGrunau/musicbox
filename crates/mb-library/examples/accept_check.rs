@@ -108,6 +108,7 @@ fn main() -> anyhow::Result<()> {
                     pref("HighPrecisionBeatAnalyze").as_deref(),
                     pref("trackHiPrecisionBeatAnalysisMode").as_deref(),
                 ),
+                vocal: pref("trackAnalysisSettingsVocalDetect").is_some_and(|v| v.trim() == "1"),
             };
             println!("settings: {settings:?}");
             for t in unanalysed {

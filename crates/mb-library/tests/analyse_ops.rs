@@ -465,6 +465,53 @@ fn phrase_pass_writes_pssi() {
     assert_ne!(link & 0x10000, 0, "phrase bit");
 }
 
+/// With the vocal setting on, a re-analysis writes our own PVDI (equal to rekordbox's) and sets
+/// `ContentLink`'s vocal bit, without carrying the old section over. Needs the installed
+/// rekordbox (its network and statistics); skipped without it.
+#[test]
+fn vocal_pass_writes_pvdi() {
+    let Some(dir) = TempLibrary::new("oracle-a") else {
+        eprintln!("skipped: fixtures/oracle-a missing");
+        return;
+    };
+    let Some((share, all)) = tracks() else { return };
+    let Some(t) = all.iter().find(|t| {
+        t.path.exists()
+            && t.path.to_string_lossy().contains("/real/")
+            && load(&share, &t.rel, "2EX").is_some_and(|f| f.sections_with(Tag::PVDI).next().is_some())
+    }) else {
+        eprintln!("skipped: corpus audio missing");
+        return;
+    };
+    let settings = AnalysisSettings { vocal: true, ..AnalysisSettings::default() };
+    let a = analyse_track(&t.path, &t.file_name, &settings).unwrap();
+    if let Some(e) = &a.vocal_error {
+        eprintln!("skipped: {e}");
+        return;
+    }
+    let root = dir.dir.join("share");
+    let dat = root.join(t.rel.trim_start_matches('/'));
+    std::fs::create_dir_all(dat.parent().unwrap()).unwrap();
+    for ext in ["DAT", "EXT", "2EX"] {
+        std::fs::copy(share.join(t.rel.trim_start_matches('/')).with_extension(ext), dat.with_extension(ext)).unwrap();
+    }
+    // Test setup (not an op): no PVDI and no vocal bit before, so both must come from the pass.
+    let mut old = load(&share, &t.rel, "2EX").unwrap();
+    old.sections.retain(|s| s.tag != Tag::PVDI);
+    std::fs::write(dat.with_extension("2EX"), old.to_bytes()).unwrap();
+    let mut lib = Library::open_unguarded(&dir.db, &dir.passphrase).unwrap();
+    lib.set_analysis_root(&root);
+    lib.connection().execute("UPDATE djmdContent SET ContentLink = ContentLink & ~1048576 WHERE ID = ?1", [&t.id]).unwrap();
+    History::default().run(&mut lib, Command::ApplyAnalysis { content: DbId(t.id.clone()), analysis: Box::new(a) }).unwrap();
+    let ex2 = AnlzFile::parse(&std::fs::read(dat.with_extension("2EX")).unwrap()).unwrap();
+    let theirs = load(&share, &t.rel, "2EX").unwrap();
+    assert_eq!(ex2.sections_with(Tag::PVDI).count(), 1);
+    assert_eq!(ex2.sections_with(Tag::PVDI).next(), theirs.sections_with(Tag::PVDI).next());
+    assert_eq!(ex2.sections.iter().map(|s| s.tag).collect::<Vec<_>>(), theirs.sections.iter().map(|s| s.tag).collect::<Vec<_>>());
+    let Value::Integer(link) = get(&lib, "ContentLink", &t.id) else { panic!("ContentLink") };
+    assert_ne!(link & 0x100000, 0, "vocal bit");
+}
+
 /// High precision without beats (oracle-b's sweep probes): with the stored grid as input, key
 /// and phrase run on it as in rekordbox, so PSSI and key equal oracle-b's, and the old grid is
 /// kept.

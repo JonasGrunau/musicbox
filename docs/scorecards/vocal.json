@@ -1,0 +1,18 @@
+{
+  "scorecard": "vocal detection (PVDI)",
+  "date": "2026-10-14",
+  "rekordbox": "7.2.19.0342",
+  "tensorflow": "2.16.1 (rekordbox's own libtensorflow_cc, dlopen)",
+  "macos": "27.0",
+  "code": "crates/mb-analysis/src/vocal/, crates/mb-nn/",
+  "spec": "docs/re/analysis-vocal.md",
+  "command": "cargo run --release -p mb-analysis --example vocal_score -- score  (MB_ORACLE=oracle-b for the second fixture; MB_THREADS, default 4)",
+  "test": "cargo test -p mb-library --test analyse_ops vocal_pass_writes_pvdi",
+  "fixtures": {
+    "oracle-a": {"tracks": 169, "pvdi_identical": 169, "headers_identical": 169, "values": "969928/969928"},
+    "oracle-b": {"tracks": 169, "pvdi_identical": 169, "headers_identical": 169, "values": "969928/969928"}
+  },
+  "stages_vs_rekordbox": "bit-identical to rekordbox's VocalDetector (native harness): filter tables, power frames, mel, fluctogram, features, normalised features, probabilities",
+  "runtime_inputs": "vd_param_raw.pb (plain GraphDef, MD5-checked) and three MD5-checked regions of the installed rekordbox executable (normalisation statistics, Chebyshev window); nothing copied into the repo",
+  "seconds_per_track": "about 1 (decode + vocal pass, 4 tracks in parallel)"
+}
