@@ -110,6 +110,7 @@ fn main() -> anyhow::Result<()> {
                 ),
                 vocal: pref("trackAnalysisSettingsVocalDetect").is_some_and(|v| v.trim() == "1"),
                 embedding: pref("TrackAnalysisSettingsEmbedding").is_none_or(|v| v.trim() != "0"),
+                cue: mb_library::CueAnalysisSettings::from_prefs(|n| mb_usb::settings::preference(&paths.settings_root, n)),
             };
             println!("settings: {settings:?}");
             for t in unanalysed {

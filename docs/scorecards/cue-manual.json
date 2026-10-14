@@ -1,0 +1,23 @@
+{
+  "scorecard": "CUE analysis, Manual mode (djmdCue)",
+  "date": "2026-10-14",
+  "rekordbox": "7.2.19.0342",
+  "code": "crates/mb-library/src/cue_analysis.rs, crates/mb-library/src/analyse.rs (ApplyAnalysis step E)",
+  "spec": "docs/re/analysis-cue.md",
+  "command": "cargo run --release -p mb-library --example cue_score",
+  "test": "cargo test -p mb-library --test analyse_ops manual_cue_analysis_sets_cues",
+  "fixtures": {
+    "oracle-cue/M1": {"settings": "Manual, HOT CUE, limit 4, 1.1Bars on, repeat off", "tracks": 169, "identical": 169, "cues": "169/169"},
+    "oracle-cue/M2": {"settings": "Manual, HOT CUE, limit 8, 1.1Bars on, repeat every 8 bars", "tracks": 169, "identical": 169, "cues": "1032/1032"},
+    "oracle-cue/M3": {"settings": "Manual, MEMORY CUE, limit 10, 1.1Bars on, repeat every 16 bars", "tracks": 169, "identical": 169, "cues": "1121/1121"},
+    "oracle-cue/M4": {"settings": "Manual, HOT CUE, limit 4, 1.1Bars off, repeat every 4 bars", "tracks": 169, "identical": 169, "cues": "629/629"},
+    "oracle-cue/M5a": {"settings": "M2 on the seeded library, overwrite off", "tracks": 169, "identical": 169, "cues": "1044/1044"},
+    "oracle-cue/M5b": {"settings": "M2 on the seeded library, overwrite on", "tracks": 169, "identical": 169, "cues": "1037/1037"},
+    "oracle-cue/M5c": {"settings": "M3 on the seeded library, overwrite off", "tracks": 169, "identical": 169, "cues": "1128/1128"},
+    "oracle-cue/M5d": {"settings": "M3 on the seeded library, overwrite on", "tracks": 169, "identical": 169, "cues": "1128/1128"},
+    "oracle-cue/M6": {"settings": "M2 with comments off", "tracks": 169, "identical": 169, "cues": "1032/1032"}
+  },
+  "columns": "Kind, InMsec, InFrame, OutMsec, Comment, Color, ColorTableIndex, ActiveLoop, BeatLoopSize, CueMicrosec, InMpegFrame, InMpegAbs",
+  "grid": "rekordbox's grid of each run (oracle-a Normal mode); our own Normal-mode grids equal oracle-a's (analysis scorecards)",
+  "pending": "the statement order of the cue writes (no SQL trace: the instrumented copy exits at startup now); Auto mode (A1/A2 reference runs exist)"
+}

@@ -604,3 +604,63 @@ fn embedding_pass_writes_3ex() {
     assert_eq!(get(&lib, "ContentLink", &t.id), link_before);
     assert!(content_files(&lib, &t.id).is_empty());
 }
+
+/// CUE analysis, Manual mode: with hot cues every 8 bars (upper limit 8) on a probe that already
+/// has a hot cue on pad A, the pass sets cues on the free pads at the grid's first downbeat and
+/// every 32 beats, with rekordbox's comments; with overwrite on, pads below the new count are
+/// cleared first. Undo leaves only the seeded cue. Off by default.
+#[test]
+fn manual_cue_analysis_sets_cues() {
+    let Some(dir) = TempLibrary::new("oracle-a") else {
+        eprintln!("skipped: fixtures/oracle-a missing");
+        return;
+    };
+    let Some((_, all)) = tracks() else { return };
+    let Some(t) = all.iter().find(|t| t.path.exists() && t.path.to_string_lossy().contains("/probes/") && t.columns[0] > 0) else {
+        eprintln!("skipped: corpus audio missing");
+        return;
+    };
+    assert!(analyse_track(&t.path, &t.file_name, &AnalysisSettings { embedding: false, ..AnalysisSettings::default() }).unwrap().cue.is_none());
+    let cue = mb_library::CueAnalysisSettings { enabled: true, manual: true, loop_cue: true, max_hot: 8, ..Default::default() };
+    let settings = AnalysisSettings { embedding: false, cue, ..AnalysisSettings::default() };
+    let a = analyse_track(&t.path, &t.file_name, &settings).unwrap();
+    let beats = a.dat.beat_grid().unwrap().beats;
+    let first = beats.iter().position(|b| b.beat_in_bar == 1).unwrap();
+    let mut lib = Library::open_unguarded(&dir.db, &dir.passphrase).unwrap();
+    lib.set_analysis_root(dir.dir.join("share"));
+    let content = DbId(t.id.clone());
+    let mut history = History::default();
+    // Test setup (not an op under test): only the seeded hot cue A.
+    lib.connection().execute("DELETE FROM djmdCue WHERE ContentID = ?1", [&t.id]).unwrap();
+    let seed = mb_library::NewCue { slot: mb_library::CueSlot::Hot(0), in_ms: 777, out_ms: None, color: None, color_table_index: None, comment: String::new() };
+    history.run(&mut lib, Command::AddCue { content: content.clone(), cue: seed }).unwrap();
+    let cues = |lib: &Library| {
+        let mut v = mb_library::cues::load_for_content(lib.connection(), &t.id).unwrap();
+        v.sort_by_key(|c| (c.slot.kind(), c.in_ms));
+        v.into_iter().map(|c| (c.slot, c.in_ms, c.comment)).collect::<Vec<_>>()
+    };
+
+    history.run(&mut lib, Command::ApplyAnalysis { content: content.clone(), analysis: Box::new(a.clone()) }).unwrap();
+    let want: Vec<_> = (0..8)
+        .map(|k| first + 32 * k)
+        .filter(|&i| i < beats.len())
+        .enumerate()
+        .map(|(k, i)| (mb_library::CueSlot::Hot(k as u8 + 1), beats[i].time_ms, if k == 0 { "1.1Bars".to_owned() } else { format!("1.1Bars+{}", 8 * k) }))
+        .collect();
+    assert!(!want.is_empty());
+    let got = cues(&lib);
+    assert_eq!(got[0], (mb_library::CueSlot::Hot(0), 777, String::new()));
+    assert_eq!(got[1..], want[..]);
+
+    // Overwrite: undo first, then the same pass with OverwriteCue on clears pad A.
+    history.undo(&mut lib).unwrap().unwrap();
+    assert_eq!(cues(&lib), [(mb_library::CueSlot::Hot(0), 777, String::new())]);
+    let mut b = a.clone();
+    b.cue = Some(mb_library::CueAnalysisSettings { overwrite: true, ..cue });
+    history.run(&mut lib, Command::ApplyAnalysis { content: content.clone(), analysis: Box::new(b) }).unwrap();
+    let got = cues(&lib);
+    assert_eq!(got.len(), want.len());
+    assert_eq!(got[0], (mb_library::CueSlot::Hot(0), want[0].1, "1.1Bars".to_owned()));
+    history.undo(&mut lib).unwrap().unwrap();
+    assert_eq!(cues(&lib), [(mb_library::CueSlot::Hot(0), 777, String::new())]);
+}

@@ -50,7 +50,7 @@ rekordbox = "7.2.19.0342"
 macos = "27.0"
 settings = "analysis mode 3 (high precision Normal): HighPrecisionBeatAnalyze=1, trackHiPrecisionBeatAnalysisMode=0, BPM range 70-180, key/phrase/vocal ON, embedding/network OFF; see analysis-settings.txt"
 contents = "oracle-a library re-analysed by rekordbox (all tracks selected, 'Tracks analysieren')"
-notes = "rekordbox exits without a crash report on the sampler loops House3/House4/Breaks2/Breaks3 in this mode (twice, reproducible): their DAT is rewritten, EXT/2EX and rows are not. Exclude them. vs oracle-a: PQT2 162, PQTZ 161, PSSI 85, PWAV 4, PWV2 1. rekordbox's Focus debug CSVs from the runs: ~/re-work/oracle-modes/m3-run*/csv."
+notes = "rekordbox exits on the sampler loops House3/House4/Breaks2/Breaks3 in this mode (twice, reproducible; a later crash report shows heap corruption, EXC_BREAKPOINT in malloc): their DAT is rewritten, EXT/2EX and rows are not. Exclude them. vs oracle-a: PQT2 162, PQTZ 161, PSSI 85, PWAV 4, PWV2 1. rekordbox's Focus debug CSVs from the runs: ~/re-work/oracle-modes/m3-run*/csv."
 
 [oracle-d]
 path = "fixtures/oracle-d"
@@ -69,3 +69,12 @@ macos = "27.0"
 settings = "analysis mode 1 (Normal-mode Dynamic): HighPrecisionBeatAnalyze=0, trackAnalysisMode=1, BPM range 70-180, key/phrase/vocal ON, embedding/network OFF; see analysis-settings.txt"
 contents = "oracle-a library re-analysed by rekordbox (all 169 tracks)"
 notes = "vs oracle-a: PQT2 166, PQTZ 166, PSSI 116, PWAV 4, PWV2 1. No debug CSVs in this mode."
+
+[oracle-cue]
+path = "fixtures/oracle-cue/<run>"
+captured = "2026-10-14"
+rekordbox = "7.2.19.0342"
+macos = "27.0"
+settings = "oracle-a analysis settings (Normal mode, high precision off, key/phrase/vocal ON, embedding OFF) plus the CUE preferences in each run's cue-settings.txt"
+contents = "per run: the library after rekordbox re-analysed all 169 oracle-a tracks with CUE analysis on (rekordbox/), options.json, cue-settings.txt, cue_personal_trend.json; M5* also seed/master.db (the seeded library before the run)"
+notes = "runs M1-M4, M5a-d, M6 (Manual) and A1, A2 (Auto, all-zero personal trend); table in docs/re/analysis-cue.md § 5. M5 seed made with crates/mb-library/examples/cue_seed.rs."

@@ -31,4 +31,5 @@
 - **What it does NOT cover:**
   - The rekordboxAgent (Electron) process, which opens master.db through its own node-sqlcipher. It also serves a REST API on 127.0.0.1:30001 that the main app calls (`db::CloudAgentAPI`). Writes that go through the agent need a separate capture.
   - The statically linked SQLite 3.41.1 and the DeviceSQL runtime (export.pdb).
+- **2026-10-14:** started via `open -a` or from a shell, the copy exits right after its startup backup (`sqlcipher_export('backup')`), with no crash report; on 2026-10-11 it ran a full session. Cause open (licence or integrity check).
 - **Risk:** the self-integrity check (`SecStaticCodeCheckValidity` import) or the license runtime may reject the clone. If that happens, use static RE and before/after diffs.

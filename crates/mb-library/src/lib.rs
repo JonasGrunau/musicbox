@@ -24,6 +24,7 @@
 
 pub mod analyse;
 pub mod analysis_lock;
+pub mod cue_analysis;
 pub mod cues;
 pub mod device_history;
 pub mod device_import;
@@ -38,6 +39,7 @@ pub mod xml;
 pub mod xml_sync;
 
 pub use analyse::{AnalysisSettings, AnalysisSnapshot, TrackAnalysis, TrackEmbedding, analyse_track, analyse_track_with, stored_grid};
+pub use cue_analysis::CueAnalysisSettings;
 pub use cues::{Cue, CueEdit, CueSlot, NewCue};
 pub use device_history::{DeviceHistory, HistoryImportReport, ImportedHistory, LocalTime};
 pub use device_import::{DeviceImport, DeviceImportKind, DeviceImportReport, DeviceImportResult, DeviceTrack};

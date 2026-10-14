@@ -177,7 +177,8 @@ impl App {
                     // Analysis preferences: `AutoGain` and `enableKeyAnalysis` (default on),
                     // `trackAnalysisSettingsSongStruct`, `HighPrecisionBeatAnalyze` with
                     // `trackHiPrecisionBeatAnalysisMode`, `trackAnalysisSettingsVocalDetect`,
-                    // `TrackAnalysisSettingsEmbedding` (default on), `AutoAnalysis`.
+                    // `TrackAnalysisSettingsEmbedding` (default on), the CUE analysis preferences
+                    // (`DetectCue`, `AutoDetectCue`, …), `AutoAnalysis`.
                     self.analysis_settings = mb_library::AnalysisSettings {
                         auto_gain: pref("AutoGain").is_none_or(|v| v.trim() != "0"),
                         phrase: pref("trackAnalysisSettingsSongStruct").is_some_and(|v| v.trim() == "1"),
@@ -188,6 +189,7 @@ impl App {
                         ),
                         vocal: pref("trackAnalysisSettingsVocalDetect").is_some_and(|v| v.trim() == "1"),
                         embedding: pref("TrackAnalysisSettingsEmbedding").is_none_or(|v| v.trim() != "0"),
+                        cue: mb_library::CueAnalysisSettings::from_prefs(|n| mb_usb::settings::preference(&loaded.settings_root, n)),
                     };
                     self.auto_analysis = pref("AutoAnalysis").is_some_and(|v| v.trim() == "1");
                     self.export_source = Some(export::Source {

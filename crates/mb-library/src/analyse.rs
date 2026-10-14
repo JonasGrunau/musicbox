@@ -50,11 +50,22 @@ pub struct AnalysisSettings {
     /// (`docs/re/analysis-embedding.md`). Runs the vocal detector too when the track has no
     /// PVDI, for the vocal share; its levels are written only with [`AnalysisSettings::vocal`].
     pub embedding: bool,
+    /// CUE analysis (`DetectCue`, `AutoDetectCue`, …; default off): cues set on the new grid
+    /// after the analysis, Manual mode only (`docs/re/analysis-cue.md`).
+    pub cue: crate::cue_analysis::CueAnalysisSettings,
 }
 
 impl Default for AnalysisSettings {
     fn default() -> Self {
-        Self { auto_gain: true, phrase: false, key: true, high_precision: None, vocal: false, embedding: true }
+        Self {
+            auto_gain: true,
+            phrase: false,
+            key: true,
+            high_precision: None,
+            vocal: false,
+            embedding: true,
+            cue: crate::cue_analysis::CueAnalysisSettings::default(),
+        }
     }
 }
 
@@ -106,6 +117,9 @@ pub struct TrackAnalysis {
     /// Why the embedding, when asked for, could not run (rekordbox's install or models
     /// missing); an earlier `.3EX` is left as it is then.
     pub embedding_error: Option<String>,
+    /// CUE analysis settings when Manual cue creation runs with this analysis; the cues are made
+    /// in [`Command::ApplyAnalysis`], against the track's cues at that time.
+    pub cue: Option<crate::cue_analysis::CueAnalysisSettings>,
 }
 
 /// What the embedding pass computes from the audio (`docs/re/analysis-embedding.md`). The record
@@ -301,6 +315,7 @@ pub fn analyse_track_with(
         vocal_error: if settings.vocal { a.vocal_error } else { None },
         embedding,
         embedding_error,
+        cue: settings.cue.runs().then_some(settings.cue),
     })
 }
 
@@ -383,6 +398,10 @@ pub struct AnalysisSnapshot {
     /// When the analysis added artwork: the previous `ImagePath` (its files are in `files`, its
     /// `contentFile` row in `content_files`).
     pub image_path: Option<Value>,
+    /// Cues the CUE analysis made (`djmdCue.ID`).
+    pub cues_added: Vec<String>,
+    /// Cue rows the CUE analysis removed (overwrite), as they were.
+    pub cues_removed: Vec<Vec<(String, Value)>>,
 }
 
 /// `Analysed` states (`analyse-track.md` § Values): bit 0x01 done, 0x02 in progress, 0x80 the
@@ -749,6 +768,28 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
     tx.commit()?;
     sync_playlists(lib, content)?;
 
+    // E. CUE analysis (`analyze_complete` → `createDetectCue` @0x101495900): on the grid this
+    // pass leaves, each removal and cue as its own cue op (`DatabaseMediator::RemoveCue` /
+    // `CreateCue` @0x101496840: `setCue`, then the playlist timestamps). *Hypothesis:* after the
+    // completion statements; the traced order is open.
+    let (mut cues_added, mut cues_removed) = (Vec::new(), Vec::new());
+    if let Some(cs) = &analysis.cue {
+        let existing = crate::cues::load_for_content(lib.connection(), content.as_str())?;
+        let beats = dat.beat_grid().map(|g| g.beats).unwrap_or_default();
+        let offset = ext.ext_beat_grid().and_then(|g| g.tail).map_or(0, |(o, _)| o);
+        let plan = crate::cue_analysis::manual_plan(&beats, offset, &existing, cs);
+        for id in &plan.remove {
+            if let (_, Some(Command::RestoreCue { row })) = crate::cues::delete_cue(lib, id)? {
+                cues_removed.push(row);
+            }
+        }
+        for cue in &plan.create {
+            if let (Effect::CueAdded { id }, _) = crate::cues::add_cue(lib, content, cue)? {
+                cues_added.push(id);
+            }
+        }
+    }
+
     let inverse = Command::RestoreAnalysis {
         snapshot: Box::new(AnalysisSnapshot {
             content: content.clone(),
@@ -758,6 +799,8 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
             content_files,
             key: key_snapshot,
             image_path: artwork.map(|_| old_image.clone()),
+            cues_added,
+            cues_removed,
         }),
     };
     Ok((Effect::Analysed { content: content.clone() }, Some(inverse)))
@@ -778,6 +821,13 @@ fn sync_playlists(lib: &mut Library, content: &DbId) -> Result<()> {
 }
 
 pub(crate) fn restore(lib: &mut Library, s: &AnalysisSnapshot) -> Result<(Effect, Option<Command>)> {
+    // The CUE analysis first: its cues go, the cues it removed come back.
+    for id in &s.cues_added {
+        crate::cues::delete_cue(lib, id)?;
+    }
+    for row in s.cues_removed.iter().rev() {
+        crate::cues::restore_cue(lib, row)?;
+    }
     let key = || Value::Text(s.content.0.clone());
     let tx = lib.writer.transaction()?;
     for (p, bytes) in &s.files {
