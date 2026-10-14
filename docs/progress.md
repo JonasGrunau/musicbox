@@ -2,14 +2,30 @@
 
 Newest entry first. Each entry records what changed, what is verified, and the next action.
 
+## 2026-10-14 (later) — M6: embeddings done; reference data for analysis modes 1–3; CUE analysis started
+| Part | State | Commits |
+|---|---|---|
+| ONNX Runtime | rekordbox's own `libonnxruntime.1.18.0` via dlopen, version and model MD5s checked, sessions set up as rekordbox's CPU runner (`mb_nn::ort`) | d15e6dd |
+| `.3EX` embedding | 16 kHz audio CNN, UMAP, energy, genre, vocal share, MessagePack as rekordbox writes it; 14/14 sandbox-initial files byte-identical; `ApplyAnalysis` writes it (`contentFile` row first, `ContentLink` 0x200000, undo); `TrackAnalysisSettingsEmbedding` (default on; off in the user's preferences). Spec `analysis-embedding.md`, scorecard `embedding.json` | aec9ad4, 4b9eeb9 |
+| Reference data, analysis modes 1–3 | made by driving rekordbox on oracle-a: `oracle-c` (mode 3, high precision Normal), `oracle-d` (mode 2, high precision Auto, rekordbox's default high-precision mode), `oracle-e` (mode 1, Normal-mode Dynamic). The ports are still open (`analysis-beats.md` § 9, `analysis-beats-hp.md` § 8) | 4b9eeb9 (manifest) |
+| CUE analysis | spec draft `analysis-cue.md`: Manual is rule-based on the beat grid, Auto uses samplecnn + cue-prediction ONNX models and the personal trend. Reference runs (fixtures `oracle-cue/*`) in progress; Manual implementation next | 4b9eeb9 |
+
+Findings from the rekordbox runs:
+- **rekordbox crashes in mode 3.** High-precision Normal mode quits rekordbox (no crash report, no log line) on the sampler loops House3/House4/Breaks2/Breaks3, twice in a row. Their DAT is rewritten, their EXT/2EX are not. Mode 2 and mode 1 finish all 169 tracks.
+- **Debug CSVs.** In modes 2 and 3, `BeatAnalyzer_2_0::Analyzer::analyzeFocus` appends `interval.csv` and `interval2–5.csv` to `common::PropertyPath()/csv` (`~/Library/Application Support/Pioneer/rekordbox6/csv`). macOS flagged rekordbox for 2 GB of file writes in 4 minutes. Copies are kept in `~/re-work/oracle-modes/`, outside the repo; they hold the Focus intermediate values per track.
+- **Right-click while selected.** A synthetic right-click that carries a modifier flag toggles one row out of a select-all. The input helper now clears the flags of mouse events.
+- **Screen lock.** UI driving stops while the Mac is locked; runs resume after unlock.
+
+Open (user): the CDJ-3000 test with RBTEST, the My Settings check.
+
 ## 2026-10-14 — M6: high precision, phrase and vocal done
 | Part | State | Commits |
 |---|---|---|
 | High-precision beats, Dynamic (mode 4) | rekordbox's own TensorFlow 2.16.1 + models loaded at run time (`mb-nn`, nothing bundled); madmom + bar HMM + BALib v2 Focus; oracle-b PQTZ/PQT2/BPM 154/154; 12 sweeps without beats keep the old grid with BPM 0, as rekordbox. Normal/Auto modes (2/3) not ported. Spec `analysis-beats-hp.md`, scorecard `beats-hp.json` | 998d497, fcdd72b |
 | Phrase (PSSI) | stages A–D ported, stage D equal to rekordbox's own code on 161/161; PSSI written by `analyse_track` (ContentLink 0x10000) when the phrase preference is on; oracle-a 159/161, oracle-b (HP) 159/160; misses = 96 kHz probes (decoded-input side) | 998d497, a6ad190 |
 | Stored-grid fallback | when HP finds no beats, key and phrase run on the stored grid, as rekordbox does (oracle-b sweeps: key and PSSI right) | a6ad190 |
-| Vocal (PVDI) | rekordbox's own vocal network (the plain `vd_param_raw.pb` it ships; nothing decrypted) and the learned feature statistics read MD5-checked from the installed executable at run time; PVDI identical 169/169 on oracle-a and oracle-b, every stage bit-identical to rekordbox's VocalDetector; `trackAnalysisSettingsVocalDetect`, ContentLink 0x100000; the app notes when the pass is skipped | (this commit) |
-| ONNX: `.3EX` embeddings, auto-cue | queued after vocal (optional; both off in the user's preferences); `.3EX` ground truth: 14 files in sandbox-initial; auto-cue has none yet | – |
+| Vocal (PVDI) | rekordbox's own vocal network (the plain `vd_param_raw.pb` it ships; nothing decrypted) and the learned feature statistics read MD5-checked from the installed executable at run time; PVDI identical 169/169 on oracle-a and oracle-b, every stage bit-identical to rekordbox's VocalDetector; `trackAnalysisSettingsVocalDetect`, ContentLink 0x100000; the app notes when the pass is skipped | e17624a |
+| ONNX: `.3EX` embeddings, auto-cue | see the next entry | – |
 
 Workers' doc/scorecard files are written by the coordinator: a hook stops subagents from writing report files, and it is not bypassed.
 
