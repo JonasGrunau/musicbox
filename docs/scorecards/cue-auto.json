@@ -16,7 +16,7 @@
     "oracle-cue/A2": {"settings": "Auto, MEMORY CUE, limit 8, otherwise as A1", "tracks": 169, "identical": 169, "cues": "962/962"}
   },
   "input": "rekordbox's grid (PQTZ, PQT2 offset) and phrases (PSSI) of each run; the audio from our own decode",
-  "end_to_end": {"oracle-cue/A1": {"tracks": 169, "identical": 167, "misses": ["wav_96k32f/click_128_offset1234", "wav_96k32f/tempo_120_to_126"], "cause": "our phrases differ on these two (phrase scorecard misses)"}},
+  "end_to_end": {"oracle-cue/A1": {"tracks": 169, "identical": 169}},
   "columns": "Kind, InMsec, InFrame, OutMsec, Comment, Color, ColorTableIndex, ActiveLoop, BeatLoopSize, CueMicrosec, InMpegFrame, InMpegAbs",
   "stages_vs_rekordbox": "getScores and getTotalScores identical to rekordbox's own functions in a native harness on the same decode (scores bit for bit, the same 16 candidates)",
   "runtime_inputs": "samplecnn.onnx and cue_prediction_model_no_abs_position.onnx from the install (MD5-checked); nothing copied into the repo",

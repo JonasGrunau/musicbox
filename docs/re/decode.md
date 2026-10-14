@@ -240,6 +240,7 @@ The PVB2 total equals the decoded length on all 23 FLACs. `mb_audio::flac_seek` 
   5. Copies any outputs that lie between the requested and the rounded position.
 
   Negative priming positions call the reader with a negative position (garbage for WAV). mb-audio reads zeros there; this only matters for seeks into the first 30 input samples.
+  - **Rewinds.** The analysis thread's phrase passes re-read the track from 0 after the main loop (`analysis-phrase.md` § 1.4), so each is a random read and re-primes. At 96 → 48 kHz that stream is one input sample earlier than the first read: an impulse at input 2m comes out where the first read puts one at 2m+1 (delay 13.5 input samples instead of 14.5). At 22.05 → 44.1 kHz the two reads are equal. `Decoder::rewind` makes the next read take this path (test `resample::rewound_reads_reprime`).
 
 ### Filter parameters (`SamplingFunctionSRC<Float2>::init` @0x10288b2c0)
 Both rates must be 8 k–200 k and multiples of 50 (`c_src::init_kaiser` @0x10288b570). 11025 Hz fails, so rekordbox cannot analyse it.

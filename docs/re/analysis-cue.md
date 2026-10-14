@@ -1,6 +1,6 @@
 # CUE analysis (Intelligent Cue Creation)
 
-Status: **Manual verified on oracle-cue M1–M6** (9 runs, 169/169 tracks each, all compared `djmdCue` columns; scorecard `docs/scorecards/cue-manual.json`). **Auto verified on A1/A2** (169/169 each on rekordbox's grid and PSSI; 167/169 end to end, the two wav_96k32f phrase misses; scorecard `docs/scorecards/cue-auto.json`). The personal CUE tendency is not modelled.
+Status: **Manual verified on oracle-cue M1–M6** (9 runs, 169/169 tracks each, all compared `djmdCue` columns; scorecard `docs/scorecards/cue-manual.json`). **Auto verified on A1/A2** (169/169 each on rekordbox's grid and PSSI; 169/169 end to end; scorecard `docs/scorecards/cue-auto.json`). The personal CUE tendency is not modelled.
 
 Code: `crates/mb-library/src/cue_analysis.rs`, step E of `ApplyAnalysis` in `crates/mb-library/src/analyse.rs`, `crates/mb-analysis/src/cue.rs` (Auto scores and candidates).
 
@@ -122,7 +122,7 @@ Code: `crates/mb-analysis/src/cue.rs` (scores, candidates), `auto_plan` in `crat
   - The 8 tracks without cues have no candidates.
 - **Verification**
   - On rekordbox's grid and PSSI of each run: A1 and A2 169/169, all compared columns.
-  - End to end on our own grid and phrases: A1 167/169. The misses are the two wav_96k32f probes whose PSSI the phrase scorecard already lists.
+  - End to end on our own grid and phrases: A1 169/169.
   - A dev harness outside the repo runs rekordbox's `CuePointPredictor` and `getTotalScores` on our decode and gives the same scores and candidate list.
 
 ## 5. Reference runs (`fixtures/oracle-cue/`)

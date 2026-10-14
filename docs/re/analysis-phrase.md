@@ -1,9 +1,9 @@
 # Phrase analysis (`SongStructureAnalyze`)
 
 Status: **verified: all four stages ported; PSSI produced and written.**
-- **Stages A and B are verified.** The downbeat shift moves the beat grid the way rekordbox does: 160/161 oracle-a grids are identical (PQTZ + PQT2) (§ 6).
+- **Stages A and B are verified.** The downbeat shift moves the beat grid the way rekordbox does: 161/161 oracle-a grids are identical (PQTZ + PQT2) (§ 6).
 - **Stages C and D are verified bit for bit** against rekordbox's own routines run on the same input (§ 9): stage C's outputs on 161/161 tracks, every stage-D callee on every recorded call, and the whole result struct on 161/161 tracks.
-- **PSSI against the fixtures** (`docs/scorecards/phrase.json`): oracle-a 159/161 identical with our own analysis (the two misses are 96 kHz probes); oracle-b (high-precision Dynamic, with the stored grid where high precision finds no beats, § 1.1) 159/160 with our own grid and 159/160 on rekordbox's stored grid.
+- **PSSI against the fixtures** (`docs/scorecards/phrase.json`): oracle-a 161/161 identical with our own analysis; oracle-b (high-precision Dynamic, with the stored grid where high precision finds no beats, § 1.1) 160/160 with our own grid and 160/160 on rekordbox's stored grid; oracle-e (Normal-mode Dynamic) 161/161. The 96 kHz probes match since the phrase passes read the rewound stream (§ 1.4).
 
 Code: `crates/mb-analysis/src/phrase/`.
 - Driver and stages A/B: `mod.rs` (grid anchor, preconditions, shift, [`run`]), `filter.rs`, `mat.rs`, `rhythm.rs`, `snare.rs`, `power.rs`, `beatpos.rs`.
@@ -51,6 +51,7 @@ It fails when `fb > 6e6/bpm100`, `fbar < 1` or `key > 23`.
 ### 1.4 Feeding
 - The thread rewinds the reader and calls `Analyze_AB` @0x1004438d8 with `getStreamAt` blocks (L and R as int16 values in floats), until stage +0xa0 ≥ 3.
 - Then, if C/D is enabled (thread +0x3902), A/B finished and +0xc0 is set (more than 30 beats after the first downbeat), it rewinds again and feeds `Analyze_CD` @0x100443c30 until stage +0xa0 > 4.
+- Both reads start with a rewind, i.e. a random-access read at 0. Through the sample-rate converter it re-primes (`prepareSRCProcessing`, `decode.md` § 8). For 96 → 48 kHz the re-primed stream is one input sample earlier than the analysis loop's first read (delay 13.5 input samples instead of 14.5); for 22.05 → 44.1 kHz the two are equal. Without a converter it is the same stream. Code: `phrase::feed` and `stage_c` read after `mb_audio::Decoder::rewind`; `analyze_with` feeds stage A from its own loop only when nothing is resampled.
 - Both buffer a mono mix and process it in chunks of +0xbc samples. Only the last chunk is short.
 - The mix is `fma(R, 0.01/32768, L · 0.99/32768)` (constants 0x3e947ae147ae147b and 0x3effae147ae147ae).
 
@@ -227,12 +228,12 @@ Each result is written so it ends at the analysed-beat count. Inputs: x2/x8/x32 
 - BPM × 100: 161/161;
 - beat count: 161/161;
 - bars: 161/161;
-- PQTZ + PQT2 identical: 160/161;
-- beats within ±1 ms: 94 769/94 897 (99.87 %), all exact.
+- PQTZ + PQT2 identical: 161/161;
+- beats within ±1 ms: 94 897/94 897 (100 %), all exact.
 
 All 21 tracks the pass moved now match: `click_128_offset1234` ×7 (+936 ms onto the first kick), `sweep_20_20k` ×9, the 22.05 kHz tempo ramp, `bands_100_1k_8k`, Oliver Schories – Circles, and Aura Vortex – Futura (renumbered).
 
-The one miss is `wav_96k32f/click_128_offset1234`: we move it, rekordbox did not, although it ran the pass (its PSSI exists). At 96 → 48 kHz the 16th-note window just before the click ends exactly at the click (sample 59232 at 48 kHz). Our SRC output is zero up to there, so the silence test passes. Most likely rekordbox's re-read stream is not zero there: priming of the resampler after the rewind, or a one-sample SRC offset.
+`wav_96k32f/click_128_offset1234` also matches since stage A reads the re-primed stream (§ 1.4). There the filter's pre-ringing reaches the 16th-note window just before the click (sample 59232 at 48 kHz), so the silence test fails and the grid stays at BALib's first beat (296 ms), as rekordbox left it. On the first read that window is exactly zero, which moved the grid by +936 ms.
 
 ## 7. Stage D: `Sub_Main_D` @0x102379edc
 
@@ -532,7 +533,7 @@ What reaches the file:
 **Library (`mb_library::analyse_track`).** With the phrase setting on, the `.EXT` gets our PSSI last (`… PWV4 [PVB2] PSSI`) and `ContentLink` gets 0x10000 (`setAnalyzedSongStructToContentLink`). An earlier PSSI is not carried over then; without a result the section is left out and the bit cleared (hypothesis: rekordbox's behaviour for a phrase pass without result is not observed). With the setting off, an earlier PSSI and its bit are kept as before.
 
 ## 9. Verification
-A harness outside the repo (`~/re-work/harness`) loads rekordbox's analyser and runs its `Initialize`/`Analyze_AB`/`Analyze_CD` on the stream our decoder produces. It records every call of the `SongStructureAnalyze` functions (arguments before and after). It reproduces oracle-a's PSSI on 159/161 tracks (the two misses are the 96 kHz probes, an input-side difference). Nothing from it enters the repo; musicbox does not link or call it.
+A harness outside the repo (`~/re-work/harness`) loads rekordbox's analyser and runs its `Initialize`/`Analyze_AB`/`Analyze_CD` on the stream our decoder produces. It records every call of the `SongStructureAnalyze` functions (arguments before and after). Fed with the analysis loop's first read it reproduces oracle-a's PSSI on 159/161 tracks. The two 96 kHz probes differ in that input: rekordbox's phrase passes read the re-primed stream (§ 1.4), and our pass on that stream matches 161/161. Nothing from it enters the repo; musicbox does not link or call it.
 - **Stage C:** our outputs equal rekordbox's on 161/161 tracks (after making `IntroEndFind_a`'s frame index round up, `fcvtps`).
 - **Replay tests** (`phrase/replay.rs`, `MB_PHRASE_TRACE=<dir of traces>`): each ported D function is run on every recorded call and compared bit for bit. About 400 000 calls in 60+ functions, all identical.
 - **End to end** (`replay::stage_d_end_to_end`, `MB_PHRASE_D=<dir>`): stages A–D from the audio. Every probed callee input matches the trace in order, and the result struct equals rekordbox's on 161/161 tracks.
@@ -544,6 +545,5 @@ Porting notes that mattered:
 - `VerseHookJudge_All` works on copies of D's curves. Writing its 0.003 replacements back changes later inputs (caught by the end-to-end probe, not by the result).
 
 ## 10. Open questions
-- **96 kHz misses.** `wav_96k32f/click_128_offset1234`: we move the grid, rekordbox does not (§ 6), so the phrases differ. `wav_96k32f/tempo_120_to_126`: one phrase more or fewer than rekordbox on both fixtures. Both look input-side: the stream after the rewind, or the SRC phase.
 - **Key argument.** What the thread passes to `Initialize` as key: 0 fits all fixtures (byte 0x1d = 1).
 - **Phrase pass without result.** Whether rekordbox removes an earlier PSSI when a new phrase pass yields none is not observed (§ 8.1).

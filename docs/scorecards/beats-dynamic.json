@@ -22,15 +22,14 @@
     "bars_match": 166,
     "beats_exact": "95145/95145",
     "pqt2_identical": 166,
-    "mb_library_files": "166/166: PQTZ, PQT2 and BPM identical; PSSI identical except the known 96 kHz click probe"
+    "mb_library_files": "166/166: PQTZ, PQT2, BPM and PSSI identical"
   },
   "pssi_with_phrase_pass": {
     "tracks": 169,
     "with_pssi": 161,
     "presence_matches": 169,
-    "pssi_identical": "160/161",
-    "phrases_identical": "2446/2447 by index",
-    "miss": "wav_96k32f/click_128_offset1234: phrase 2 starts at beat 15, rekordbox 11; the same 96 kHz input-side difference as in oracle-a (analysis-phrase.md § 10). Stored-grid input gives the same result."
+    "pssi_identical": "161/161",
+    "phrases_identical": "2447/2447 by index"
   },
   "against_rekordbox_routines": {
     "set": "rekordbox's BALib v1 analyser run on our decoded stream (harness outside the repo)",
@@ -40,11 +39,11 @@
     "segments": "138 tracks with one tempo segment, 19 with two, 7 with three, 1 with four, 1 with five"
   },
   "regression": {
-    "oracle_a_beats_match_rekordbox": "161 tracks, 160 identical (unchanged)",
-    "oracle_a_beat_score": "BPM 161, count 161, bars 161, beats ±1 ms 94769/94897, PQT2 160/161 (unchanged)"
+    "oracle_a_beats_match_rekordbox": "161 tracks, 161 identical",
+    "oracle_a_beat_score": "BPM 161, count 161, bars 161, beats ±1 ms 94897/94897, PQT2 161/161"
   },
   "targets": {
     "pqtz_pqt2_bpm": "met: 166/166",
-    "pssi": "met: 160/161"
+    "pssi": "met: 161/161"
   }
 }

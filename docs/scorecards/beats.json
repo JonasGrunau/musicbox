@@ -12,17 +12,17 @@
   "tracks_note": "the 161 oracle-a tracks with a PQT2 (analysed by rekordbox itself); the 8 shipped sampler loops carry preset grids",
   "bpm_x100_exact": 161,
   "beat_count_exact": 161,
-  "pqtz_pqt2_identical": 160,
+  "pqtz_pqt2_identical": 161,
   "bar_numbers_match": 161,
   "beats": {
     "total": 94897,
-    "exact_ms": 94769,
-    "within_1ms": 94769,
-    "share_within_1ms": 0.9987
+    "exact_ms": 94897,
+    "within_1ms": 94897,
+    "share_within_1ms": 1.0
   },
   "targets": {
     "bpm_x100_exact": ">= 99%: met (100%)",
-    "beats_within_1ms": ">= 99.5%: met (99.87%); every miss is the one 96 kHz click probe",
+    "beats_within_1ms": ">= 99.5%: met (100%)",
     "downbeat": ">= 99%: met (161/161)"
   },
   "phrase_pass_moved": {
@@ -53,13 +53,13 @@
       {"path": "real/flac/Aura Vortex - Futura (Original Mix).flac", "shift_ms": 0, "bars_renumbered": true}
     ]
   },
-  "unmoved_copies_identical": "of the 5 click_128_offset1234 copies rekordbox did not move (mp3 x3, m4a aac, wav 96k), we leave the 4 MP3/AAC copies alone and match exactly",
-  "phrase_pass_miss": {
+  "unmoved_copies_identical": "of the 5 click_128_offset1234 copies rekordbox did not move (mp3 x3, m4a aac, wav 96k), we leave all 5 alone and match exactly",
+  "phrase_pass_96k": {
     "path": "probes/wav_96k32f/click_128_offset1234.wav",
-    "ours": "moved +936 ms onto the first kick (first beat 1232 ms)",
-    "rekordbox": "not moved (first beat 296 ms), although its PSSI shows the pass ran",
-    "hypothesis": "BeatposCorrection2016's digital-silence test before the onset: our 96->48 kHz SRC output is exactly zero up to the click; rekordbox's re-read stream probably is not (resampler priming after the rewind, or a one-sample offset). analysis-phrase.md § 6, § 10"
+    "result": "not moved (first beat 296 ms), as rekordbox",
+    "cause": "the phrase pass reads the rewound stream; the re-primed 96->48 kHz SRC is one input sample earlier, so its pre-ringing fails the silence test before the click (analysis-phrase.md § 1.4, § 6; decode.md § 8)"
   },
+
   "oracle_b": "not applicable: high precision on (BALib v2 + madmom), see spec § 9",
   "runtime": "about 1 s CPU per track including decode and the phrase pass (161 tracks in 25 s on 12 threads)"
 }

@@ -3,9 +3,9 @@
 Status: **verified** for BALib's own output. `mb_analysis::analyze(…, Options { beats: true, .. })` returns `BeatGrid { bpm, beats }`, i.e. `djmdContent.BPM` and the PQTZ/PQT2 beats. Against `fixtures/oracle-a` (Normal mode, high precision off, BPM range 70–180), on all 161 tracks rekordbox analysed itself (those with a PQT2):
 - BPM × 100 is exact on 161/161;
 - the beat count is exact on 161/161;
-- PQTZ and PQT2 are identical on 160/161, every beat to the millisecond and every µs remainder.
+- PQTZ and PQT2 are identical on 161/161, every beat to the millisecond and every µs remainder.
 
-BALib's own output matches on 140/161. In the other 21, rekordbox's **phrase pass** then moved the whole grid or renumbered its bars (§ 8). That pass's downbeat stages are ported (`analysis-phrase.md`, `Options.phrase`, on by default), and 20 of those 21 now match. The one miss is `wav_96k32f/click_128_offset1234`: we move it, rekordbox did not (`analysis-phrase.md` § 6).
+BALib's own output matches on 140/161. In the other 21, rekordbox's **phrase pass** then moved the whole grid or renumbered its bars (§ 8). That pass's downbeat stages are ported (`analysis-phrase.md`, `Options.phrase`, on by default), and all 21 now match; the 96 kHz click probe needs the phrase pass to read the rewound, re-primed stream as rekordbox does (`analysis-phrase.md` § 1.4, § 6).
 
 Normal-mode Dynamic (analysis mode 1) is verified on oracle-e: PQTZ, PQT2 and BPM 166/166 (§ 9).
 
@@ -185,7 +185,7 @@ In oracle-a, phrase analysis was on. After the beat job, `CBeatAnalyzeThread::an
    - `Oliver Schories – Circles` (m4a): −366 ms.
    - `Aura Vortex – Futura` (flac): renumbered only.
    The 5 `click_128_offset1234` copies rekordbox did not move equal ours exactly: the three MP3s, the AAC m4a and the 96 kHz WAV. So this pass is the only remaining difference. Why it left those five alone is part of the phrase analyser.
-5. **Port.** `mb_analysis::phrase` runs `SongStructureAnalyze` stages A/B on the decoded audio with `(bpm, fb, fbar)` from `BeatGrid` and applies `(first ms, first bar)` to `BeatGrid::beats` (`phrase::run`). With it, 160/161 grids are identical. Our port also leaves the three MP3 copies and the AAC copy of the click probe alone, but moves the 96 kHz WAV, which rekordbox left. The rest of the analyser (stages C/D, PSSI) is paused; see `analysis-phrase.md` § 9.
+5. **Port.** `mb_analysis::phrase` runs `SongStructureAnalyze` stages A/B on the decoded audio with `(bpm, fb, fbar)` from `BeatGrid` and applies `(first ms, first bar)` to `BeatGrid::beats` (`phrase::run`). With it, 161/161 grids are identical: the port leaves all five unmoved click-probe copies alone, the 96 kHz WAV because stage A reads the rewound, re-primed stream as rekordbox does (`analysis-phrase.md` § 1.4). Stages C/D and PSSI are ported too (`analysis-phrase.md`).
 
 ## 9. Dynamic mode (analysis mode 1, "varied")
 
@@ -206,7 +206,7 @@ Status: **verified.** Against rekordbox's own BALib v1 analyser run on our decod
   - `mb_library::AnalysisSettings.dynamic` comes from `trackAnalysisMode` = 1 (`dynamic_from`).
 - **End to end against oracle-e** (`mb_analysis::analyze`, `mb_library::analyse_track`):
   - PQTZ, PQT2 and BPM identical on 166/166;
-  - with the phrase pass, PSSI identical on 160/161. The miss is the 96 kHz click probe, the input-side difference of `analysis-phrase.md` § 10.
+  - with the phrase pass, PSSI identical on 161/161.
 
 ### 9.1 Front end (@0x1011900d0 … @0x101191588)
 1. **Call groups.** Every raw beat belongs to the sensor call that filed it (`stat >> 8`). A group's tempo is its first beat's tempo. An empty group takes a later beat of its own whose tempo (or double, or half) lies strictly inside `t ± tol(t)` of the next group that has a tempo (`tol` as in § 2). Leading groups without a tempo are dropped with their beats.
