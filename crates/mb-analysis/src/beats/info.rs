@@ -146,6 +146,9 @@ pub(crate) struct Result {
     /// The returned BPM (`60000 / first beat's length`).
     pub bpm: f32,
     pub beats: Vec<BeatInfo>,
+    /// The representative BPM: the longest segment's, before `seg_adjust` (BALib v2's
+    /// constant path returns this instead of `bpm`).
+    pub rep: f32,
 }
 
 struct Builder<'a> {
@@ -447,7 +450,7 @@ fn run(
     }
     out.retain(|x| x.pos >= 0 && x.pos <= total);
     stage("corrected", &out);
-    Some(Result { bpm, beats: out })
+    Some(Result { bpm, beats: out, rep })
 }
 
 impl Builder<'_> {
