@@ -149,6 +149,7 @@ fn main() {
                         high_precision: hp,
                         vocal: false,
                         dynamic,
+                        auto_cue: false,
                     };
                     // With the stored grid as the fallback where high precision finds no beats.
                     mb_analysis::analyze_with(&t.path, opts, t.stored_grid().as_ref())

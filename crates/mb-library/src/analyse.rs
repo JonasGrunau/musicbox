@@ -55,7 +55,8 @@ pub struct AnalysisSettings {
     /// PVDI, for the vocal share; its levels are written only with [`AnalysisSettings::vocal`].
     pub embedding: bool,
     /// CUE analysis (`DetectCue`, `AutoDetectCue`, …; default off): cues set on the new grid
-    /// after the analysis, Manual mode only (`docs/re/analysis-cue.md`).
+    /// after the analysis, Manual or Auto (`docs/re/analysis-cue.md`). Auto scores the phrase
+    /// starts with rekordbox's own ONNX models, so it needs [`AnalysisSettings::phrase`].
     pub cue: crate::cue_analysis::CueAnalysisSettings,
 }
 
@@ -127,9 +128,13 @@ pub struct TrackAnalysis {
     /// Why the embedding, when asked for, could not run (rekordbox's install or models
     /// missing); an earlier `.3EX` is left as it is then.
     pub embedding_error: Option<String>,
-    /// CUE analysis settings when Manual cue creation runs with this analysis; the cues are made
-    /// in [`Command::ApplyAnalysis`], against the track's cues at that time.
+    /// CUE analysis settings when cue creation runs with this analysis; the cues are made in
+    /// [`Command::ApplyAnalysis`], against the track's cues at that time.
     pub cue: Option<crate::cue_analysis::CueAnalysisSettings>,
+    /// Auto CUE: the scored phrase starts, best first (empty without phrases or models).
+    pub cue_candidates: Vec<mb_anlz::tags::Beat>,
+    /// Why Auto CUE could not score the phrase starts (rekordbox's install or models missing).
+    pub cue_error: Option<String>,
 }
 
 /// What the embedding pass computes from the audio (`docs/re/analysis-embedding.md`). The record
@@ -177,6 +182,7 @@ pub fn analyse_track_with(
         high_precision: settings.high_precision,
         vocal: settings.vocal || embed,
         dynamic: settings.dynamic,
+        auto_cue: settings.cue.auto(),
         ..mb_analysis::Options::default()
     };
     let a = mb_analysis::analyze_with(audio, opts, stored).map_err(|e| fail(&e))?;
@@ -327,6 +333,13 @@ pub fn analyse_track_with(
         embedding,
         embedding_error,
         cue: settings.cue.runs().then_some(settings.cue),
+        cue_candidates: a
+            .cue_candidates
+            .unwrap_or_default()
+            .iter()
+            .map(|b| mb_anlz::tags::Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms })
+            .collect(),
+        cue_error: a.cue_error,
     })
 }
 
@@ -788,7 +801,11 @@ pub(crate) fn apply(lib: &mut Library, content: &DbId, analysis: &TrackAnalysis)
         let existing = crate::cues::load_for_content(lib.connection(), content.as_str())?;
         let beats = dat.beat_grid().map(|g| g.beats).unwrap_or_default();
         let offset = ext.ext_beat_grid().and_then(|g| g.tail).map_or(0, |(o, _)| o);
-        let plan = crate::cue_analysis::manual_plan(&beats, offset, &existing, cs);
+        let plan = if cs.manual {
+            crate::cue_analysis::manual_plan(&beats, offset, &existing, cs)
+        } else {
+            crate::cue_analysis::auto_plan(&beats, offset, &analysis.cue_candidates, &existing, cs)
+        };
         for id in &plan.remove {
             if let (_, Some(Command::RestoreCue { row })) = crate::cues::delete_cue(lib, id)? {
                 cues_removed.push(row);

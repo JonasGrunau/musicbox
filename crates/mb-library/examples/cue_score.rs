@@ -1,11 +1,19 @@
-//! CUE analysis (Manual) against rekordbox's (`fixtures/oracle-cue/<run>`, `docs/re/analysis-cue.md`).
+//! CUE analysis against rekordbox's (`fixtures/oracle-cue/<run>`, `docs/re/analysis-cue.md`).
 //! Usage: `cargo run --release -p mb-library --example cue_score -- [run …]` (default: every run).
 //!
-//! Per track, our Manual pass runs on the grid rekordbox left in that run (its `.DAT`/`.EXT`) and
-//! on the cues before it: none, or those of `<run>/seed/master.db` when the run was seeded. The
-//! cue rows that would result are compared with the run's `djmdCue` rows column by column.
+//! Per track, our Manual or Auto pass runs on the grid rekordbox left in that run (its
+//! `.DAT`/`.EXT`) and on the cues before it: none, or those of `<run>/seed/master.db` when the
+//! run was seeded. Auto scores the phrase starts of the run's PSSI on our own decode of the
+//! audio, with rekordbox's models from the install (`MB_CUE_OWN=1`: on our own grid and
+//! phrases instead). The cue rows that would result are compared with the run's `djmdCue` rows
+//! column by column. `MB_CUE_ONLY=<ContentID,…>` limits the tracks, `MB_CUE_DUMP=1` prints the
+//! scores and the differing beats, `MB_CUE_INPUTS=<dir>` writes each track's grid and phrases as
+//! text for comparison tools.
 
-use mb_library::cue_analysis::{CueAnalysisSettings, manual_plan};
+use mb_analysis::phrase::PhraseResult;
+use mb_anlz::Tag;
+use mb_anlz::tags::{Beat, SongStructure};
+use mb_library::cue_analysis::{CueAnalysisSettings, auto_plan, manual_plan};
 use mb_library::Cue;
 use mb_masterdb::rusqlite::Connection;
 use mb_masterdb::{LibraryPaths, MasterDb, derive_passphrase};
@@ -111,7 +119,55 @@ fn existing_row(c: &Cue, raw: &[Row]) -> Option<Row> {
     raw.iter().find(|r| r.in_msec == i64::from(c.in_ms) && r.kind == c.slot.kind()).cloned()
 }
 
+/// Auto CUE's candidates on rekordbox's grid and phrases (`mb_analysis::cue`).
+fn auto_candidates(audio: &Path, beats: &[Beat], ext: &mb_anlz::AnlzFile) -> anyhow::Result<Vec<Beat>> {
+    let Some(pssi) = ext.sections_with(Tag::PSSI).next().and_then(|s| SongStructure::decode(s).ok()) else { return Ok(Vec::new()) };
+    let mut p = PhraseResult { count: pssi.phrases.len() as i32, mood: i32::from(pssi.mood), ..PhraseResult::default() };
+    p.cols[0] = pssi.phrases.iter().map(|x| i32::from(x.beat())).collect();
+    p.cols[1] = pssi.phrases.iter().map(|x| i32::from(x.kind())).collect();
+    let grid: Vec<mb_analysis::beats::Beat> =
+        beats.iter().map(|b| mb_analysis::beats::Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms, sub_ms: 0 }).collect();
+    // `MB_CUE_INPUTS=<dir>`: the grid and phrases as text, for comparison tools
+    if let Some(dir) = std::env::var_os("MB_CUE_INPUTS") {
+        let mut t = format!("mood {}\nbeats {}\n", p.mood, grid.len());
+        t.extend(grid.iter().map(|b| format!("{}\n", b.time_ms)));
+        t.push_str(&format!("phrases {}\n", p.count));
+        t.extend(p.cols[0].iter().zip(&p.cols[1]).map(|(b, k)| format!("{b} {k}\n")));
+        let name = audio.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+        std::fs::write(Path::new(&dir).join(format!("{name}.txt")), t)?;
+    }
+    let (rate, pcm) = mb_analysis::cue::collect(audio)?;
+    let models = mb_analysis::cue::Models::get().map_err(anyhow::Error::msg)?;
+    let scores = models.scores(&pcm, rate, &grid, &p).map_err(anyhow::Error::msg)?;
+    let total = mb_analysis::cue::total_scores(&p, &scores);
+    if std::env::var_os("MB_CUE_DUMP").is_some() {
+        eprintln!("  {}: mood {} phrases {} scores {:?} total {:?}", audio.display(), p.mood, p.count, scores, total);
+    }
+    Ok(mb_analysis::cue::candidates(&grid, &total).iter().map(|b| Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms }).collect())
+}
+
+/// Auto CUE end to end: our grid, phrases and candidates from our own analysis of the audio.
+fn own_candidates(audio: &Path) -> anyhow::Result<(Vec<Beat>, Vec<Beat>)> {
+    let opts = mb_analysis::Options {
+        waveforms: false,
+        loudness: false,
+        key: false,
+        auto_cue: true,
+        ..mb_analysis::Options::default()
+    };
+    let a = mb_analysis::analyze(audio, opts)?;
+    if let Some(e) = a.cue_error {
+        anyhow::bail!(e);
+    }
+    let conv = |v: &[mb_analysis::beats::Beat]| v.iter().map(|b| Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms }).collect::<Vec<_>>();
+    Ok((conv(&a.beats.map(|g| g.beats).unwrap_or_default()), conv(&a.cue_candidates.unwrap_or_default())))
+}
+
 fn main() -> anyhow::Result<()> {
+    // `MB_CUE_OWN=1`: Auto runs on our own grid and phrases instead of the run's
+    let own = std::env::var_os("MB_CUE_OWN").is_some();
+    // Auto candidates per track, shared by the Auto runs (they differ only in the cue type)
+    let mut auto_cache: HashMap<String, (Vec<Beat>, Vec<Beat>)> = HashMap::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/oracle-cue");
     let mut runs: Vec<String> = std::env::args().skip(1).collect();
     if runs.is_empty() {
@@ -127,14 +183,20 @@ fn main() -> anyhow::Result<()> {
         let seed: Option<PathBuf> = Some(dir.join("seed")).filter(|p| p.join("master.db").exists());
         let seed_db = seed.as_ref().map(|p| open_copy(p, &options, &format!("{run}-seed"))).transpose()?;
         let seed_rows = seed_db.as_ref().map(|d| rows(d.connection())).transpose()?.unwrap_or_default();
-        let mut stmt = db.connection().prepare("SELECT ID, AnalysisDataPath, Title FROM djmdContent WHERE rb_local_deleted = 0 ORDER BY ID")?;
-        let tracks: Vec<(String, Option<String>, String)> =
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default())))?.collect::<Result<_, _>>()?;
+        let mut stmt = db.connection().prepare("SELECT ID, AnalysisDataPath, Title, FolderPath FROM djmdContent WHERE rb_local_deleted = 0 ORDER BY ID")?;
+        let tracks: Vec<(String, Option<String>, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default(), r.get::<_, Option<String>>(3)?.unwrap_or_default())))?
+            .collect::<Result<_, _>>()?;
         let share = dir.join("rekordbox/share");
         let (mut same, mut total, mut cues_theirs, mut cues_ours) = (0, 0, 0, 0);
         let mut kinds: BTreeMap<i64, (usize, usize)> = BTreeMap::new();
         let mut misses = Vec::new();
-        for (id, rel, title) in &tracks {
+        // `MB_CUE_ONLY=<ContentID,…>`: only those tracks
+        let only: Option<Vec<String>> = std::env::var("MB_CUE_ONLY").ok().map(|v| v.split(',').map(str::to_owned).collect());
+        for (id, rel, title, audio) in &tracks {
+            if only.as_ref().is_some_and(|o| !o.contains(id)) {
+                continue;
+            }
             let Some(rel) = rel.as_deref().filter(|r| !r.is_empty()) else { continue };
             let dat = share.join(rel.trim_start_matches('/'));
             let (Ok(d), Ok(e)) = (std::fs::read(&dat), std::fs::read(dat.with_extension("EXT"))) else { continue };
@@ -145,7 +207,25 @@ fn main() -> anyhow::Result<()> {
                 Some(sd) => mb_library::cues::load_for_content(sd.connection(), id)?,
                 None => Vec::new(),
             };
-            let plan = manual_plan(&beats, offset, &before, &s);
+            let plan = if s.manual {
+                manual_plan(&beats, offset, &before, &s)
+            } else {
+                if !auto_cache.contains_key(id) {
+                    let c = if own {
+                        own_candidates(Path::new(audio))
+                    } else {
+                        auto_candidates(Path::new(audio), &beats, &e).map(|c| (beats.clone(), c))
+                    };
+                    let c = c.unwrap_or_else(|err| {
+                        eprintln!("  {id} {title}: {err}");
+                        (beats.clone(), Vec::new())
+                    });
+                    auto_cache.insert(id.clone(), c);
+                }
+                let (grid, cands) = &auto_cache[id];
+                // our analysis stores PQT2's beat number offset as 0
+                auto_plan(grid, if own { 0 } else { offset }, cands, &before, &s)
+            };
             let empty = Vec::new();
             let seed_raw = seed_rows.get(id).unwrap_or(&empty);
             let mut ours: Vec<Row> = before.iter().filter(|c| !plan.remove.contains(&c.id)).filter_map(|c| existing_row(c, seed_raw)).collect();
@@ -162,12 +242,19 @@ fn main() -> anyhow::Result<()> {
             for r in &ours {
                 kinds.entry(r.kind).or_default().1 += 1;
             }
+            if ours != rb && std::env::var_os("MB_CUE_DUMP").is_some() {
+                let idx = |ms: i64| beats.iter().position(|b| i64::from(b.time_ms) == ms).map_or(-1, |i| i as i64);
+                let ours_ms: Vec<(i64, i64)> = ours.iter().map(|r| (r.in_msec, idx(r.in_msec))).collect();
+                let rb_ms: Vec<(i64, i64)> = rb.iter().map(|r| (r.in_msec, idx(r.in_msec))).collect();
+                eprintln!("  {id}: ours (ms, beat) {ours_ms:?}\n  {id}: rekordbox     {rb_ms:?}");
+            }
             if ours == rb {
                 same += 1;
             } else if misses.len() < 8 {
                 let first = ours.iter().zip(&rb).position(|(a, b)| a != b).unwrap_or(ours.len().min(rb.len()));
                 misses.push(format!(
-                    "  {id} {title}: ours {} vs rekordbox {}; first difference at {first}: {:?} vs {:?}",
+                    "  {id} {title} ({}): ours {} vs rekordbox {}; first difference at {first}: {:?} vs {:?}",
+                    Path::new(audio).parent().and_then(Path::file_name).map_or_else(String::new, |d| d.to_string_lossy().into_owned()),
                     ours.len(),
                     rb.len(),
                     ours.get(first),

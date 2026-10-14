@@ -19,5 +19,5 @@
   },
   "columns": "Kind, InMsec, InFrame, OutMsec, Comment, Color, ColorTableIndex, ActiveLoop, BeatLoopSize, CueMicrosec, InMpegFrame, InMpegAbs",
   "grid": "rekordbox's grid of each run (oracle-a Normal mode); our own Normal-mode grids equal oracle-a's (analysis scorecards)",
-  "pending": "the statement order of the cue writes (no SQL trace: the instrumented copy exits at startup now); Auto mode (A1/A2 reference runs exist)"
+  "pending": "the statement order of the cue writes (no SQL trace: the instrumented copy exits at startup now)"
 }

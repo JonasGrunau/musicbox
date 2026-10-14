@@ -11,6 +11,7 @@
 
 pub mod balib2;
 pub mod beats;
+pub mod cue;
 pub mod embed;
 pub mod hpbeat;
 pub mod key;
@@ -84,6 +85,9 @@ pub struct Options {
     /// Normal-mode Dynamic (`trackAnalysisMode` 1, analysis mode 1); ignored when
     /// `high_precision` is set (`analysis-beats.md` § 9).
     pub dynamic: bool,
+    /// Auto CUE candidates (`DetectCue` on with `AutoDetectCue` 0), with rekordbox's models
+    /// from the installed app; needs `beats` and `phrase` (`analysis-cue.md` § 4).
+    pub auto_cue: bool,
 }
 
 impl Default for Options {
@@ -97,6 +101,7 @@ impl Default for Options {
             high_precision: None,
             vocal: false,
             dynamic: false,
+            auto_cue: false,
         }
     }
 }
@@ -121,6 +126,10 @@ pub struct Analysis {
     pub vocal: Option<Vec<u8>>,
     /// Why vocal detection, when asked for, gave nothing (rekordbox's install or model missing).
     pub vocal_error: Option<String>,
+    /// The Auto CUE candidates, best first (at most 16 beats of the grid), when asked for.
+    pub cue_candidates: Option<Vec<beats::Beat>>,
+    /// Why the Auto CUE candidates, when asked for, are missing (install or model).
+    pub cue_error: Option<String>,
 }
 
 /// Analyses the waveforms of the audio file at `path`.
@@ -190,13 +199,24 @@ pub fn analyze_with(
     let mut mono = (opts.beats && opts.high_precision.is_some()).then(|| Vec::with_capacity(total as usize));
     let mut vocal_error = None;
     let mut voc = match opts.vocal.then(vocal::Model::get) {
-        Some(Ok(m)) => Some((m, vocal::VocalDetector::new(rate, m.tables()), Vec::with_capacity(block_len(rate)))),
+        Some(Ok(m)) => Some((m, vocal::VocalDetector::new(rate, m.tables()))),
         Some(Err(e)) => {
             vocal_error = Some(e);
             None
         }
         None => None,
     };
+    let mut cue_error = None;
+    let mut cues = match (opts.beats && opts.phrase && opts.auto_cue).then(cue::Models::get) {
+        Some(Ok(m)) => Some((m, cue::Collector::new(rate))),
+        Some(Err(e)) => {
+            cue_error = Some(e);
+            None
+        }
+        None => None,
+    };
+    // the thread's mono mix of the 16-bit samples, for the vocal detector and the cue predictor
+    let mut mono16 = Vec::with_capacity(if voc.is_some() || cues.is_some() { block_len(rate) } else { 0 });
     let block = block_len(rate);
     let mut frames = vec![[0.0f32; 2]; block];
     let mut pcm = vec![[0i16; 2]; block];
@@ -234,15 +254,20 @@ pub fn analyze_with(
         if let Some(k) = &mut keys {
             k.put(pcm);
         }
-        if let Some((_, det, buf)) = &mut voc {
-            // the thread's mono mix of the 16-bit samples (`CBeatAnalyzeThread::analyze`)
-            buf.clear();
+        if voc.is_some() || cues.is_some() {
+            // `CBeatAnalyzeThread::analyze`: one mono buffer, copied by each consumer
+            mono16.clear();
             if info.channels == 2 {
-                buf.extend(pcm.iter().map(|s| (f32::from(s[1]) + f32::from(s[0])) * 0.5));
+                mono16.extend(pcm.iter().map(|s| (f32::from(s[1]) + f32::from(s[0])) * 0.5));
             } else {
-                buf.extend(pcm.iter().map(|s| f32::from(s[0])));
+                mono16.extend(pcm.iter().map(|s| f32::from(s[0])));
             }
-            det.put(buf);
+        }
+        if let Some((_, det)) = &mut voc {
+            det.put(&mono16);
+        }
+        if let Some((_, c)) = &mut cues {
+            c.put(&mono16);
         }
         pos += got as u64;
     }
@@ -279,6 +304,18 @@ pub fn analyze_with(
     }
     // The key job runs on the finished grid; `getKey` takes BPM × 100 · 0.01. Without a grid
     // only the whole-track estimate counts (no segments).
+    // Auto CUE: `getScores` after the phrase pass, then `getTotalScores` (0x1001562a0…).
+    let cue_candidates = match (cues, &phrases, grid.as_ref().or(stored.as_ref())) {
+        (Some((m, c)), Some(p), Some(g)) => match m.scores(c.audio(), rate, &g.beats, p) {
+            Ok(s) => Some(cue::candidates(&g.beats, &cue::total_scores(p, &s))),
+            Err(e) => {
+                cue_error = Some(e);
+                None
+            }
+        },
+        (Some(_), ..) => Some(Vec::new()),
+        _ => None,
+    };
     let key = keys.map(|k| {
         let (beats, bpm) = grid.as_ref().or(stored.as_ref()).map_or((Vec::new(), 0.0), |g| {
             let beats = g.beats.iter().map(|b| (b.beat_in_bar, b.time_ms)).collect();
@@ -294,7 +331,7 @@ pub fn analyze_with(
         grid_type,
         high_precision_error,
         phrase: phrases,
-        vocal: match voc.map(|(m, det, _)| m.detect(det)) {
+        vocal: match voc.map(|(m, det)| m.detect(det)) {
             Some(Ok(v)) => v,
             Some(Err(e)) => {
                 vocal_error = Some(e);
@@ -303,5 +340,7 @@ pub fn analyze_with(
             None => None,
         },
         vocal_error,
+        cue_candidates,
+        cue_error,
     })
 }

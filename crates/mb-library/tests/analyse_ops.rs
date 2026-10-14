@@ -665,6 +665,97 @@ fn manual_cue_analysis_sets_cues() {
     assert_eq!(cues(&lib), [(mb_library::CueSlot::Hot(0), 777, String::new())]);
 }
 
+/// (Kind, InMsec, Comment) of each cue, by ContentID.
+type CuesByTrack = std::collections::HashMap<String, Vec<(i64, i64, String)>>;
+
+/// The cues of a fixture run (`fixtures/oracle-cue/<run>`), read from a private copy of its
+/// `master.db` and WAL so the fixture is never touched.
+fn run_cues(run: &str) -> Option<CuesByTrack> {
+    let root = fixture(&format!("oracle-cue/{run}"))?;
+    let paths = mb_masterdb::LibraryPaths::from_options_json(&root.join("options.json")).ok()?;
+    let tmp = std::env::temp_dir().join(format!("mb-library-cues-{run}-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).ok()?;
+    for f in ["master.db", "master.db-wal", "master.db-shm"] {
+        if root.join("rekordbox").join(f).exists() {
+            std::fs::copy(root.join("rekordbox").join(f), tmp.join(f)).ok()?;
+        }
+    }
+    let db = mb_masterdb::MasterDb::open_read_only(&tmp.join("master.db"), &mb_masterdb::derive_passphrase(&paths.dp).ok()?).ok()?;
+    let mut out = CuesByTrack::new();
+    {
+        let mut stmt = db.connection().prepare("SELECT ContentID, Kind, InMsec, Comment FROM djmdCue WHERE rb_local_deleted = 0").ok()?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<String>>(3)?.unwrap_or_default())))
+            .ok()?;
+        for (id, kind, ms, comment) in rows.flatten() {
+            out.entry(id).or_default().push((kind, ms, comment));
+        }
+    }
+    drop(db);
+    let _ = std::fs::remove_dir_all(&tmp);
+    Some(out)
+}
+
+/// CUE analysis, Auto mode, against `fixtures/oracle-cue/A1` (hot cues, upper limit 8, an
+/// all-zero personal tendency): the cues our own analysis and rekordbox's cue models place on the
+/// 44.1 kHz WAV probes equal rekordbox's, Kind, time and "CUE(Auto)" comment. Undo removes them.
+/// Every track with `MB_ORACLE_FULL=1` (the two 96 kHz probes whose PSSI differs are skipped;
+/// `docs/scorecards/cue-auto.json`).
+#[test]
+fn auto_cue_analysis_matches_oracle_cue() {
+    let Some(dir) = TempLibrary::new("oracle-a") else {
+        eprintln!("skipped: fixtures/oracle-a missing");
+        return;
+    };
+    let Some(want) = run_cues("A1") else {
+        eprintln!("skipped: fixtures/oracle-cue/A1 missing");
+        return;
+    };
+    let Some((_, all)) = tracks() else { return };
+    let full = std::env::var_os("MB_ORACLE_FULL").is_some();
+    let selected: Vec<&Track> = all
+        .iter()
+        .filter(|t| t.path.exists() && t.columns[0] > 0)
+        .filter(|t| if full { !t.path.to_string_lossy().contains("/wav_96k32f/") } else { t.path.to_string_lossy().contains("/probes/wav_44k16/") })
+        .collect();
+    if selected.is_empty() {
+        eprintln!("skipped: corpus audio missing");
+        return;
+    }
+    let cue = mb_library::CueAnalysisSettings { enabled: true, manual: false, max_hot: 8, ..Default::default() };
+    let settings = AnalysisSettings { phrase: true, embedding: false, cue, ..AnalysisSettings::default() };
+    let mut lib = Library::open_unguarded(&dir.db, &dir.passphrase).unwrap();
+    lib.set_analysis_root(dir.dir.join("share"));
+    let mut history = History::default();
+    let (mut with_cues, mut bad) = (0, Vec::new());
+    for t in &selected {
+        let a = analyse_track(&t.path, &t.file_name, &settings).unwrap();
+        if let Some(e) = &a.cue_error {
+            eprintln!("skipped: {e}");
+            return;
+        }
+        // Test setup (not an op under test): no cues before, as in the fixture run.
+        lib.connection().execute("DELETE FROM djmdCue WHERE ContentID = ?1", [&t.id]).unwrap();
+        history.run(&mut lib, Command::ApplyAnalysis { content: DbId(t.id.clone()), analysis: Box::new(a) }).unwrap();
+        let mut got: Vec<(i64, i64, String)> = mb_library::cues::load_for_content(lib.connection(), &t.id)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.slot.kind(), i64::from(c.in_ms), c.comment))
+            .collect();
+        got.sort();
+        let mut rb = want.get(&t.id).cloned().unwrap_or_default();
+        rb.sort();
+        with_cues += usize::from(!rb.is_empty());
+        if got != rb {
+            bad.push(format!("{}: ours {got:?} vs rekordbox {rb:?}", t.path.display()));
+        }
+        history.undo(&mut lib).unwrap().unwrap();
+        assert!(mb_library::cues::load_for_content(lib.connection(), &t.id).unwrap().is_empty(), "undo leaves no cue");
+    }
+    assert!(with_cues > 0, "rekordbox set cues on none of the tracks");
+    assert!(bad.is_empty(), "{} of {} tracks differ:\n{}", bad.len(), selected.len(), bad.join("\n"));
+}
+
 /// Normal-mode Dynamic (`trackAnalysisMode` 1) against `fixtures/oracle-e`: PQTZ, PQT2 (type 2),
 /// PSSI and `BPM` equal rekordbox's. The 44.1 kHz WAV probes by default, every track with
 /// `MB_ORACLE_FULL=1`; the 96 kHz click probe's PSSI is the known miss

@@ -53,6 +53,7 @@ fn main() {
                         high_precision: None,
                         vocal: false,
                         dynamic: std::env::var("MB_DYNAMIC").is_ok_and(|v| v == "1"),
+                        auto_cue: false,
                     };
                     let r = mb_analysis::analyze(&t.path, opts).map(|a| (a.beats, a.grid_type));
                     rows.lock().unwrap().push((i, r));

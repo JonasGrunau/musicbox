@@ -1,8 +1,8 @@
-//! CUE analysis, Manual mode (`docs/re/analysis-cue.md` § 3): after an analysis, rekordbox can
-//! set hot cues or memory cues on the new beat grid, at 1.1 bars and then every N bars
-//! (`DatabaseMediator::createDetectCue` @0x101495900 → `CueManager::ManualCueCreation`
-//! @0x100056e94). Auto mode (the cue-point models and the personal CUE tendency) is not
-//! implemented; with it selected no cues are made.
+//! CUE analysis (`docs/re/analysis-cue.md`): after an analysis, rekordbox can set hot cues or
+//! memory cues on the new beat grid (`DatabaseMediator::createDetectCue` @0x101495900).
+//! - Manual (§ 3, `CueManager::ManualCueCreation` @0x100056e94): at 1.1 bars, then every N bars.
+//! - Auto (§ 4, `CueManager::IntelligentCueCreation` @0x100057c7c): at 1.1 bars, then at the
+//!   best-scored phrase starts (`mb_analysis::cue`). The personal CUE tendency is not modelled.
 
 use crate::cues::{Cue, CueSlot, NewCue};
 use mb_anlz::tags::Beat;
@@ -13,7 +13,7 @@ use mb_anlz::tags::Beat;
 pub struct CueAnalysisSettings {
     /// `DetectCue` (default 0): "Set CUE during analysis".
     pub enabled: bool,
-    /// `AutoDetectCue` ≠ 0: Manual. 0 (the default) is Auto, which musicbox does not implement.
+    /// `AutoDetectCue` ≠ 0: Manual. 0 (the default) is Auto.
     pub manual: bool,
     /// `AutoDetectCueType` ≠ 0: memory cues instead of hot cues.
     pub memory: bool,
@@ -74,15 +74,25 @@ impl CueAnalysisSettings {
         }
     }
 
-    /// Manual cue creation will run.
+    /// Cue creation will run, Manual or Auto.
     pub fn runs(&self) -> bool {
-        self.enabled && self.manual
+        self.enabled
+    }
+
+    /// Auto cue creation will run: the analysis must score the phrase starts.
+    pub fn auto(&self) -> bool {
+        self.enabled && !self.manual
+    }
+
+    /// The upper limit for the selected cue type.
+    fn limit(&self) -> i32 {
+        if self.memory { self.max_memory } else { self.max_hot }
     }
 }
 
-/// What a Manual pass does to one track: earlier cues removed (overwrite), then new cues in order.
+/// What a cue pass does to one track: earlier cues removed (overwrite), then new cues in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ManualPlan {
+pub struct CuePlan {
     /// `djmdCue.ID`s, in removal order.
     pub remove: Vec<String>,
     pub create: Vec<NewCue>,
@@ -129,7 +139,7 @@ fn bar_beats(beats: &[Beat], first: u32) -> Vec<BarBeat> {
 
 /// `createComment` @0x100058db0 in Manual mode: "1.1Bars", then "+%d" with bar − 1 from bar 2
 /// (the comparison is unsigned).
-fn comment(bar: i32) -> String {
+fn manual_comment(bar: i32) -> String {
     if (bar as u32) < 2 { "1.1Bars".to_owned() } else { format!("1.1Bars+{}", bar.wrapping_sub(1)) }
 }
 
@@ -147,18 +157,17 @@ const MAX_MEMORY_CUES: usize = 10;
 /// `ManualCueCreation` on the analysed grid. `beat_num_offset` is PQT2's field of that name
 /// (`MusicAnalyzeInfo`+0x50, read by `get_pmai_ext_beat_num_offset`): 0 lets the first beat's
 /// position in its bar decide where 1.1 is. `existing` are the track's live cues.
-pub fn manual_plan(beats: &[Beat], beat_num_offset: u32, existing: &[Cue], s: &CueAnalysisSettings) -> ManualPlan {
-    let mut plan = ManualPlan::default();
+pub fn manual_plan(beats: &[Beat], beat_num_offset: u32, existing: &[Cue], s: &CueAnalysisSettings) -> CuePlan {
     // `createDetectCue` makes no cues without beats; `ManualCueCreation` returns 1 when neither
     // the 1.1-bar cue nor the repeat is on.
     if beats.is_empty() || !(s.first_cue || s.loop_cue) {
-        return plan;
+        return CuePlan::default();
     }
-    let first = if beat_num_offset == 0 { first_downbeat(beats) } else { beat_num_offset };
+    let first = first_position(beats, beat_num_offset);
     let list = bar_beats(beats, first);
-    let limit = if s.memory { s.max_memory } else { s.max_hot };
+    let limit = s.limit();
     if limit < 1 {
-        return plan;
+        return CuePlan::default();
     }
     let n = if s.loop_cue { limit as usize } else { 1 };
     // `getDetectCueParam`: the step is `LoopCueCount · 4` beats in Manual mode.
@@ -172,51 +181,120 @@ pub fn manual_plan(beats: &[Beat], beat_num_offset: u32, existing: &[Cue], s: &C
         picked.push(list[at as usize]);
         at = at.wrapping_add(step);
     }
-
-    let is_target = |c: &Cue| matches!(c.slot, CueSlot::Memory) == s.memory;
-    let mut kept: Vec<&Cue> = existing.iter().filter(|c| is_target(c)).collect();
-    if s.memory {
-        // hypothesis: the CueManager keeps memory cues in time order (`Initialize` sorts them)
-        kept.sort_by_key(|c| c.in_ms);
-    }
-    // Overwrite: `removeCues(type, k)` @0x1000573b8, k = the cues about to be made. Hot cues on
-    // pads below k go; for memory cues the first k.
+    let mut m = Manager::new(existing, s);
+    // Overwrite: `removeCues(type, k)` @0x1000573b8, k = the cues about to be made.
     if s.overwrite {
-        let k = picked.len().min(n);
-        let removed: Vec<&Cue> = if s.memory {
-            kept.iter().take(k).copied().collect()
-        } else {
-            kept.iter().filter(|c| matches!(c.slot, CueSlot::Hot(p) if usize::from(p) < k)).copied().collect()
-        };
-        plan.remove = removed.iter().map(|c| c.id.clone()).collect();
-        kept.retain(|c| !plan.remove.contains(&c.id));
+        m.remove(picked.len().min(n));
     }
     // The memory-cue duplicate check sees the cues before this pass only.
-    let before: Vec<u32> = kept.iter().map(|c| c.in_ms).collect();
-    let mut used_pads: Vec<u8> = kept.iter().filter_map(|c| if let CueSlot::Hot(p) = c.slot { Some(p) } else { None }).collect();
-    let mut memory_count = kept.len();
+    let before = m.memory_times();
     for b in picked {
-        let slot = if s.memory {
-            if before.iter().any(|&ms| same_time(b.ms, ms)) || memory_count >= MAX_MEMORY_CUES {
-                continue;
+        m.create(b.ms, &before, if s.comment { manual_comment(b.bar) } else { String::new() });
+    }
+    m.plan
+}
+
+/// `IntelligentCueCreation` on the analysed grid: `candidates` are the scored phrase starts,
+/// best first (`mb_analysis::Analysis::cue_candidates`); without any no cue is made, not even the
+/// 1.1-bar one. The 1.1-bar cue comes first and drops a candidate at the same time; the best
+/// of the rest up to the limit follow in time order.
+pub fn auto_plan(beats: &[Beat], beat_num_offset: u32, candidates: &[Beat], existing: &[Cue], s: &CueAnalysisSettings) -> CuePlan {
+    let mut limit = s.limit();
+    if beats.is_empty() || candidates.is_empty() || limit < 1 {
+        return CuePlan::default();
+    }
+    let first = first_position(beats, beat_num_offset);
+    let list = bar_beats(beats, first);
+    let mut m = Manager::new(existing, s);
+    // `removeCues(type, min(limit, candidates))`
+    if s.overwrite {
+        m.remove((limit as usize).min(candidates.len()));
+    }
+    let comment = || if s.comment { "CUE(Auto)".to_owned() } else { String::new() };
+    let mut rest: Vec<u32> = candidates.iter().map(|b| b.time_ms).collect();
+    if s.first_cue {
+        // the first downbeat; an index past the grid gives a zero beat
+        let ms = list.get(first as usize - 1).map_or(0, |b| b.ms);
+        if let Some(i) = rest.iter().position(|&c| c == ms) {
+            rest.remove(i);
+        }
+        let before = m.memory_times();
+        m.create(ms, &before, comment());
+        limit -= 1;
+    }
+    // the cue list as it stands after the 1.1-bar cue
+    let before = m.memory_times();
+    rest.truncate(limit.max(0) as usize);
+    // `HotCueOrder` 0: by time (`$_5` compares the times unsigned)
+    rest.sort_unstable();
+    for ms in rest {
+        m.create(ms, &before, comment());
+    }
+    m.plan
+}
+
+/// The 1-based index of the first downbeat: PQT2's `beat_num_offset`, or from the first beat.
+fn first_position(beats: &[Beat], beat_num_offset: u32) -> u32 {
+    if beat_num_offset == 0 { first_downbeat(beats) } else { beat_num_offset }
+}
+
+/// The CueManager's view of the track's cues of the selected type during one pass.
+struct Manager<'a> {
+    s: &'a CueAnalysisSettings,
+    kept: Vec<&'a Cue>,
+    used_pads: Vec<u8>,
+    memory: Vec<u32>,
+    plan: CuePlan,
+}
+
+impl<'a> Manager<'a> {
+    fn new(existing: &'a [Cue], s: &'a CueAnalysisSettings) -> Self {
+        let mut kept: Vec<&Cue> = existing.iter().filter(|c| matches!(c.slot, CueSlot::Memory) == s.memory).collect();
+        if s.memory {
+            // hypothesis: the CueManager keeps memory cues in time order (`Initialize` sorts them)
+            kept.sort_by_key(|c| c.in_ms);
+        }
+        let used_pads = kept.iter().filter_map(|c| if let CueSlot::Hot(p) = c.slot { Some(p) } else { None }).collect();
+        let memory = if s.memory { kept.iter().map(|c| c.in_ms).collect() } else { Vec::new() };
+        Self { s, kept, used_pads, memory, plan: CuePlan::default() }
+    }
+
+    /// `removeCues(type, k)` @0x1000573b8: hot cues on pads below k; for memory the first k.
+    fn remove(&mut self, k: usize) {
+        let removed: Vec<&Cue> = if self.s.memory {
+            self.kept.iter().take(k).copied().collect()
+        } else {
+            self.kept.iter().filter(|c| matches!(c.slot, CueSlot::Hot(p) if usize::from(p) < k)).copied().collect()
+        };
+        self.plan.remove = removed.iter().map(|c| c.id.clone()).collect();
+        self.kept.retain(|c| !self.plan.remove.contains(&c.id));
+        self.used_pads = self.kept.iter().filter_map(|c| if let CueSlot::Hot(p) = c.slot { Some(p) } else { None }).collect();
+        if self.s.memory {
+            self.memory = self.kept.iter().map(|c| c.in_ms).collect();
+        }
+    }
+
+    /// The memory cues' times now (the list `findSame` checks against).
+    fn memory_times(&self) -> Vec<u32> {
+        self.memory.clone()
+    }
+
+    /// `create` @0x1000579c8: a memory cue unless one in `before` is within 5 ms or the track has
+    /// [`MAX_MEMORY_CUES`]; a hot cue on the first free pad.
+    fn create(&mut self, ms: u32, before: &[u32], comment: String) {
+        let slot = if self.s.memory {
+            if before.iter().any(|&b| same_time(ms, b)) || self.memory.len() >= MAX_MEMORY_CUES {
+                return;
             }
-            memory_count += 1;
+            self.memory.push(ms);
             CueSlot::Memory
         } else {
-            let Some(pad) = (0..HOT_PADS).find(|p| !used_pads.contains(p)) else { continue };
-            used_pads.push(pad);
+            let Some(pad) = (0..HOT_PADS).find(|p| !self.used_pads.contains(p)) else { return };
+            self.used_pads.push(pad);
             CueSlot::Hot(pad)
         };
-        plan.create.push(NewCue {
-            slot,
-            in_ms: b.ms,
-            out_ms: None,
-            color: None,
-            color_table_index: None,
-            comment: if s.comment { comment(b.bar) } else { String::new() },
-        });
+        self.plan.create.push(NewCue { slot, in_ms: ms, out_ms: None, color: None, color_table_index: None, comment });
     }
-    plan
 }
 
 #[cfg(test)]
@@ -297,7 +375,52 @@ mod tests {
     fn bars_before_the_first_downbeat_are_negative() {
         let b = bar_beats(&grid(2, 6), 4);
         assert_eq!(b.iter().map(|x| (x.bar, x.beat)).collect::<Vec<_>>(), [(-1, 2), (-1, 3), (-1, 4), (1, 1), (1, 2), (1, 3)]);
-        assert_eq!(comment(-1), "1.1Bars+-2");
+        assert_eq!(manual_comment(-1), "1.1Bars+-2");
+    }
+
+    fn auto() -> CueAnalysisSettings {
+        CueAnalysisSettings { enabled: true, manual: false, max_hot: 4, ..CueAnalysisSettings::default() }
+    }
+
+    #[test]
+    fn auto_puts_the_first_downbeat_first_then_the_best_in_time_order() {
+        let beats = grid(1, 400);
+        // best first; the first downbeat (beat 0) is among them and is dropped from the list
+        let cands: Vec<Beat> = [192, 64, 0, 320, 128].iter().map(|&i| beats[i]).collect();
+        let p = auto_plan(&beats, 0, &cands, &[], &auto());
+        let got: Vec<(CueSlot, u32, &str)> = p.create.iter().map(|c| (c.slot, c.in_ms, c.comment.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (CueSlot::Hot(0), beats[0].time_ms, "CUE(Auto)"),
+                (CueSlot::Hot(1), beats[64].time_ms, "CUE(Auto)"),
+                (CueSlot::Hot(2), beats[192].time_ms, "CUE(Auto)"),
+                (CueSlot::Hot(3), beats[320].time_ms, "CUE(Auto)"),
+            ]
+        );
+        // without the 1.1-bar cue the four best, in time order
+        let p = auto_plan(&beats, 0, &cands, &[], &CueAnalysisSettings { first_cue: false, ..auto() });
+        assert_eq!(p.create.iter().map(|c| c.in_ms).collect::<Vec<_>>(), [0, 64, 192, 320].map(|i| beats[i].time_ms));
+    }
+
+    #[test]
+    fn auto_makes_nothing_without_candidates() {
+        assert!(auto_plan(&grid(1, 64), 0, &[], &[], &auto()).create.is_empty());
+    }
+
+    #[test]
+    fn auto_memory_cues_skip_taken_positions_and_overwrite_counts_the_candidates() {
+        let beats = grid(1, 400);
+        let s = CueAnalysisSettings { memory: true, max_memory: 3, comment: false, ..auto() };
+        let cands: Vec<Beat> = [64, 128].iter().map(|&i| beats[i]).collect();
+        let existing = [cue("m", CueSlot::Memory, beats[64].time_ms + 3), cue("n", CueSlot::Memory, 5)];
+        let p = auto_plan(&beats, 0, &cands, &existing, &s);
+        assert!(p.remove.is_empty());
+        assert_eq!(p.create.iter().map(|c| c.in_ms).collect::<Vec<_>>(), [beats[0].time_ms, beats[128].time_ms]);
+        // overwrite: min(limit 3, 2 candidates) = the first two memory cues in time order go
+        let p = auto_plan(&beats, 0, &cands, &existing, &CueAnalysisSettings { overwrite: true, ..s });
+        assert_eq!(p.remove, ["n", "m"]);
+        assert_eq!(p.create.len(), 3);
     }
 
     #[test]
@@ -308,8 +431,9 @@ mod tests {
             "LoopCueCount" => Some("16".into()),
             _ => None,
         });
-        assert!(s.runs());
+        assert!(s.runs() && !s.auto());
         assert_eq!((s.loop_bars, s.max_hot, s.first_cue, s.comment), (16, 4, true, true));
         assert!(!CueAnalysisSettings::default().runs());
+        assert!(CueAnalysisSettings::from_prefs(|n| (n == "DetectCue").then(|| "1".into())).auto());
     }
 }
