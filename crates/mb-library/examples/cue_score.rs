@@ -13,6 +13,7 @@
 use mb_analysis::phrase::PhraseResult;
 use mb_anlz::Tag;
 use mb_anlz::tags::{Beat, SongStructure};
+use mb_analysis::cue::{Scored, Trend};
 use mb_library::cue_analysis::{CueAnalysisSettings, auto_plan, manual_plan};
 use mb_library::Cue;
 use mb_masterdb::rusqlite::Connection;
@@ -119,10 +120,15 @@ fn existing_row(c: &Cue, raw: &[Row]) -> Option<Row> {
     raw.iter().find(|r| r.in_msec == i64::from(c.in_ms) && r.kind == c.slot.kind()).cloned()
 }
 
-/// Auto CUE's candidates on rekordbox's grid and phrases (`mb_analysis::cue`).
-fn auto_candidates(audio: &Path, beats: &[Beat], ext: &mb_anlz::AnlzFile) -> anyhow::Result<Vec<Beat>> {
-    let Some(pssi) = ext.sections_with(Tag::PSSI).next().and_then(|s| SongStructure::decode(s).ok()) else { return Ok(Vec::new()) };
-    let mut p = PhraseResult { count: pssi.phrases.len() as i32, mood: i32::from(pssi.mood), ..PhraseResult::default() };
+/// Auto CUE's scores on rekordbox's grid and phrases (`mb_analysis::cue`); `None` without PSSI.
+fn auto_scored(audio: &Path, beats: &[Beat], ext: &mb_anlz::AnlzFile) -> anyhow::Result<Option<Scored>> {
+    let Some(pssi) = ext.sections_with(Tag::PSSI).next().and_then(|s| SongStructure::decode(s).ok()) else { return Ok(None) };
+    let mut p = PhraseResult {
+        count: pssi.phrases.len() as i32,
+        mood: i32::from(pssi.mood),
+        end_beat: i32::from(pssi.end_beat),
+        ..PhraseResult::default()
+    };
     p.cols[0] = pssi.phrases.iter().map(|x| i32::from(x.beat())).collect();
     p.cols[1] = pssi.phrases.iter().map(|x| i32::from(x.kind())).collect();
     let grid: Vec<mb_analysis::beats::Beat> =
@@ -137,17 +143,22 @@ fn auto_candidates(audio: &Path, beats: &[Beat], ext: &mb_anlz::AnlzFile) -> any
         std::fs::write(Path::new(&dir).join(format!("{name}.txt")), t)?;
     }
     let (rate, pcm) = mb_analysis::cue::collect(audio)?;
+    let total_samples = mb_audio::open(audio)?.info().total_samples;
     let models = mb_analysis::cue::Models::get().map_err(anyhow::Error::msg)?;
     let scores = models.scores(&pcm, rate, &grid, &p).map_err(anyhow::Error::msg)?;
-    let total = mb_analysis::cue::total_scores(&p, &scores);
     if std::env::var_os("MB_CUE_DUMP").is_some() {
-        eprintln!("  {}: mood {} phrases {} scores {:?} total {:?}", audio.display(), p.mood, p.count, scores, total);
+        eprintln!("  {}: mood {} phrases {} scores {:?}", audio.display(), p.mood, p.count, scores);
     }
-    Ok(mb_analysis::cue::candidates(&grid, &total).iter().map(|b| Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms }).collect())
+    let length = i32::from((total_samples.saturating_sub(1) / u64::from(rate.max(1))) as u16);
+    Ok(Some(Scored { scores, phrases: p, beats: grid, length }))
 }
 
-/// Auto CUE end to end: our grid, phrases and candidates from our own analysis of the audio.
-fn own_candidates(audio: &Path) -> anyhow::Result<(Vec<Beat>, Vec<Beat>)> {
+fn to_anlz(v: &[mb_analysis::beats::Beat]) -> Vec<Beat> {
+    v.iter().map(|b| Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms }).collect()
+}
+
+/// Auto CUE end to end: our grid, phrases and scores from our own analysis of the audio.
+fn own_scored(audio: &Path) -> anyhow::Result<(Vec<Beat>, Option<Scored>)> {
     let opts = mb_analysis::Options {
         waveforms: false,
         loudness: false,
@@ -159,15 +170,14 @@ fn own_candidates(audio: &Path) -> anyhow::Result<(Vec<Beat>, Vec<Beat>)> {
     if let Some(e) = a.cue_error {
         anyhow::bail!(e);
     }
-    let conv = |v: &[mb_analysis::beats::Beat]| v.iter().map(|b| Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms }).collect::<Vec<_>>();
-    Ok((conv(&a.beats.map(|g| g.beats).unwrap_or_default()), conv(&a.cue_candidates.unwrap_or_default())))
+    Ok((to_anlz(&a.beats.map(|g| g.beats).unwrap_or_default()), a.cue))
 }
 
 fn main() -> anyhow::Result<()> {
     // `MB_CUE_OWN=1`: Auto runs on our own grid and phrases instead of the run's
     let own = std::env::var_os("MB_CUE_OWN").is_some();
-    // Auto candidates per track, shared by the Auto runs (they differ only in the cue type)
-    let mut auto_cache: HashMap<String, (Vec<Beat>, Vec<Beat>)> = HashMap::new();
+    // Auto scores per track, shared by the Auto runs (they differ in the cue type and tendency)
+    let mut auto_cache: HashMap<String, (Vec<Beat>, Option<Scored>)> = HashMap::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/oracle-cue");
     let mut runs: Vec<String> = std::env::args().skip(1).collect();
     if runs.is_empty() {
@@ -178,6 +188,11 @@ fn main() -> anyhow::Result<()> {
         let dir = root.join(&run);
         let options = dir.join("options.json");
         let s = settings(&dir.join("cue-settings.txt"))?;
+        // the run's personal CUE tendency (all zeros when rekordbox wrote the default)
+        let trend = match std::fs::read_to_string(dir.join("cue_personal_trend.json")) {
+            Ok(t) => Some(Trend::parse(&t).map_err(anyhow::Error::msg)?),
+            Err(_) => None,
+        };
         let db = open_copy(&dir.join("rekordbox"), &options, &run)?;
         let theirs = rows(db.connection())?;
         let seed: Option<PathBuf> = Some(dir.join("seed")).filter(|p| p.join("master.db").exists());
@@ -211,20 +226,17 @@ fn main() -> anyhow::Result<()> {
                 manual_plan(&beats, offset, &before, &s)
             } else {
                 if !auto_cache.contains_key(id) {
-                    let c = if own {
-                        own_candidates(Path::new(audio))
-                    } else {
-                        auto_candidates(Path::new(audio), &beats, &e).map(|c| (beats.clone(), c))
-                    };
+                    let c = if own { own_scored(Path::new(audio)) } else { auto_scored(Path::new(audio), &beats, &e).map(|c| (beats.clone(), c)) };
                     let c = c.unwrap_or_else(|err| {
                         eprintln!("  {id} {title}: {err}");
-                        (beats.clone(), Vec::new())
+                        (beats.clone(), None)
                     });
                     auto_cache.insert(id.clone(), c);
                 }
-                let (grid, cands) = &auto_cache[id];
+                let (grid, scored) = &auto_cache[id];
+                let cands = scored.as_ref().map(|c| to_anlz(&c.candidates(trend.as_ref()))).unwrap_or_default();
                 // our analysis stores PQT2's beat number offset as 0
-                auto_plan(grid, if own { 0 } else { offset }, cands, &before, &s)
+                auto_plan(grid, if own { 0 } else { offset }, &cands, &before, &s)
             };
             let empty = Vec::new();
             let seed_raw = seed_rows.get(id).unwrap_or(&empty);

@@ -28,7 +28,7 @@ use mb_masterdb::rusqlite::types::Value;
 use std::path::{Path, PathBuf};
 
 /// Which analyses run (rekordbox's per-job flags from `rekordbox3.settings`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnalysisSettings {
     /// `AutoGain`: write the `djmdMixerParam` row.
     pub auto_gain: bool,
@@ -58,6 +58,10 @@ pub struct AnalysisSettings {
     /// after the analysis, Manual or Auto (`docs/re/analysis-cue.md`). Auto scores the phrase
     /// starts with rekordbox's own ONNX models, so it needs [`AnalysisSettings::phrase`].
     pub cue: crate::cue_analysis::CueAnalysisSettings,
+    /// Auto CUE: the personal CUE tendency (`cue_personal_trend.json` in the rekordbox6 folder,
+    /// [`crate::cue_analysis::read_trend`]), which every analysis job reads when it starts
+    /// (`execAnalyze`). `None` and an all-zero file change nothing.
+    pub cue_trend: Option<std::sync::Arc<mb_analysis::cue::Trend>>,
 }
 
 impl Default for AnalysisSettings {
@@ -71,6 +75,7 @@ impl Default for AnalysisSettings {
             vocal: false,
             embedding: true,
             cue: crate::cue_analysis::CueAnalysisSettings::default(),
+            cue_trend: None,
         }
     }
 }
@@ -334,7 +339,8 @@ pub fn analyse_track_with(
         embedding_error,
         cue: settings.cue.runs().then_some(settings.cue),
         cue_candidates: a
-            .cue_candidates
+            .cue
+            .map(|c| c.candidates(settings.cue_trend.as_deref()))
             .unwrap_or_default()
             .iter()
             .map(|b| mb_anlz::tags::Beat { beat_in_bar: b.beat_in_bar, tempo: b.tempo, time_ms: b.time_ms })

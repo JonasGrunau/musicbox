@@ -4,8 +4,11 @@
 //! and `ScoreCalculator::getTotalScores` @0x1019190dc turns the scores into up to 16 candidate
 //! beats, best first. The CueManager places the cues from them (`mb-library`'s `cue_analysis`).
 
+pub mod trend;
+
 use crate::beats::Beat;
 use crate::phrase::PhraseResult;
+pub use trend::{Trend, TrendTrack};
 use crate::vocal::dsp::Lagrange;
 use mb_nn::ort::{OnnxModel, OrtSession, OrtTensor};
 
@@ -208,14 +211,53 @@ fn min_max(m: &mut [(i32, f32)]) {
     }
 }
 
+/// `ScoreCalculator::adjustScoreNearBeat` @0x101919f00 on the tendency's scores: the highest
+/// (the first of equals) is kept, then every other within 4 beats becomes 0 and within 8 beats is
+/// halved, until all are kept at their values by then. Input and output by beat index.
+fn adjust_near_beat(mut work: Vec<(i32, f32)>) -> Vec<(i32, f32)> {
+    let mut out = Vec::with_capacity(work.len());
+    while !work.is_empty() {
+        if work.len() == 1 {
+            out.push(work[0]);
+            break;
+        }
+        let mut best = 0;
+        for i in 1..work.len() {
+            if work[i].1 > work[best].1 {
+                best = i;
+            }
+        }
+        let k = work[best].0;
+        out.push(work[best]);
+        for e in work.iter_mut() {
+            let d = k.wrapping_sub(e.0).unsigned_abs();
+            if d < 5 {
+                e.1 = 0.0;
+            } else if d < 9 {
+                e.1 *= 0.5;
+            }
+        }
+        work.remove(best);
+    }
+    out.sort_by_key(|e| e.0);
+    out
+}
+
+/// The tendency's inputs for one track: the grid and the length in whole seconds
+/// (`(L − 1) / rate`, as the thread passes it).
+#[derive(Debug, Clone, Copy)]
+pub struct TrendInput<'a> {
+    pub trend: &'a Trend,
+    pub beats: &'a [Beat],
+    pub length: i32,
+}
+
 /// The thread's step after `getScores` (`CBeatAnalyzeThread::analyze` @0x1001528c4) and
-/// `getTotalScores`, without a personal CUE tendency: scores are paired with phrase starts from
-/// the last phrase back, normalised, and the 16 best kept, best first, as 0-based beat indices.
-///
-/// The personal tendency (`getPersonalTrendScoreMap` @0x101919a68) only adds scores when
-/// `cue_personal_trend.json` holds non-zero values, which musicbox does not model; its
-/// near-beat damping (`adjustScoreNearBeat` @0x101919f00) applies to those scores only.
-pub fn total_scores(phrases: &PhraseResult, scores: &[f32]) -> Vec<(i32, f32)> {
+/// `ScoreCalculator::getTotalScores` @0x1019190dc: scores are paired with phrase starts from the
+/// last phrase back and normalised; the personal tendency's boundary scores (normalised, then
+/// damped near each other) are added where a boundary has a score and stand alone where it has
+/// none. The 16 best are kept, best first, as 0-based beat indices.
+pub fn total_scores(phrases: &PhraseResult, scores: &[f32], trend: Option<TrendInput<'_>>) -> Vec<(i32, f32)> {
     let mut left = scores.to_vec();
     // a map by beat index: the first pair for an index stays
     let mut map: Vec<(i32, f32)> = Vec::new();
@@ -228,10 +270,45 @@ pub fn total_scores(phrases: &PhraseResult, scores: &[f32]) -> Vec<(i32, f32)> {
     }
     map.sort_by_key(|e| e.0);
     min_max(&mut map);
+    if let Some(t) = trend {
+        let ms: Vec<u32> = t.beats.iter().map(|b| b.time_ms).collect();
+        let n = phrases.count.max(0) as usize;
+        let starts = &phrases.cols[0][..n.min(phrases.cols[0].len())];
+        let kinds = &phrases.cols[1][..n.min(phrases.cols[1].len())];
+        let mut tm = t.trend.boundary_scores(phrases.mood, starts, kinds, phrases.end_beat, &ms, t.length);
+        min_max(&mut tm);
+        let model = map.clone();
+        for (k, v) in adjust_near_beat(tm) {
+            match map.iter_mut().find(|e| e.0 == k) {
+                Some(e) => e.1 = model.iter().find(|m| m.0 == k).map_or(0.0, |m| m.1) + v,
+                None => map.push((k, v)),
+            }
+        }
+        map.sort_by_key(|e| e.0);
+    }
     // hypothesis: ties keep beat order (std::sort is not stable, ties are rare)
     map.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     map.truncate(MAX_CANDIDATES);
     map
+}
+
+/// What the analysis pass keeps for Auto CUE: `getScores`'s output and the phrases, grid and
+/// length it was computed on. [`Scored::candidates`] adds the personal tendency.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scored {
+    pub scores: Vec<f32>,
+    pub phrases: PhraseResult,
+    pub beats: Vec<Beat>,
+    /// Whole seconds, `(L − 1) / rate`.
+    pub length: i32,
+}
+
+impl Scored {
+    /// The candidates, best first, with the tendency of `cue_personal_trend.json` when given.
+    pub fn candidates(&self, trend: Option<&Trend>) -> Vec<Beat> {
+        let input = trend.map(|t| TrendInput { trend: t, beats: &self.beats, length: self.length });
+        candidates(&self.beats, &total_scores(&self.phrases, &self.scores, input))
+    }
 }
 
 /// The candidates as the thread stores them for the CueManager (`BeatAnalyzeInfo`+0x20): the
@@ -267,14 +344,41 @@ mod tests {
     }
 
     #[test]
+    fn near_beat_damping_keeps_the_best_first() {
+        // 10 is best; 13 (3 away) drops to 0, 18 (8 away) is halved; 30 stays
+        let out = adjust_near_beat(vec![(10, 1.0), (13, 0.9), (18, 0.8), (30, 0.5)]);
+        assert_eq!(out, [(10, 1.0), (13, 0.0), (18, 0.4), (30, 0.5)]);
+        // equal scores: the first (lowest beat) wins
+        assert_eq!(adjust_near_beat(vec![(4, 1.0), (6, 1.0)]), [(4, 1.0), (6, 0.0)]);
+    }
+
+    #[test]
+    fn the_tendency_adds_to_the_model_scores() {
+        let mut p = PhraseResult { count: 3, mood: 1, end_beat: 96, ..PhraseResult::default() };
+        p.cols[0] = vec![1, 33, 65];
+        p.cols[1] = vec![1, 2, 5];
+        let beats: Vec<Beat> = (0..96).map(|i| Beat { beat_in_bar: (i % 4 + 1) as u16, tempo: 12000, time_ms: i * 500, sub_ms: 0 }).collect();
+        let mut t = Trend::default();
+        // intro → up, the second phrase start
+        t.matrix[0][1][2] = 1.0;
+        let input = TrendInput { trend: &t, beats: &beats, length: 48 };
+        let with = total_scores(&p, &[0.0, 3.0, 1.5], Some(input));
+        // beat 32: 1.0 + 1.0; beat 64: 0.5; beat 0: 0.0
+        assert_eq!(with, [(32, 2.0), (64, 0.5), (0, 0.0)]);
+        // a zero tendency changes nothing
+        let zero = Trend::default();
+        assert_eq!(total_scores(&p, &[0.0, 3.0, 1.5], Some(TrendInput { trend: &zero, ..input })), total_scores(&p, &[0.0, 3.0, 1.5], None));
+    }
+
+    #[test]
     fn scores_pair_with_phrases_from_the_end() {
         let mut p = PhraseResult { count: 3, mood: 1, ..PhraseResult::default() };
         p.cols[0] = vec![1, 33, 65];
         p.cols[1] = vec![1, 2, 5];
-        let t = total_scores(&p, &[0.0, 3.0, 1.5]);
+        let t = total_scores(&p, &[0.0, 3.0, 1.5], None);
         assert_eq!(t, [(32, 1.0), (64, 0.5), (0, 0.0)]);
         // fewer scores than phrases: the first phrases go without
-        let t = total_scores(&p, &[2.0, 4.0]);
+        let t = total_scores(&p, &[2.0, 4.0], None);
         assert_eq!(t, [(64, 1.0), (32, 0.5)]);
     }
 }

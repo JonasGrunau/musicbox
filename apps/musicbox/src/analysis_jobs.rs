@@ -64,7 +64,7 @@ impl AnalysisQueue {
         let shared: Shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
         let (tx, rx) = channel();
         for _ in 0..threads.max(1) {
-            let (shared, tx, ctx) = (shared.clone(), tx.clone(), ctx.clone());
+            let (shared, tx, ctx, settings) = (shared.clone(), tx.clone(), ctx.clone(), settings.clone());
             std::thread::spawn(move || worker(&shared, &tx, &ctx, settings));
         }
         Self { shared, rx }

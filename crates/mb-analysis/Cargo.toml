@@ -12,10 +12,10 @@ mb-audio = { path = "../mb-audio" }
 mb-dsp = { path = "../mb-dsp" }
 mb-nn = { path = "../mb-nn" }
 md-5 = "0.10"
+serde_json = "1"
 
 [dev-dependencies]
 sha2 = "0.10"
 anyhow.workspace = true
 mb-anlz = { path = "../mb-anlz" }
 mb-masterdb = { path = "../mb-masterdb" }
-serde_json = "1"

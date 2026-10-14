@@ -90,6 +90,17 @@ impl CueAnalysisSettings {
     }
 }
 
+/// The personal CUE tendency in `settings_root` (`cue_personal_trend.json`, the folder of
+/// `rekordbox3.settings`), read only. `Ok(None)` when there is no file, as before rekordbox's
+/// first analysis job writes its all-zero one.
+pub fn read_trend(settings_root: &std::path::Path) -> Result<Option<mb_analysis::cue::Trend>, String> {
+    match std::fs::read_to_string(settings_root.join("cue_personal_trend.json")) {
+        Ok(text) => mb_analysis::cue::Trend::parse(&text).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// What a cue pass does to one track: earlier cues removed (overwrite), then new cues in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CuePlan {

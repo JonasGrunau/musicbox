@@ -127,8 +127,9 @@ pub struct Analysis {
     pub vocal: Option<Vec<u8>>,
     /// Why vocal detection, when asked for, gave nothing (rekordbox's install or model missing).
     pub vocal_error: Option<String>,
-    /// The Auto CUE candidates, best first (at most 16 beats of the grid), when asked for.
-    pub cue_candidates: Option<Vec<beats::Beat>>,
+    /// Auto CUE: the phrase starts' scores and what they were computed on, when asked for and
+    /// the phrase pass gave a result ([`cue::Scored::candidates`] gives the cue candidates).
+    pub cue: Option<cue::Scored>,
     /// Why the Auto CUE candidates, when asked for, are missing (install or model).
     pub cue_error: Option<String>,
 }
@@ -331,16 +332,22 @@ pub fn analyze_with(
     }
     // The key job runs on the finished grid; `getKey` takes BPM × 100 · 0.01. Without a grid
     // only the whole-track estimate counts (no segments).
-    // Auto CUE: `getScores` after the phrase pass, then `getTotalScores` (0x1001562a0…).
-    let cue_candidates = match (cues, &phrases, grid.as_ref().or(stored.as_ref())) {
+    // Auto CUE: `getScores` after the phrase pass (0x1001562a0); `getTotalScores` follows in
+    // `cue::Scored::candidates` with the personal tendency.
+    let cue = match (cues, &phrases, grid.as_ref().or(stored.as_ref())) {
         (Some((m, c)), Some(p), Some(g)) => match m.scores(c.audio(), rate, &g.beats, p) {
-            Ok(s) => Some(cue::candidates(&g.beats, &cue::total_scores(p, &s))),
+            Ok(scores) => Some(cue::Scored {
+                scores,
+                phrases: p.clone(),
+                beats: g.beats.clone(),
+                // the thread's length: whole seconds of the analysed samples
+                length: i32::from((total / u64::from(rate.max(1))) as u16),
+            }),
             Err(e) => {
                 cue_error = Some(e);
                 None
             }
         },
-        (Some(_), ..) => Some(Vec::new()),
         _ => None,
     };
     let key = keys.map(|k| {
@@ -367,7 +374,7 @@ pub fn analyze_with(
             None => None,
         },
         vocal_error,
-        cue_candidates,
+        cue,
         cue_error,
     })
 }
