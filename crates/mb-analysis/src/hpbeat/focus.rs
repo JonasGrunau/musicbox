@@ -11,6 +11,9 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::madmom::ListBeat;
+use crate::balib2::adjust::UnitBeatAdjust;
+
+mod constant;
 
 /// `peakss::BeatInfo` (24 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -31,6 +34,9 @@ impl BeatInfo {
         Self { pos, beats: 0.0, tempo: 0.0, stat: 0, band: -1, flag: 0 }
     }
 }
+
+/// A BPM and beat list at one point of the constant path (development aid).
+pub type Stage = (f32, Vec<BeatInfo>);
 
 /// The analyser state `analyzeFocus` reads.
 #[derive(Debug, Clone, Copy)]
@@ -180,6 +186,13 @@ pub struct Focus {
     pub hits: Vec<&'static str>,
     /// The madmom list did not start with beat 4 among its first four (main loop condition).
     top_is_not_four: bool,
+    /// `analyzeFocus`'s out flag: a reference tempo above 180 was halved (constant path).
+    pub halved: bool,
+    /// The constant path's BPM and beats as they went into `UnitBeatAdjust::analyze`, and as
+    /// they came out (development aid).
+    pub adjust_io: Option<(Stage, Stage)>,
+    /// Beats the constant path cut from the end of the vector (still in its memory).
+    ghost: Vec<BeatInfo>,
 }
 
 impl Focus {
@@ -318,6 +331,11 @@ fn drift_terms(x: &[f64], first: i32, last: i32, n: i32) -> (f64, f64, f64) {
 impl Focus {
     /// `analyzeFocus` @0x10116c050.
     pub fn run(inp: FocusInput, balib_beats: i32, balib_bpm100: i32, mad: &[ListBeat], mad_bpm: i32, trace: bool) -> Option<Focus> {
+        Self::run_with(inp, balib_beats, balib_bpm100, mad, mad_bpm, trace, None)
+    }
+
+    /// `analyzeFocus` with the analyser's `UnitBeatAdjust`, which the constant path needs.
+    pub fn run_with(inp: FocusInput, balib_beats: i32, balib_bpm100: i32, mad: &[ListBeat], mad_bpm: i32, trace: bool, adjust: Option<&mut UnitBeatAdjust>) -> Option<Focus> {
         if balib_beats == 0 || balib_bpm100 == 0 || mad.is_empty() || mad_bpm == 0 || inp.rate == 0 {
             return None;
         }
@@ -332,6 +350,9 @@ impl Focus {
             unported: Vec::new(),
             hits: Vec::new(),
             top_is_not_four: false,
+            halved: false,
+            adjust_io: None,
+            ghost: Vec::new(),
         };
         // the largest beat number among the first four madmom beats
         let top = mad.iter().take(4).map(|b| b.num_bar).fold(0, |a, b| if a <= b { b } else { a }).max(0);
@@ -347,10 +368,12 @@ impl Focus {
             for _ in 0..2 {
                 f.pass(mad_bpm);
             }
+            f.post(mad_bpm);
+        } else if let Some(a) = adjust {
+            f.constant(a);
         } else {
             f.unported.push("constant path");
         }
-        f.post(mad_bpm);
         Some(f)
     }
 

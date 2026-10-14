@@ -102,6 +102,11 @@ impl Analyzer {
         self.adjust.band_checks()
     }
 
+    /// The analyser's `UnitBeatAdjust` (Focus's constant path reads its bands).
+    pub fn adjust_mut(&mut self) -> &mut adjust::UnitBeatAdjust {
+        &mut self.adjust
+    }
+
     /// Test A on the sensor's list, then the verdict on the varied list.
     fn verdict(&self, raw: &[BeatInfo], c: &Pass, v: &Pass) -> Option<verdict::Verdict> {
         let rate = self.rate as i32;

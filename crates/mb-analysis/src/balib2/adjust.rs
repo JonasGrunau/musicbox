@@ -136,7 +136,7 @@ impl UnitBeatAdjust {
 
     /// `calcLowInteg(bpm, pos)`: the band summed over two beats from `pos`; −1 when the window
     /// passes the capacity, the BPM is zero or `pos` < −3.
-    fn integ(&self, bpm: f32, pos: i32) -> f64 {
+    pub(crate) fn low_integ(&self, bpm: f32, pos: i32) -> f64 {
         if bpm.abs() <= f32::EPSILON || pos < -3 {
             return -1.0;
         }
@@ -162,7 +162,7 @@ impl UnitBeatAdjust {
         let m = n - 1;
         let mut v = vec![0.0f64; n];
         for i in 0..m {
-            v[i] = self.integ(bpm, positions[i]);
+            v[i] = self.low_integ(bpm, positions[i]);
             if i != 0 && v[i] < 0.0 {
                 v[i] = v[i - 1];
             }
