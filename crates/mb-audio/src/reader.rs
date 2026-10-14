@@ -25,6 +25,9 @@ pub trait Reader: Send {
     fn info(&self) -> ReaderInfo;
     /// Fills `out` with the samples starting at `pos`; positions outside the stream are zero.
     fn read(&mut self, pos: i64, out: &mut [Float2]);
+    /// Forgets the stream position, so the next read is a random-access read even at the
+    /// position a sequential read would continue from. Only the sample-rate converter keeps one.
+    fn reposition(&mut self) {}
 }
 
 impl<R: Reader + ?Sized> Reader for Box<R> {
@@ -33,6 +36,9 @@ impl<R: Reader + ?Sized> Reader for Box<R> {
     }
     fn read(&mut self, pos: i64, out: &mut [Float2]) {
         (**self).read(pos, out)
+    }
+    fn reposition(&mut self) {
+        (**self).reposition()
     }
 }
 

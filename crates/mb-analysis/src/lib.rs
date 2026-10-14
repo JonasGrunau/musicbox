@@ -193,6 +193,10 @@ pub fn analyze_with(
         }
     });
     let mut phrase = (opts.beats && opts.phrase).then(|| phrase::PhraseAnalyzer::new(rate, total));
+    // The phrase pass reads the track again from the start (`analysis-phrase.md` § 1.4). Without a
+    // sample-rate converter that read is this one; through one it re-primes the converter, so
+    // stage A takes its own read after this loop.
+    let reread_phrase = info.file_rate != info.sample_rate;
     let mut keys =
         (opts.beats && opts.key).then(|| key::KeyCollector::new(rate, total, info.channels));
     // madmom's input: the `(L + R)/2` float samples
@@ -248,7 +252,7 @@ pub fn analyze_with(
         if let Some(b) = &mut beat {
             b.put(pcm);
         }
-        if let Some(p) = &mut phrase {
+        if let Some(p) = phrase.as_mut().filter(|_| !reread_phrase) {
             p.put(pcm);
         }
         if let Some(k) = &mut keys {
@@ -270,6 +274,9 @@ pub fn analyze_with(
             c.put(&mono16);
         }
         pos += got as u64;
+    }
+    if let Some(p) = phrase.as_mut().filter(|_| reread_phrase) {
+        phrase::feed(&mut dec, p, total);
     }
     let waveforms = waves.map(|(zoom, wave, loud)| {
         let w = wave.finish();

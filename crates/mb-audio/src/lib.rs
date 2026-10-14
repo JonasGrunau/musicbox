@@ -225,6 +225,15 @@ impl Decoder {
         self.pos = sample.min(self.info.total_samples);
     }
 
+    /// Back to the start as rekordbox's analysis thread re-reads a track for its phrase passes
+    /// (`analysis-phrase.md` § 1.4): a random-access read at 0. Through the sample-rate converter
+    /// it re-primes the filter (`prepareSRCProcessing`, `decode.md` § 8), and for 96 → 48 kHz that
+    /// stream differs from a fresh decode's. Without a converter it is the same stream.
+    pub fn rewind(&mut self) {
+        self.pos = 0;
+        self.reader.reposition();
+    }
+
     /// Random access: fills `out` from sample `pos` (silence outside the track).
     pub fn read_at(&mut self, pos: i64, out: &mut [Float2]) {
         self.reader.read(pos, out);

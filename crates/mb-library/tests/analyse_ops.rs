@@ -3,11 +3,9 @@
 //!
 //! 1. `analysis_files_match_rekordbox`: the `.DAT`/`.EXT`/`.2EX` built by `analyse_track` equal
 //!    rekordbox's local files section by section (tag order, headers, bodies), with phrase
-//!    analysis on as rekordbox had it, except PVDI (not computed yet), a grid the two phrase
-//!    passes place differently (same BPM and beat count, shifted; the 96 kHz click probe,
-//!    `analysis-phrase.md`) and the PSSI of the two 96 kHz probes the phrase scorecard lists as
-//!    misses. The `djmdContent` columns, the `djmdMixerParam` row and the
-//!    key equal rekordbox's. Probes by default, every track with `MB_ORACLE_FULL=1`.
+//!    analysis on as rekordbox had it, except PVDI (vocal detection off here). The `djmdContent`
+//!    columns, the `djmdMixerParam` row and the key equal rekordbox's. Probes by default, every
+//!    track with `MB_ORACLE_FULL=1`.
 //! 2. `apply_and_undo`: on a temp copy of the library, a first analysis (track reset to the
 //!    imported state) and a re-analysis (rekordbox's files present) write the files, rows and
 //!    `contentFile` rows the spec lists, and the key (replacing a tag key, whose row goes); undo
@@ -92,7 +90,7 @@ fn analysis_files_match_rekordbox() {
         return;
     }
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
-    let results: Vec<(String, Vec<String>, bool)> = std::thread::scope(|s| {
+    let results: Vec<(String, Vec<String>)> = std::thread::scope(|s| {
         let chunks: Vec<Vec<&Track>> = (0..threads).map(|i| selected.iter().skip(i).step_by(threads).copied().collect()).collect();
         let handles: Vec<_> = chunks
             .into_iter()
@@ -103,25 +101,14 @@ fn analysis_files_match_rekordbox() {
             .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
     });
-    let mut failures = Vec::new();
-    let mut shifted = 0;
-    for (name, problems, grid_shift) in &results {
-        shifted += usize::from(*grid_shift);
-        if !problems.is_empty() {
-            failures.push(format!("{name}: {}", problems.join("; ")));
-        }
-    }
-    let identical = results.iter().filter(|(_, p, s)| p.is_empty() && !s).count();
-    eprintln!(
-        "{} tracks: {identical} identical apart from PVDI, {shifted} with a shifted grid, {} failures",
-        results.len(),
-        failures.len()
-    );
+    let failures: Vec<String> =
+        results.iter().filter(|(_, p)| !p.is_empty()).map(|(name, problems)| format!("{name}: {}", problems.join("; "))).collect();
+    eprintln!("{} tracks: {} identical apart from PVDI, {} failures", results.len(), results.len() - failures.len(), failures.len());
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// (name, problems, grid moved by the phrase pass).
-fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
+/// (name, problems).
+fn check_track(share: &Path, t: &Track) -> (String, Vec<String>) {
     let name = t.path.file_name().unwrap().to_string_lossy().into_owned();
     let mut problems = Vec::new();
     // oracle-a was analysed with phrase analysis on (the key follows the shifted grid) and
@@ -129,9 +116,8 @@ fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
     let settings = AnalysisSettings { phrase: true, embedding: false, ..AnalysisSettings::default() };
     let a = match analyse_track(&t.path, &t.file_name, &settings) {
         Ok(a) => a,
-        Err(e) => return (name, vec![e.to_string()], false),
+        Err(e) => return (name, vec![e.to_string()]),
     };
-    let mut grid_shift = false;
     for (ext, ours) in [("DAT", &a.dat), ("EXT", &a.ext), ("2EX", &a.ex2)] {
         let theirs = load(share, &t.rel, ext).unwrap();
         if ours.header != theirs.header {
@@ -146,17 +132,6 @@ fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
         }
         for (g, w) in got.iter().zip(&want) {
             if g == w {
-                continue;
-            }
-            if g.tag == Tag::PQTZ || g.tag == Tag::PQT2 {
-                // Moved by rekordbox's phrase pass: same BPM and beat count.
-                let same_count = a.dat.beat_grid().map(|b| b.beats.len()) == theirs_grid_len(share, &t.rel);
-                if same_count && a.bpm_x100 == Some(t.columns[0]) {
-                    grid_shift = true;
-                    continue;
-                }
-            }
-            if g.tag == Tag::PSSI && known_phrase_miss(&t.path) {
                 continue;
             }
             if g.tag == Tag::PVBR {
@@ -180,18 +155,7 @@ fn check_track(share: &Path, t: &Track) -> (String, Vec<String>, bool) {
     if a.key != t.key {
         problems.push(format!("key {:?} vs {:?}", a.key, t.key));
     }
-    (name, problems, grid_shift)
-}
-
-/// The two oracle-a tracks whose PSSI the phrase pass does not reproduce: the 96 kHz click
-/// probe (its grid is shifted differently) and the 96 kHz tempo ramp (`docs/scorecards/phrase.json`).
-fn known_phrase_miss(path: &Path) -> bool {
-    let p = path.to_string_lossy();
-    p.contains("/wav_96k32f/") && (p.contains("click_128_offset1234") || p.contains("tempo_120_to_126"))
-}
-
-fn theirs_grid_len(share: &Path, rel: &str) -> Option<usize> {
-    load(share, rel, "DAT")?.beat_grid().map(|b| b.beats.len())
+    (name, problems)
 }
 
 fn get(lib: &Library, col: &str, id: &str) -> Value {
@@ -699,8 +663,7 @@ fn run_cues(run: &str) -> Option<CuesByTrack> {
 /// CUE analysis, Auto mode, against `fixtures/oracle-cue/A1` (hot cues, upper limit 8, an
 /// all-zero personal tendency): the cues our own analysis and rekordbox's cue models place on the
 /// 44.1 kHz WAV probes equal rekordbox's, Kind, time and "CUE(Auto)" comment. Undo removes them.
-/// Every track with `MB_ORACLE_FULL=1` (the two 96 kHz probes whose PSSI differs are skipped;
-/// `docs/scorecards/cue-auto.json`).
+/// Every track with `MB_ORACLE_FULL=1` (`docs/scorecards/cue-auto.json`).
 #[test]
 fn auto_cue_analysis_matches_oracle_cue() {
     let Some(dir) = TempLibrary::new("oracle-a") else {
@@ -716,7 +679,7 @@ fn auto_cue_analysis_matches_oracle_cue() {
     let selected: Vec<&Track> = all
         .iter()
         .filter(|t| t.path.exists() && t.columns[0] > 0)
-        .filter(|t| if full { !t.path.to_string_lossy().contains("/wav_96k32f/") } else { t.path.to_string_lossy().contains("/probes/wav_44k16/") })
+        .filter(|t| full || t.path.to_string_lossy().contains("/probes/wav_44k16/"))
         .collect();
     if selected.is_empty() {
         eprintln!("skipped: corpus audio missing");
@@ -758,8 +721,7 @@ fn auto_cue_analysis_matches_oracle_cue() {
 
 /// Normal-mode Dynamic (`trackAnalysisMode` 1) against `fixtures/oracle-e`: PQTZ, PQT2 (type 2),
 /// PSSI and `BPM` equal rekordbox's. The 44.1 kHz WAV probes by default, every track with
-/// `MB_ORACLE_FULL=1`; the 96 kHz click probe's PSSI is the known miss
-/// (`docs/scorecards/beats-dynamic.json`).
+/// `MB_ORACLE_FULL=1` (`docs/scorecards/beats-dynamic.json`).
 #[test]
 fn dynamic_mode_matches_oracle_e() {
     let Some((share, all)) = tracks_in("oracle-e") else {
@@ -796,8 +758,7 @@ fn dynamic_mode_matches_oracle_e() {
                         }
                         for (ext, ours, tag) in [("DAT", &a.dat, Tag::PQTZ), ("EXT", &a.ext, Tag::PQT2), ("EXT", &a.ext, Tag::PSSI)] {
                             let theirs = load(share, &t.rel, ext).unwrap();
-                            let known = tag == Tag::PSSI && name.contains("/wav_96k32f/click_128_offset1234");
-                            if ours.sections_with(tag).next() != theirs.sections_with(tag).next() && !known {
+                            if ours.sections_with(tag).next() != theirs.sections_with(tag).next() {
                                 bad.push(format!("{name}: {tag} differs"));
                             }
                         }

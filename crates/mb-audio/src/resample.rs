@@ -486,6 +486,11 @@ impl<R: Reader> Reader for SampleRateConverter<R> {
         ReaderInfo { sample_rate: self.out_rate, length: self.out_len.clamp(0, i64::from(u32::MAX)) as u32, ..i }
     }
 
+    /// The next read re-primes (`prepareSRCProcessing`), wherever it starts.
+    fn reposition(&mut self) {
+        self.out_pos = i64::MIN;
+    }
+
     /// `SampleRateConverter::fileRead` @0x10284bab8.
     fn read(&mut self, pos: i64, out: &mut [Float2]) {
         let mut out = out;
@@ -526,6 +531,56 @@ mod tests {
         }
         // Up to 18! every partial product is exact, so the vectorised order cannot matter yet.
         assert_eq!(factorial(18), 6_402_373_705_728_000.0);
+    }
+
+    /// An in-memory stream.
+    struct Mem {
+        rate: u32,
+        data: Vec<Float2>,
+    }
+
+    impl Reader for Mem {
+        fn info(&self) -> ReaderInfo {
+            ReaderInfo { sample_rate: self.rate, channels: 2, bits: 32, length: self.data.len() as u32 }
+        }
+        fn read(&mut self, pos: i64, out: &mut [Float2]) {
+            for (i, o) in out.iter_mut().enumerate() {
+                let p = pos + i as i64;
+                *o = if p < 0 || p >= self.data.len() as i64 { [0.0; 2] } else { self.data[p as usize] };
+            }
+        }
+    }
+
+    /// 1000 samples of silence, then a sawtooth pair.
+    fn signal(rate: u32, n: usize) -> Mem {
+        Mem { rate, data: (0..n).map(|i| if i < 1000 { [0.0; 2] } else { [((i % 37) as f32 - 18.0) / 20.0, ((i % 23) as f32 - 11.0) / 12.0] }).collect() }
+    }
+
+    fn read_all(c: &mut SampleRateConverter<Mem>, n: usize) -> Vec<Float2> {
+        let mut out = vec![[0.0; 2]; n];
+        c.read(0, &mut out);
+        out
+    }
+
+    /// A read from the start after a rewind re-primes; the result does not depend on what was
+    /// read before. For 22.05 → 44.1 kHz it equals the fresh stream, for 96 → 48 kHz it does not
+    /// (`analysis-phrase.md` § 1.4).
+    #[test]
+    fn rewound_reads_reprime() {
+        for (i, o, same) in [(22050, 44100, true), (96000, 48000, false)] {
+            let mut c = SampleRateConverter::new(signal(i, 40_000), o).unwrap();
+            let n = c.info().length as usize;
+            let fresh = read_all(&mut c, n);
+            c.reposition();
+            let again = read_all(&mut c, n);
+            let mut d = SampleRateConverter::new(signal(i, 40_000), o).unwrap();
+            d.reposition();
+            assert_eq!(read_all(&mut d, n), again, "{i}->{o}: the re-primed stream is reproducible");
+            assert_eq!(fresh == again, same, "{i}->{o}");
+            // a plain sequential read from the start does not re-prime
+            let mut e = SampleRateConverter::new(signal(i, 40_000), o).unwrap();
+            assert_eq!(read_all(&mut e, n), fresh);
+        }
     }
 
     #[test]

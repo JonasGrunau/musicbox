@@ -113,6 +113,11 @@ impl PhraseAnalyzer {
         }
     }
 
+    /// Stage A has its input (`Analyze_AB` stops reading).
+    pub fn finished(&self) -> bool {
+        self.done
+    }
+
     /// One `Sub_Main_A` call on `min(buffered, chunk)` samples.
     fn step(&mut self) {
         let n = self.buf.len().min(self.chunk);
@@ -342,7 +347,7 @@ pub fn run(
 }
 
 /// The phrase analysis of the file at `path` for an existing grid (e.g. one rekordbox
-/// stored): stage A on a first read, then [`run`] on a copy of the grid.
+/// stored): stage A on the re-read ([`feed`]), then [`run`] on a copy of the grid.
 pub fn analyze_with_grid(path: &std::path::Path, grid: &BeatGrid, urahaku: bool) -> Option<PhraseResult> {
     let mut dec = mb_audio::open(path).ok()?;
     let info = *dec.info();
@@ -351,7 +356,23 @@ pub fn analyze_with_grid(path: &std::path::Path, grid: &BeatGrid, urahaku: bool)
     }
     let total = info.total_samples - 1;
     let mut p = PhraseAnalyzer::new(info.sample_rate, total);
-    let block = 2 * info.sample_rate as usize;
+    feed(&mut dec, &mut p, total);
+    run(&p, &mut grid.clone(), info.sample_rate, total, Some(path), urahaku)
+}
+
+/// Stage A on the thread's re-read of the track for `Analyze_AB` (§ 1.4), from a rewind of `dec`.
+pub fn feed(dec: &mut mb_audio::Decoder, p: &mut PhraseAnalyzer, total: u64) {
+    reread(dec, total, |pcm| {
+        p.put(pcm);
+        !p.finished()
+    });
+}
+
+/// The thread's re-read for a phrase pass: a rewind (`mb_audio::Decoder::rewind`), then blocks of
+/// 2·rate frames as 16-bit values up to the analysed length `total`, while `f` asks for more.
+fn reread(dec: &mut mb_audio::Decoder, total: u64, mut f: impl FnMut(&[[i16; 2]]) -> bool) {
+    dec.rewind();
+    let block = 2 * dec.info().sample_rate as usize;
     let mut frames = vec![[0.0f32; 2]; block];
     let mut pcm = vec![[0i16; 2]; block];
     let mut pos = 0u64;
@@ -362,15 +383,13 @@ pub fn analyze_with_grid(path: &std::path::Path, grid: &BeatGrid, urahaku: bool)
             break;
         }
         for (dst, src) in pcm[..got].iter_mut().zip(&frames[..got]) {
-            *dst = [
-                mb_audio::analysis_i16(src[0]),
-                mb_audio::analysis_i16(src[1]),
-            ];
+            *dst = [mb_audio::analysis_i16(src[0]), mb_audio::analysis_i16(src[1])];
         }
-        p.put(&pcm[..got]);
         pos += got as u64;
+        if !f(&pcm[..got]) {
+            break;
+        }
     }
-    run(&p, &mut grid.clone(), info.sample_rate, total, Some(path), urahaku)
 }
 
 /// Stage C on a second read of the track (as the thread re-reads it for `Analyze_CD`).
@@ -386,24 +405,9 @@ pub fn stage_c(path: &std::path::Path, bpm100: i32, down: Downbeat) -> Option<st
     if !c.enough_beats() {
         return None;
     }
-    let block = 2 * info.sample_rate as usize;
-    let mut frames = vec![[0.0f32; 2]; block];
-    let mut pcm = vec![[0i16; 2]; block];
-    let mut pos = 0u64;
-    while pos < total && !c.finished && !c.failed {
-        let n = ((total - pos) as usize).min(block);
-        let got = dec.read_frames(&mut frames[..n]);
-        if got == 0 {
-            break;
-        }
-        for (dst, src) in pcm[..got].iter_mut().zip(&frames[..got]) {
-            *dst = [
-                mb_audio::analysis_i16(src[0]),
-                mb_audio::analysis_i16(src[1]),
-            ];
-        }
-        c.put(&pcm[..got]);
-        pos += got as u64;
-    }
+    reread(&mut dec, total, |pcm| {
+        c.put(pcm);
+        !c.finished && !c.failed
+    });
     c.take()
 }

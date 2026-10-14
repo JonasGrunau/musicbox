@@ -214,11 +214,6 @@ fn loudness_matches_rekordbox() {
     );
 }
 
-/// Grids the phrase pass (`analysis-phrase.md`) leaves elsewhere than rekordbox did. The
-/// 96 kHz click: rekordbox kept BALib's first beat, we move it onto the first kick like the
-/// other rates do (`analysis-phrase.md` § 9). The whole grid still has to move by one amount.
-const PHRASE_SHIFTED: &[&str] = &["wav_96k32f/click_128_offset1234"];
-
 /// Normal-mode beat grids (oracle-a: high precision off, BPM range 70–180): BPM × 100 and the
 /// PQTZ/PQT2 beats, for the probes (all tracks with `MB_ORACLE_FULL`).
 #[test]
@@ -273,21 +268,11 @@ fn beats_match_rekordbox() {
                     let same = g.beats.iter().zip(&rb.beats).all(|(a, b)| {
                         (a.beat_in_bar, a.tempo, a.time_ms) == (b.beat_in_bar, b.tempo, b.time_ms)
                     });
-                    if same && bad.is_empty() {
-                        identical.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    } else if !PHRASE_SHIFTED.iter().any(|p| name.contains(p)) {
+                    if !same {
                         bad.push("grid differs".into());
-                    } else {
-                        // The phrase pass moves every beat by the same number of ms.
-                        let d: Vec<i64> = g
-                            .beats
-                            .iter()
-                            .zip(&rb.beats)
-                            .map(|(a, b)| i64::from(b.time_ms) - i64::from(a.time_ms))
-                            .collect();
-                        if d.windows(2).any(|w| w[0] != w[1]) {
-                            bad.push("not a uniform shift".into());
-                        }
+                    }
+                    if bad.is_empty() {
+                        identical.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                     if !bad.is_empty() {
                         failures

@@ -38,6 +38,8 @@ fn main() {
     });
     {
         let mut dec = mb_audio::open(&path).unwrap();
+        // the phrase pass's re-read (`analysis-phrase.md` § 1.4)
+        dec.rewind();
         let mut frames = vec![[0.0f32; 2]; 1 << 16];
         let mut pos = 0u64;
         while pos < total {
