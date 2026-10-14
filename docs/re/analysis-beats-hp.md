@@ -90,7 +90,30 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
 - **Outputs.**
   - `getBpm_Focus` @0x1011820d4: `fcvtzs(fmaf(+0x4c, 100, 0.5))`, single precision. +0x4c is set from +0x48 at the end of `analyzeFocus`; after an early return it still holds BALib's own BPM.
   - `GetBeatPos_Focus` @0x1011a7664: per beat, position, beat in bar and `(int)(6e6/tempo + 0.5f)`, with the tempo in ms.
-- **Paths.** With the hendou flag, or when the largest bar number among the first four madmom beats is not 4: two passes, then two clean-up rounds. Otherwise a separate "constant" path runs. Only modes 2/3 can reach it, and it is not ported.
+- **Paths.** With the hendou flag, or when the largest bar number among the first four madmom beats is not 4: two passes, then two clean-up rounds. Otherwise the constant path runs (only modes 2/3 can reach it).
+- **Constant path** (code 0x10117996c–0x101181240; `hpbeat/focus/constant.rs`; ported up to UnitBeatAdjust: its input and output identical on 166/166 tracks in mode 3, the final list on 96/166, the rest differing only in bar numbers).
+  1. Times are rounded to the ms; intervals are `trunc(fma(Δt, 1000, 0.5))`.
+  2. **Reference interval:** the first stretch (among the first n − 21 differences) of at least min(n, 37) intervals whose neighbours differ by ≤ 11, else 20, else 30 ms. It must end at a larger jump. Otherwise the reference is the mean of the first min(n, 37) intervals. The stretch's first and last index are kept.
+  3. **Tempo check.** The analyser's tempo (+0x48, BALib's BPM) is checked against 60000/reference:
+     - snapped to a whole BPM within 0.05 %;
+     - at ≈2× and ≤ 90 BPM: doubled;
+     - at ≈½× and ≥ 140: halved;
+     - outside 0.8–1.25×: replaced by the reference tempo (halved above 180, which sets the out flag; doubled below 70).
+  4. **Irregular stretches.** Beats deviating from the reference by > 10 ms on two neighbouring intervals form stretches.
+     - If they cover ≥ half the track, they are rebuilt as `round(span/ref)` evenly spaced beats between their outer beats (rounded to the ms).
+     - Otherwise the same is done with 20 ms stretches, and the count change per stretch is recorded.
+     - The beat vector takes the new length (extra copies of the last madmom beat, or cut). Quirk kept: when it gets shorter, the anchor region can read one slot past its end, i.e. the cut madmom beat still in memory (Breaks2); the port keeps the cut beats as a tail for those reads.
+  5. **Half-beat test.** For the midpoints of the stable segments between stretches (10 ms and 20 ms separately), count the segment pairs whose distance is 0.4–0.6 beats off a whole beat. More than a quarter of pairs marks the segments as disagreeing.
+  6. **Anchor.**
+     - If they disagree: the anchor is where the low band comes in: the first beat whose low-band sum over two beats (`calcLowInteg` at pos + BALib offset, scaled to the loudest) is > 0.6, or > 0.2 after a rise > 0.1. The region is the stable gap holding it, or 16 beats.
+     - Otherwise: the anchor is the middle of the reference stretch (shifted by the 20 ms count changes before it), moved back to its bar's beat 1. Beats outside the region are then compared with the grid through the anchor; each takes the closest of its ±5 neighbours when that is 25 % closer. If their mean distance exceeds 0.3 beat over more than half the beats, the grid moves half a beat toward their mean deviation.
+  7. **Grid.**
+     - The rebuilt times become positions; bar numbers continue from the beat nearest the anchor's old position.
+     - The grid is `fma(beat, k − anchor, (mean residual over the anchor region + flip) + anchor position)`, rounded `trunc(x + 0.5)`.
+     - Beat lengths come from the unrounded grid; BALib's offset is added.
+     - Whole beats are added before the first beat (≥ 0) and after the last (≤ the sample count), with tempo 60000/BPM (single precision).
+  8. `UnitBeatAdjust::analyze` runs on the grid (§ 8).
+  9. Then come the low- and full-band downbeat votes (not ported yet).
 - **A pass.**
   1. Beat times are rounded to the ms (`frinta`). Intervals in ms are `trunc(Δt·1000 + 0.5)`.
   2. **Reference interval:** the mean interval of the first stretch of at least `min(n, 37)` intervals whose neighbours differ by ≤ 11 ms, else ≤ 20 ms, else ≤ 30 ms; failing all three, the mean of the first `min(n, 37)` intervals. It is kept when `60000/mean` is within 0.8–1.25× the madmom BPM. Otherwise the madmom BPM sets it.
@@ -171,7 +194,7 @@ Code: `crates/mb-nn` (TensorFlow runtime); `crates/mb-analysis/src/hpbeat/` (`ma
   - `hp_check {table, madmom, focus, focusin}`: developer checks against harness dumps.
 
 ## 8. BALib v2 beat analysis (modes 2/3)
-Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (harness outside the repo) on the 169 oracle tracks: the verdict flags and returned BPM 169/169, `getOffsetCalc` 169/169, the beat list 169/169 in mode 3 and 168/169 in mode 2 (Timelock (Red Sun, Harmonika Remix): v2's copy of the varied pipeline differs from v1's from beat 575). Model 8's 60 s window: 20/20. UnitBeatAdjust v2's `analyze` 166/166. Not wired into `analyze()` yet; Focus's constant path is next. Code: `crates/mb-analysis/src/balib2/` (`mod.rs`, `verdict.rs`, `adjust.rs`); examples `balib2_score`, `balib2_stages`, `balib2_uba`, `hp_check window`.
+Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (harness outside the repo) on the 169 oracle tracks: the verdict flags and returned BPM 169/169, `getOffsetCalc` 169/169, the beat list 169/169 in mode 3 and 168/169 in mode 2 (Timelock (Red Sun, Harmonika Remix): v2's copy of the varied pipeline differs from v1's from beat 575). Model 8's 60 s window: 20/20. UnitBeatAdjust v2's `analyze` 166/166; Focus's constant path up to UnitBeatAdjust 166/166 (§ 5). Not wired into `analyze()` yet; the constant path's downbeat vote and the job steps are next. Code: `crates/mb-analysis/src/balib2/` (`mod.rs`, `verdict.rs`, `adjust.rs`); examples `balib2_score`, `balib2_stages`, `balib2_uba`, `hp_check window`.
 
 - **Shared with v1.** The sensor, envelope and filters are instruction-identical to v1 (`beats::sensor`, `beats::envelope`, `beats::filters`); the sensor list is identical on every track.
 - **Two passes.** `BeatInfoAnalyzer::analyze` @0x101198e4c runs v1's constant path, then v1's varied (Dynamic) path, on the sensor list. It keeps two BPMs:
@@ -225,7 +248,7 @@ Status: **in progress.** Ported and checked against rekordbox's own BALib v2 (ha
 
 ## 9. Open
 - **Modes 2 and 3** (§ 8):
-  - Focus's constant path;
+  - Focus's constant path: the downbeat vote after UnitBeatAdjust (§ 5);
   - the BPM-range rebuild and the job side (PQT2 type, phrase shift);
   - Timelock's varied list in mode 2.
 - **BALib v2's beat count** is approximated by the presence of our Normal-mode (v1) grid. This only matters if one finds beats and the other does not.
