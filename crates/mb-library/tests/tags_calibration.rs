@@ -76,3 +76,33 @@ fn tag_values_match_rekordbox_import() {
         assert!(real.is_empty(), "fields with mismatches: {real:?}");
     }
 }
+
+/// `tags::embedded_picture` finds a picture exactly where rekordbox's first analysis made
+/// artwork (`ImagePath` set), across every oracle-a track; this includes an AIFF whose
+/// `NAME` chunk lofty rejects (`Cosmic Boys - Titan`, read from its `ID3 ` chunk).
+#[test]
+fn embedded_pictures_where_rekordbox_made_artwork() {
+    let Some(db) = open_read_only("oracle-a") else {
+        eprintln!("skipped: fixtures/oracle-a missing");
+        return;
+    };
+    let rows: Vec<(String, bool)> = db
+        .connection()
+        .prepare("SELECT FolderPath, ImagePath <> '' FROM djmdContent WHERE rb_local_deleted = 0")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    if !rows.iter().all(|(p, _)| std::path::Path::new(p).exists()) {
+        eprintln!("skipped: corpus audio missing");
+        return;
+    }
+    let wrong: Vec<String> = rows
+        .iter()
+        .filter(|(p, has)| tags::embedded_picture(std::path::Path::new(p)).is_some() != *has)
+        .map(|(p, has)| format!("{p}: rekordbox artwork {has}"))
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    assert_eq!(rows.iter().filter(|r| r.1).count(), 95);
+}

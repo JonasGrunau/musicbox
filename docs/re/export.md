@@ -367,12 +367,12 @@ When a job finishes, `exportProcessChange` @0x1009bf758 writes the log, and the 
   - Any other value ("synced with another computer") prompts to overwrite.
 
 ## 3. Artwork (verified: code + 1404 fixture files)
-**Local sources.** The library keeps per-track artwork in four sizes, made at import by `CAnalyzerIF::writeFileImage` @0x101623e30. Each `write_image` @0x1016235e4 is a JUCE `JPEGImageFormat` with default quality, which is 85 in JUCE, and the alpha channel dropped.
+**Local sources.** The library keeps per-track artwork in four sizes. `CAnalyzerIF::writeFileImage` @0x101623e30 loads an image file and calls `write_image` @0x1016235e4 with 800, 80, 240 and 320. The analyzer's `write_image` and `create_rescaled_image` @0x1016233a4 are copies of the mediator's functions that the first analysis uses. The full pipeline is in `ops/analyse-track.md` § Artwork: ImageIO decoding, the CoreGraphics canvas and scaling, `ignoreAlpha`, and libjpeg 6b at quality 85 with the float DCT and optimised Huffman tables.
 - `<art>.jpg`: at most 800 px, keeping the aspect ratio.
 - `<art>_s.jpg`: 80×80.
 - `<art>_m.jpg`: 240×240.
 - `<art>_l.jpg`: 320×320.
-- **Square variants:** a non-square source is first centred (aspect kept) on a square canvas of side max(w, h) filled with **opaque black** (the global @0x1055527d0 = `juce::Colours::black` 0xFF000000, set in `__GLOBAL__sub_I_analyzer_if.cpp` @0x101634684), then rescaled to the target size with high-quality resampling (`create_rescaled_image` @0x1016233a4).
+- **Square variants:** a non-square source is first centred (aspect kept) on a square canvas of side max(w, h) filled with **opaque black** (the global @0x1055527d0 = `juce::Colours::black` 0xFF000000, set in `__GLOBAL__sub_I_analyzer_if.cpp` @0x101634684), then rescaled to the target size with high-quality resampling (a half-pixel offset when the margin is odd; see `ops/analyse-track.md` § Artwork) (`create_rescaled_image` @0x1016233a4).
 - `create_small_arts_if_not_exists` @0x1009bb8a4 regenerates missing `_s`/`_m` files (and `_l` when needed) before an export.
 
 **Device files** (`export_artwork` @0x1009bb078):
@@ -384,9 +384,11 @@ When a job finishes, `exportProcessChange` @0x1009bf758 writes the log, and the 
 2. Create the folder. Copy local `_s` → `<a|b><id>.jpg` and local `_m` → `<a|b><id>_m.jpg`. These are byte copies, not re-encodes.
 3. **320×320:** only when `dbConversionDevice` = 11 **and** the setting `create320x320Artwork` is true, also copy `_l` → `<a|b><id>_l.jpg`. Which device 11 is, is **open**.
 
+**musicbox** (`mb_usb::exec::artwork_bytes`) copies the local variants byte for byte. A missing variant is made from `artwork.jpg` with `mb_usb::artwork::square_jpeg` (decode, then `write_image` at 80/240/320, as `writeFileImage` does). The oracle-a export's 190 + 190 device files are identical to our local set (`docs/scorecards/artwork.json`).
+
 **Fixture facts:**
 - All 702 `a<N>.jpg` and `b<N>.jpg` are 80×80; all `_m` files are 240×240.
-- Every file is a baseline JFIF 1.1 with standard IJG tables at **quality 85** and 4:2:0 subsampling, with no EXIF or ICC.
+- Every file is a baseline JFIF 1.01 (1:1 aspect ratio, no density) with the Annex K tables at quality 85, 4:2:0 sampling and Huffman tables optimised per file, and no EXIF or ICC.
 - `a<N>` and `b<N>` (and the `_m` pairs) are **byte-identical** (1404/1404), because both are copies of the same local file.
 
 **Re-export** (`export_art_when_overwrite` @0x1009bbcfc): when the track is already on the device, the artwork is exported again only if the source has artwork and the device row has none, or the device `_m` file is missing.

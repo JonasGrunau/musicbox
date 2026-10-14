@@ -429,9 +429,9 @@ fn write_anlz(local_dat: &Path, parts: [bool; 3], dest_dat: &Path, ppth: &str, c
 }
 
 /// The bytes of one device artwork file: the local variant as is, or — when the variant is
-/// missing (`create_small_arts_if_not_exists`) — generated from the base image: centred on an
-/// opaque black square, scaled, baseline JPEG quality 85 (§ 3). Generated files are not
-/// byte-identical to rekordbox's JUCE encoder.
+/// missing (`create_small_arts_if_not_exists`) — made from the base image the way rekordbox
+/// makes it (`crate::artwork`: centred on an opaque black square, scaled, JUCE's JPEG
+/// settings; § 3).
 fn artwork_bytes(art: &LocalArtwork, size: ArtworkSize) -> Result<Vec<u8>> {
     let variant = match size {
         ArtworkSize::Small => &art.small,
@@ -445,8 +445,8 @@ fn artwork_bytes(art: &LocalArtwork, size: ArtworkSize) -> Result<Vec<u8>> {
         path: art.base.clone(),
         message,
     };
-    let img = image::open(&art.base).map_err(|e| fail(e.to_string()))?;
-    crate::artwork::square_jpeg(&img, size.pixels()).map_err(fail)
+    let base = std::fs::read(&art.base).map_err(|e| Error::io(&art.base, e))?;
+    crate::artwork::square_jpeg(&base, size.pixels()).map_err(fail)
 }
 
 // ---- databases ------------------------------------------------------------------------------

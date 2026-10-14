@@ -316,8 +316,8 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
 }
 
 /// First analysis of a track without artwork: the embedded picture becomes the local set at
-/// rekordbox's `ImagePath`, close to rekordbox's own files; a re-analysis leaves it alone; undo
-/// removes it.
+/// rekordbox's `ImagePath`, byte for byte rekordbox's own files on macOS; a re-analysis leaves
+/// it alone; undo removes it.
 #[test]
 fn first_analysis_adds_artwork() {
     let Some(dir) = TempLibrary::new("oracle-a") else {
@@ -334,9 +334,10 @@ fn first_analysis_adds_artwork() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    // One file per container that carries pictures differently (MP4 covr, ID3 APIC, FLAC).
+    // One file per container that carries pictures differently (MP4 covr, ID3 APIC, FLAC,
+    // ID3 in an AIFF chunk).
     let mut chosen = Vec::new();
-    for ext in ["m4a", "mp3", "flac"] {
+    for ext in ["m4a", "mp3", "flac", "aiff"] {
         if let Some(p) = picks.iter().find(|p| p.1.exists() && p.1.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext))) {
             chosen.push(p.clone());
         }
@@ -367,11 +368,14 @@ fn first_analysis_adds_artwork() {
             let (o, t) = (std::fs::read(ours.with_file_name(name)).unwrap(), std::fs::read(theirs.with_file_name(name)).unwrap());
             let db = psnr(&o, &t);
             eprintln!("{} {name}: PSNR {db:.1} dB", audio.display());
-            // artwork.jpg is the picture re-encoded (34–41 dB: two quality-85 encoders; rekordbox's
-            // own file is only 35 dB from the embedded FLAC picture); the thumbnails use another
-            // resampler than rekordbox's CoreGraphics draw (`analyse-track.md` § Artwork).
-            let min = if name == "artwork.jpg" { 30.0 } else { 20.0 };
-            assert!(db > min, "{} {name}: PSNR {db:.1} dB", audio.display());
+            // On macOS the same ImageIO/CoreGraphics calls and libjpeg settings as rekordbox
+            // (`analyse-track.md` § Artwork): the same bytes. Elsewhere only the geometry and the
+            // encoder match.
+            if cfg!(target_os = "macos") {
+                assert!(o == t, "{} {name}: not rekordbox's bytes (PSNR {db:.1} dB)", audio.display());
+            } else {
+                assert!(db > 20.0, "{} {name}: PSNR {db:.1} dB", audio.display());
+            }
         }
         let art_row = content_files(&lib, id).into_iter().find(|(p, ..)| p == image_path).expect("artwork contentFile row");
         assert_eq!(art_row.2, std::fs::metadata(&ours).unwrap().len() as i64);

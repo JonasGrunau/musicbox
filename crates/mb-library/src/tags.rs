@@ -99,26 +99,34 @@ pub fn read_file(path: &Path) -> Result<FileTags> {
 /// The embedded picture rekordbox's first analysis turns into artwork
 /// (`TagLib::ParseTag::parseCoverArt` @0x100e507e0, `analyse-track.md` § Artwork): in an MP4
 /// the `covr` image; in a FLAC the first JPEG or PNG picture of type front cover; in an ID3v2
-/// tag (MP3, AIFF, WAV) the first picture of type "other" or front cover.
+/// tag (MP3, AIFF, WAV) the first picture of type "other" or front cover. An AIFF/WAV that
+/// lofty cannot read whole is read from its `ID3 ` chunk alone, as for the tags (`read_parts`;
+/// `Cosmic Boys - Titan`).
 pub fn embedded_picture(path: &Path) -> Option<Vec<u8>> {
-    use lofty::picture::{MimeType, PictureType};
     for mode in [ParsingMode::Relaxed, ParsingMode::BestAttempt] {
         let Ok(f) = probe_path(path, ParseOptions::new().read_cover_art(true).parsing_mode(mode)) else { continue };
         let flac = f.file_type() == LoftyType::Flac;
-        for tag in f.tags() {
-            let mp4 = tag.tag_type() == TagType::Mp4Ilst;
-            let found = tag.pictures().iter().find(|p| {
-                let kind = matches!(p.pic_type(), PictureType::CoverFront) || (!flac && matches!(p.pic_type(), PictureType::Other));
-                let mime = !flac || matches!(p.mime_type(), Some(MimeType::Jpeg | MimeType::Png));
-                mp4 || (kind && mime)
-            });
-            if let Some(p) = found {
-                return Some(p.data().to_vec());
-            }
-        }
-        return None;
+        return f.tags().iter().find_map(|tag| tag_picture(tag, flac));
     }
-    None
+    let bare = probe_path(path, options(ParsingMode::Relaxed).read_tags(false)).ok()?;
+    match bare.file_type() {
+        LoftyType::Aiff | LoftyType::Wav => tag_picture(&iff_id3_only(path, bare.file_type(), true).ok()??, false),
+        _ => None,
+    }
+}
+
+/// The picture `embedded_picture` takes from one tag.
+fn tag_picture(tag: &Tag, flac: bool) -> Option<Vec<u8>> {
+    use lofty::picture::{MimeType, PictureType};
+    let mp4 = tag.tag_type() == TagType::Mp4Ilst;
+    tag.pictures()
+        .iter()
+        .find(|p| {
+            let kind = matches!(p.pic_type(), PictureType::CoverFront) || (!flac && matches!(p.pic_type(), PictureType::Other));
+            let mime = !flac || matches!(p.mime_type(), Some(MimeType::Jpeg | MimeType::Png));
+            mp4 || (kind && mime)
+        })
+        .map(|p| p.data().to_vec())
 }
 
 fn options(mode: ParsingMode) -> ParseOptions {
@@ -150,7 +158,7 @@ fn read_parts(path: &Path) -> Result<(LoftyType, std::time::Duration, Option<Tag
     }
     let bare = probe_path(path, options(ParsingMode::Relaxed).read_tags(false)).map_err(|_| first_error.unwrap())?;
     let tag = match bare.file_type() {
-        LoftyType::Aiff | LoftyType::Wav => iff_id3_only(path, bare.file_type()).ok().flatten(),
+        LoftyType::Aiff | LoftyType::Wav => iff_id3_only(path, bare.file_type(), false).ok().flatten(),
         _ => None,
     };
     Ok((bare.file_type(), bare.properties().duration(), tag))
@@ -191,8 +199,9 @@ fn is_id3_chunk(id: &[u8; 4]) -> bool {
 }
 
 /// Rebuilds an AIFF/WAV in memory from the format chunk and the `ID3 ` chunk only, and reads its
-/// tag. Used when another chunk of the real file makes lofty fail.
-fn iff_id3_only(path: &Path, kind: LoftyType) -> Result<Option<Tag>> {
+/// tag (with its pictures when `cover_art`). Used when another chunk of the real file makes
+/// lofty fail.
+fn iff_id3_only(path: &Path, kind: LoftyType, cover_art: bool) -> Result<Option<Tag>> {
     let big_endian = kind == LoftyType::Aiff;
     let format_id: &[u8; 4] = if big_endian { b"COMM" } else { b"fmt " };
     let (header, keep) = iff_chunks(path, big_endian, |id| id == format_id || is_id3_chunk(id))?;
@@ -215,7 +224,7 @@ fn iff_id3_only(path: &Path, kind: LoftyType) -> Result<Option<Tag>> {
     let mut first_error = None;
     for mode in [ParsingMode::Relaxed, ParsingMode::BestAttempt] {
         let parsed = Probe::new(std::io::Cursor::new(file.as_slice()))
-            .options(options(mode).read_properties(false))
+            .options(options(mode).read_properties(false).read_cover_art(cover_art))
             .guess_file_type()
             .map_err(|e| tag_error(path, &e))?
             .read();
@@ -376,7 +385,7 @@ pub fn dump(path: &Path) -> Result<Vec<String>> {
     let (kind, duration, tag) = read_parts(path)?;
     let mut out = vec![format!("type {kind:?} duration {duration:?} tag {:?}", tag.as_ref().map(|t| t.tag_type()))];
     if tag.is_none() && matches!(kind, LoftyType::Aiff | LoftyType::Wav) {
-        out.push(format!("ID3-chunk fallback: {:?}", iff_id3_only(path, kind).map(|t| t.map(|t| t.item_count()))));
+        out.push(format!("ID3-chunk fallback: {:?}", iff_id3_only(path, kind, false).map(|t| t.map(|t| t.item_count()))));
     }
     for item in tag.iter().flat_map(|t| t.items()) {
         out.push(format!("{:?} = {:?}", item.key(), item.value()));

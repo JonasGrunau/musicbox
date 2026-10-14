@@ -1,0 +1,54 @@
+{
+  "scorecard": "artwork images: local artwork.jpg / artwork_s.jpg / artwork_m.jpg and the USB a|b<N>[_m].jpg copies",
+  "date": "2026-10-14",
+  "rekordbox": "7.2.19.0342",
+  "macos": "27.0 (26A428); fixtures captured on 27.0",
+  "code": "crates/mb-usb/src/artwork.rs (write_image / create_rescaled_image geometry, ignoreAlpha), artwork/cg.rs (ImageIO decode, CoreGraphics square canvas and high-quality rescale; macOS), artwork/jpeg.rs (libjpeg 6b-compatible baseline encoder); crates/mb-usb/src/exec.rs artwork_bytes; mb-library tags::embedded_picture",
+  "spec": "docs/re/ops/analyse-track.md § Artwork; docs/re/export.md § 3",
+  "commands": ["cargo run --release -p mb-usb --example artwork_score   (defaults: fixtures/oracle-a, fixtures/oracle-b/options.json; -v lists every non-identical file)"],
+  "tests": [
+    "cargo test -p mb-library --test analyse_ops first_analysis_adds_artwork  (byte identity on macOS: one m4a, mp3, flac and aiff track)",
+    "cargo test -p mb-library --test tags_calibration embedded_pictures_where_rekordbox_made_artwork  (169/169: a picture exactly where rekordbox set ImagePath)",
+    "cargo test -p mb-usb --lib artwork"
+  ],
+  "fixture": "oracle-a (rekordbox/share/PIONEER/Artwork and rbtest/PIONEER/Artwork); the same result on oracle-b, oracle-c, oracle-d, oracle-e, sandbox-pre-m2, oracle-cue M1 and A2, whose artwork files are copies",
+  "threshold": "plan: same variants and sizes, PSNR > 40 dB",
+  "local": {
+    "tracks_with_image_path": 95,
+    "pictures_found": 95,
+    "artwork.jpg": {"files": 95, "byte_identical": 95, "same_header": 95, "max_abs_diff": 0},
+    "artwork_s.jpg": {"files": 95, "byte_identical": 95, "same_header": 95, "max_abs_diff": 0},
+    "artwork_m.jpg": {"files": 95, "byte_identical": 95, "same_header": 95, "max_abs_diff": 0}
+  },
+  "usb": {
+    "a|b<N>.jpg (80 px)": {"files": 190, "byte_identical": 190},
+    "a|b<N>_m.jpg (240 px)": {"files": 190, "byte_identical": 190},
+    "unmatched_device_files": 0,
+    "note": "the device files are byte copies of the local _s/_m (export.md § 3); each one is scored against the file we would copy"
+  },
+  "coverage": {
+    "distinct_pictures": 92,
+    "jpeg": 91,
+    "jpeg_progressive": 9,
+    "png": 1,
+    "icc_profile": 2,
+    "with_transparency": 0,
+    "larger_than_800_px": 2,
+    "non_square": 1,
+    "non_square_odd_margin": 1,
+    "artwork_jpg_sizes": {"500x500": 90, "800x800": 2, "500x461": 2, "600x600": 1},
+    "partial_mcus": "93 of 95 artwork.jpg (right and bottom dummy blocks exercised)"
+  },
+  "ablations": {
+    "quantiser rounding without fused multiply-add": "artwork.jpg 93/95",
+    "fused multiply-add inside the float DCT": "artwork.jpg 92/95"
+  },
+  "before": {"artwork.jpg_psnr_db": "34-41", "thumbnails_psnr_db": "21-31", "byte_identical": 0, "method": "image crate: Lanczos3, JpegEncoder quality 85"},
+  "not_covered": [
+    "pictures with transparency (ignoreAlpha keeps premultiplied colour; unit test only)",
+    "the 320 px _l variant (same code path; no rekordbox file)",
+    "_s/_m remade from artwork.jpg at export (create_small_arts_if_not_exists -> CAnalyzerIF::writeFileImage; same code path; no rekordbox file)",
+    "other macOS builds: the CoreGraphics resampler and the ImageIO decoders are private system code",
+    "non-macOS builds: the image crate supplies decoding and scaling (geometry and encoder identical, pixels not)"
+  ]
+}
