@@ -203,7 +203,7 @@ impl WaveCreator {
     }
 
     /// A WaveCreator that keeps only record A, the input of the player's zoomed waveform
-    /// ([`crate::view`]); [`WaveCreator::into_record_a`] takes the result.
+    /// ([`crate::view`]); [`WaveCreator::record_a`] reads it as it fills.
     pub fn new_view(rate: u32, len: u64) -> Self {
         let mut w = Self::new(rate, len);
         w.view_only = true;
@@ -212,9 +212,15 @@ impl WaveCreator {
         w
     }
 
-    /// Record A, one entry per millisecond: max, min, |LP400|, low, mid, high.
-    pub fn into_record_a(self) -> Vec<[i16; 6]> {
-        self.rec_a
+    /// Record A, one entry per millisecond of the track: max, min, |LP400|, low, mid, high.
+    /// Entries from [`WaveCreator::done_ms`] on are not summarised yet (zero).
+    pub fn record_a(&self) -> &[[i16; 6]] {
+        &self.rec_a
+    }
+
+    /// Milliseconds summarised so far.
+    pub fn done_ms(&self) -> usize {
+        self.done_ms as usize
     }
 
     /// Ranges of the milliseconds summarised from a block of `n` samples: (start, count) per

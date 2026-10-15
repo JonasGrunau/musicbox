@@ -313,10 +313,10 @@ impl App {
             self.waves.entry(path.clone()).or_insert_with(|| waveform::load(path)).as_ref()
         });
         // Built from the audio for tracks with analysis files (the strip needs their grid).
-        let view = match (&track, waves) {
-            (Some(t), Some(_)) => self.zoom_views.get(&t.path, ui.ctx()),
-            _ => None,
-        };
+        if let (Some(t), Some(_)) = (&track, waves) {
+            self.zoom_views.update(&t.path, ui.ctx());
+        }
+        let view = track.as_ref().filter(|_| waves.is_some()).and_then(|t| self.zoom_views.view(&t.path));
         let wave_style = &mut self.wave_style;
         let player = track.as_ref().and_then(|t| self.player.as_ref().filter(|(p, _)| *p == t.path)).map(|(_, pl)| pl);
         let playing = player.is_some_and(|p| p.is_playing());
@@ -344,7 +344,7 @@ impl App {
         ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
 
         match (&track, waves) {
-            (Some(_), Some(w)) => jump = waveform::show_detail(ui, w, view.as_deref(), &marks, position, 4_000.0, deck::DETAIL_HEIGHT, *wave_style),
+            (Some(_), Some(w)) => jump = waveform::show_detail(ui, w, view, &marks, position, 4_000.0, deck::DETAIL_HEIGHT, *wave_style),
             (Some(_), None) => deck::empty_well(ui, deck::DETAIL_HEIGHT, "Not analysed"),
             (None, _) => deck::empty_well(ui, deck::DETAIL_HEIGHT, ""),
         }

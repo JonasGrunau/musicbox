@@ -348,6 +348,6 @@ rekordbox does not draw its deck's zoomed strip from PWV5 or PWV7. The player en
 **Why the stored tags look sparse.** PWV5 heights are squared (§ 4.4) and PWV7 values are decaying band envelopes, with the high band through a cosine. Quiet material between kicks therefore drops to 0. Example: the intro of a 125 BPM track has hits at −15 to −25 dBFS between −8 dBFS kicks. They come out as 0 in PWV5 (5-bit heights) and 2–8 of 127 in PWV7.
 
 **musicbox.**
-- `mb_analysis::view::zoom_view` builds record A only (`WaveCreator::new_view`): about 1.4 s for a 7-minute AAC file in a release build.
-- The app builds it on a worker thread when a track is selected and keeps the last eight.
+- `mb_analysis::view::build_zoom_view` builds record A only (`WaveCreator::new_view`): about 1.4 s for a 7-minute AAC file in a release build, most of it decoding. It hands over each millisecond once its ±12 ms low window is summarised, block by block. The result equals building it in one go (`tests/synthetic.rs`).
+- The app builds it on a worker thread from the start of the selected track on, draws each part as it arrives, cancels the build when the selection changes, and keeps the last eight.
 - Its strip draws heights on a square-root scale, not rekordbox's linear one, so the quiet parts between kicks stay visible (a design choice, `docs/design.md`).

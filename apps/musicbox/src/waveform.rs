@@ -4,18 +4,20 @@
 //!
 //! The strip's RGB style draws what rekordbox's player draws there: a per-millisecond waveform
 //! built from the audio when the track is selected (`mb_analysis::view`, analysis-waveforms.md
-//! § 7), its height the peak level. The stored waves are only the fallback while that is built
-//! or when the file cannot be read: their heights are squared (PWV5, PWV3) or decaying band
-//! envelopes (PWV7), so quiet parts between kicks drop to nothing. The 3-band style draws PWV7,
+//! § 7), its height the peak level. Parts not built yet stay empty. The stored waves are only
+//! the fallback when the file cannot be read: their heights are squared (PWV5, PWV3) or decaying
+//! band envelopes (PWV7), so quiet parts between kicks drop to nothing. The 3-band style draws PWV7,
 //! as rekordbox's 3-band view uses the same envelopes. All strip heights use a square-root scale
 //! ([`strip_height`]), so the quiet parts between kicks stay visible.
 
-use mb_analysis::view::ZoomView;
+use mb_analysis::view::{ViewMs, ZoomView};
 use mb_anlz::{AnlzFile, Tag};
 use mb_anlz::tags::{Beat, CueKind, CueListExt, Wave3Band, WaveColorPreview, WaveColorScroll};
 use std::collections::{HashMap, VecDeque};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 pub struct TrackWaves {
@@ -131,37 +133,71 @@ pub fn load(dat: &Path) -> Option<TrackWaves> {
     Some(TrackWaves { color, three_band, scroll, detail_bands, grid, cues })
 }
 
-/// Zoomed waveforms built from the audio, by audio file, built one at a time on a worker thread
-/// (about 1.5 s for a 7-minute track). The last few stay cached.
+/// Zoomed waveforms built from the audio, by audio file. The selected track's view is built on a
+/// worker thread from the start of the track on (a 7-minute track takes about 1.5 s), and the
+/// strip draws each part as soon as it is built. Changing the track cancels the build. The last
+/// few finished views stay cached.
 #[derive(Default)]
 pub struct ZoomViews {
-    /// Built views; `None` when the file could not be decoded.
-    ready: HashMap<PathBuf, Option<Arc<ZoomView>>>,
+    /// Finished views; `None` when the file could not be decoded.
+    ready: HashMap<PathBuf, Option<ZoomView>>,
     /// Paths in `ready`, oldest first.
     order: VecDeque<PathBuf>,
-    job: Option<(PathBuf, Receiver<Option<ZoomView>>)>,
+    job: Option<ViewJob>,
+}
+
+/// A view being built: what has arrived so far.
+struct ViewJob {
+    path: PathBuf,
+    view: ZoomView,
+    rx: Receiver<ViewMsg>,
+    cancel: Arc<AtomicBool>,
+}
+
+enum ViewMsg {
+    /// The next finished milliseconds.
+    Part(Vec<ViewMs>),
+    /// The build ended; `false` when the file could not be decoded.
+    Done(bool),
 }
 
 impl ZoomViews {
     const KEEP: usize = 8;
 
-    /// The view of the audio file at `path`. Starts building it unless a build is running (the
-    /// next frame after that one finishes asks again); `None` until it is ready.
-    pub fn get(&mut self, path: &Path, ctx: &egui::Context) -> Option<Arc<ZoomView>> {
+    /// Makes `path` the track whose view is built: takes what the worker has sent, and starts a
+    /// build (cancelling one for another track) unless the view is cached.
+    pub fn update(&mut self, path: &Path, ctx: &egui::Context) {
         self.collect();
-        if let Some(view) = self.ready.get(path) {
-            return view.clone();
+        if self.ready.contains_key(path) || self.job.as_ref().is_some_and(|j| j.path == path) {
+            return;
         }
-        if self.job.is_none() {
-            let (tx, rx) = channel();
-            let (file, ctx) = (path.to_path_buf(), ctx.clone());
-            std::thread::spawn(move || {
-                let _ = tx.send(mb_analysis::view::zoom_view(&file).ok());
+        if let Some(old) = self.job.take() {
+            old.cancel.store(true, Ordering::Relaxed);
+        }
+        let (tx, rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (file, stop, ctx) = (path.to_path_buf(), cancel.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let built = mb_analysis::view::build_zoom_view(&file, |part| {
+                if stop.load(Ordering::Relaxed) || tx.send(ViewMsg::Part(part.to_vec())).is_err() {
+                    return ControlFlow::Break(());
+                }
                 ctx.request_repaint();
+                ControlFlow::Continue(())
             });
-            self.job = Some((path.to_path_buf(), rx));
+            let _ = tx.send(ViewMsg::Done(built.is_ok()));
+            ctx.request_repaint();
+        });
+        self.job = Some(ViewJob { path: path.to_path_buf(), view: ZoomView::default(), rx, cancel });
+    }
+
+    /// The view of `path` as far as it is built; `None` when the file could not be decoded (or
+    /// no build was asked for).
+    pub fn view(&self, path: &Path) -> Option<&ZoomView> {
+        match &self.job {
+            Some(job) if job.path == path => Some(&job.view),
+            _ => self.ready.get(path).and_then(Option::as_ref),
         }
-        None
     }
 
     /// A view is being built.
@@ -170,20 +206,23 @@ impl ZoomViews {
     }
 
     fn collect(&mut self) {
-        let Some((_, rx)) = &self.job else { return };
-        let view = match rx.try_recv() {
-            Ok(view) => view,
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => None,
+        let Some(job) = &mut self.job else { return };
+        let ok = loop {
+            match job.rx.try_recv() {
+                Ok(ViewMsg::Part(part)) => job.view.ms.extend(part),
+                Ok(ViewMsg::Done(ok)) => break ok,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => break false,
+            }
         };
-        let Some((path, _)) = self.job.take() else { return };
+        let Some(job) = self.job.take() else { return };
         if self.order.len() >= Self::KEEP
             && let Some(old) = self.order.pop_front()
         {
             self.ready.remove(&old);
         }
-        self.order.push_back(path.clone());
-        self.ready.insert(path, view.map(Arc::new));
+        self.order.push_back(job.path.clone());
+        self.ready.insert(job.path, ok.then_some(job.view));
     }
 }
 

@@ -6,6 +6,7 @@
 //! Spec: `analysis-waveforms.md` § 7.
 
 use crate::{Error, Result, block_len, wavecreator};
+use std::ops::ControlFlow;
 use std::path::Path;
 
 /// One millisecond of the zoomed waveform.
@@ -18,27 +19,28 @@ pub struct ViewMs {
     pub bands: [u16; 3],
 }
 
-/// The zoomed waveform of a whole track.
+/// The zoomed waveform of a track, or of its start while it is being built.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ZoomView {
     /// One entry per millisecond from the start of the track.
     pub ms: Vec<ViewMs>,
 }
 
+/// Millisecond `i` of the view from record A of a track of `rec.len()` milliseconds; reads
+/// record A up to `i + 12`.
+fn view_ms(rec: &[[i16; 6]], i: usize) -> ViewMs {
+    let n = rec.len();
+    let share = |j: usize, f: usize| rec[j][f].max(0) as u16;
+    let low = (i.saturating_sub(12)..(i + 13).min(n)).map(|j| share(j, 3)).max().unwrap_or(0);
+    let mid = (i.saturating_sub(1)..(i + 2).min(n)).map(|j| share(j, 4)).max().unwrap_or(0);
+    let peak = i32::from(rec[i][0]).abs().max(i32::from(rec[i][1]).abs()) as u16;
+    ViewMs { peak, bands: [low, mid, share(i, 5)] }
+}
+
 impl ZoomView {
-    /// The view from WaveCreator's record A ([`wavecreator::WaveCreator::into_record_a`]).
+    /// The view from a whole track's record A ([`wavecreator::WaveCreator::record_a`]).
     pub fn from_record_a(rec: &[[i16; 6]]) -> Self {
-        let n = rec.len();
-        let share = |i: usize, f: usize| rec[i][f].max(0) as u16;
-        let ms = (0..n)
-            .map(|i| {
-                let low = (i.saturating_sub(12)..(i + 13).min(n)).map(|j| share(j, 3)).max().unwrap_or(0);
-                let mid = (i.saturating_sub(1)..(i + 2).min(n)).map(|j| share(j, 4)).max().unwrap_or(0);
-                let peak = i32::from(rec[i][0]).abs().max(i32::from(rec[i][1]).abs()) as u16;
-                ViewMs { peak, bands: [low, mid, share(i, 5)] }
-            })
-            .collect();
-        Self { ms }
+        Self { ms: (0..rec.len()).map(|i| view_ms(rec, i)).collect() }
     }
 
     /// The RGB colour rekordbox gives a column with these band values (`createWaveInfo` uses the
@@ -49,9 +51,10 @@ impl ZoomView {
     }
 }
 
-/// Builds the zoomed waveform of the audio file at `path`, reading it as the analysis does
-/// (positions `0 .. L − 1`, 16-bit samples, two-second blocks).
-pub fn zoom_view(path: impl AsRef<Path>) -> Result<ZoomView> {
+/// Builds the zoomed waveform of the audio file at `path` from the start, reading it as the
+/// analysis does (positions `0 .. L − 1`, 16-bit samples, two-second blocks). After each block
+/// `sink` gets the milliseconds finished since its last call; returning `Break` stops the build.
+pub fn build_zoom_view(path: impl AsRef<Path>, mut sink: impl FnMut(&[ViewMs]) -> ControlFlow<()>) -> Result<()> {
     let mut dec = mb_audio::open(path.as_ref())?;
     let info = *dec.info();
     let len = info.total_samples;
@@ -63,20 +66,38 @@ pub fn zoom_view(path: impl AsRef<Path>) -> Result<ZoomView> {
     let block = block_len(info.sample_rate);
     let mut frames = vec![[0.0f32; 2]; block];
     let mut pcm = vec![[0i16; 2]; block];
-    let mut pos = 0u64;
-    while pos < total {
-        let n = ((total - pos) as usize).min(block);
-        let got = dec.read_frames(&mut frames[..n]);
-        if got == 0 {
-            break;
+    let (mut pos, mut sent) = (0u64, 0usize);
+    let mut chunk = Vec::new();
+    loop {
+        let n = ((total.saturating_sub(pos)) as usize).min(block);
+        let got = if n == 0 { 0 } else { dec.read_frames(&mut frames[..n]) };
+        if got > 0 {
+            for (dst, src) in pcm[..got].iter_mut().zip(&frames[..got]) {
+                *dst = [mb_audio::analysis_i16(src[0]), mb_audio::analysis_i16(src[1])];
+            }
+            wave.put(&pcm[..got]);
+            pos += got as u64;
         }
-        for (dst, src) in pcm[..got].iter_mut().zip(&frames[..got]) {
-            *dst = [mb_audio::analysis_i16(src[0]), mb_audio::analysis_i16(src[1])];
+        let rec = wave.record_a();
+        // A millisecond is final once the ±12 ms low window lies within what is summarised.
+        let end = if got == 0 { rec.len() } else { wave.done_ms().saturating_sub(12).min(rec.len()) };
+        chunk.clear();
+        chunk.extend((sent..end).map(|i| view_ms(rec, i)));
+        sent = sent.max(end);
+        if (!chunk.is_empty() && sink(&chunk).is_break()) || got == 0 {
+            return Ok(());
         }
-        wave.put(&pcm[..got]);
-        pos += got as u64;
     }
-    Ok(ZoomView::from_record_a(&wave.into_record_a()))
+}
+
+/// [`build_zoom_view`] into one [`ZoomView`].
+pub fn zoom_view(path: impl AsRef<Path>) -> Result<ZoomView> {
+    let mut view = ZoomView::default();
+    build_zoom_view(path, |ms| {
+        view.ms.extend_from_slice(ms);
+        ControlFlow::Continue(())
+    })?;
+    Ok(view)
 }
 
 #[cfg(test)]

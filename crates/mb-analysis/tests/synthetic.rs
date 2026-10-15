@@ -92,6 +92,51 @@ fn full_scale_tone_reaches_the_top() {
 }
 
 #[test]
+fn zoom_view_builds_in_order() {
+    // Kicks every 480 ms (125 BPM): 60 Hz bursts decaying over about 100 ms, 5.3 s long.
+    let rate = 44100;
+    let kick = |i: usize| {
+        let t = (i % 21168) as f64 / f64::from(rate);
+        let v = (2.0 * std::f64::consts::PI * 60.0 * t).sin() * (-t * 30.0).exp() * 20000.0;
+        (v as i16, v as i16)
+    };
+    let p = wav("kicks.wav", rate, 5.3, kick);
+    let mut chunks = Vec::new();
+    mb_analysis::view::build_zoom_view(&*p, |ms| {
+        chunks.push(ms.to_vec());
+        std::ops::ControlFlow::Continue(())
+    })
+    .unwrap();
+    // Two-second blocks: the start arrives before the whole track is read.
+    assert!(chunks.len() >= 3, "{} chunks", chunks.len());
+    let built: Vec<_> = chunks.concat();
+
+    // The same as record A of the whole track, built in one go.
+    let len = (5.3 * f64::from(rate)) as usize;
+    let mut wave = mb_analysis::wavecreator::WaveCreator::new_view(rate, len as u64);
+    let pcm: Vec<[i16; 2]> = (0..len - 1).map(|i| kick(i).into()).collect();
+    for block in pcm.chunks(2 * rate as usize) {
+        wave.put(block);
+    }
+    let whole = mb_analysis::view::ZoomView::from_record_a(wave.record_a());
+    assert_eq!(built.len(), whole.ms.len());
+    assert!(built == whole.ms);
+    // A kick is low and loud; 400 ms later it has died away.
+    let first = built[..20].iter().map(|m| m.peak).max().unwrap();
+    assert!(first > 15000 && built[10].bands[0] > built[10].bands[2], "{first} {:?}", built[10]);
+    assert!(built[400].peak < 200, "{:?}", built[400]);
+
+    // Stopping early.
+    let mut calls = 0;
+    mb_analysis::view::build_zoom_view(&*p, |_| {
+        calls += 1;
+        std::ops::ControlFlow::Break(())
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+}
+
+#[test]
 fn quantiser_tables() {
     assert_eq!(v_devide(0.0), 2);
     assert_eq!(v_devide(f32::NAN), 2);

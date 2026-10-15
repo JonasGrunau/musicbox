@@ -58,10 +58,10 @@ Review renders: `MB_UI_SHOTS=<dir> cargo test -p musicbox --test ui_design`. Thi
   - 238 px: a collection track (adds the two control rows).
 - **Empty deck.** With no track it keeps its shape: empty wells, a placeholder tile, and dashes in the readouts.
 - **Zoomed waveform.**
-  - **RGB style.** It draws what rekordbox's player draws there: a waveform built from the audio when a track is selected (`mb_analysis::view`, `analysis-waveforms.md` § 7). It is one column per pixel, coloured by the PWV5 colour formula, and its height is the peak level. It takes about 1.5 s per track on a worker thread; the last eight are kept.
+  - **RGB style.** It draws what rekordbox's player draws there: a waveform built from the audio when a track is selected (`mb_analysis::view`, `analysis-waveforms.md` § 7). It is one column per pixel, coloured by the PWV5 colour formula, and its height is the peak level. A worker thread builds it from the start of the track on and the strip draws each part as it arrives, so the first seconds show within a few frames. A whole 7-minute track takes about 1.5 s. Selecting another track cancels the build, and the last eight finished views are kept.
   - **3-band style.** It draws PWV7 (`.2EX`).
   - **Square-root heights.** Both styles use a square-root height scale; rekordbox's is linear. On a linear scale the quiet parts between kicks (often −30 to −45 dB) shrink to a flat line, which read as gaps.
-  - **Fallback.** Until the view is built, or when the file cannot be read, the RGB style draws PWV7 (PWV5 when there is no `.2EX`). The stored tags squash quiet material: PWV5 heights are squared, PWV7 holds decaying envelopes.
+  - **Fallback.** Parts not built yet stay empty; nothing stands in for them, so the waveform never changes its look while a track plays. Only when the file cannot be read does the RGB style draw PWV7 (PWV5 when there is no `.2EX`). The stored tags squash quiet material: PWV5 heights are squared, PWV7 holds decaying envelopes.
   - The grid line under the controls shows the tempo at the cursor, since dynamic grids change tempo.
 - **Position.**
   - The zoomed strip and the pads move the cursor without playing.
