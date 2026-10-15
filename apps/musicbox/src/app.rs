@@ -124,6 +124,9 @@ pub struct App {
     menu_commands: Vec<MenuCommand>,
     /// The title bar the top bar covers (`window_chrome`).
     title_bar: crate::window_chrome::TitleBar,
+    /// The native window drag from the top bar (macOS); without it the top bar drags through
+    /// egui.
+    window_drag: Option<crate::window_chrome::WindowDrag>,
 }
 
 static EMPTY: std::sync::LazyLock<LibrarySnapshot> = std::sync::LazyLock::new(LibrarySnapshot::default);
@@ -171,12 +174,18 @@ impl App {
             menu_bar: None,
             menu_commands: Vec::new(),
             title_bar: crate::window_chrome::TitleBar::default(),
+            window_drag: None,
         }
     }
 
     /// The window's title bar layout, as `window_chrome::install` read it.
     pub fn set_title_bar(&mut self, title_bar: crate::window_chrome::TitleBar) {
         self.title_bar = title_bar;
+    }
+
+    /// The native window drag from the top bar (`window_chrome::install_drag`).
+    pub fn set_window_drag(&mut self, drag: crate::window_chrome::WindowDrag) {
+        self.window_drag = Some(drag);
     }
 
     /// Installs the native menu bar (macOS; main thread). Without it the File, Edit and app
@@ -422,27 +431,40 @@ impl App {
 
     /// Top bar, merged with the window's title bar: the traffic lights on the left (drawn by
     /// macOS), the app mark, and the editing switch on the right. Dragging its empty part moves
-    /// the window; a double click zooms it.
+    /// the window; a double click zooms it. On macOS AppKit does both from the mouse-down
+    /// (`window_chrome::install_drag`); this sets the area it reacts to.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let bar = ui.max_rect();
-        let background = ui.interact(bar, ui.id().with("title-bar"), egui::Sense::click_and_drag());
-        if background.drag_started_by(egui::PointerButton::Primary) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
-        if background.double_clicked() {
-            let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        if self.window_drag.is_none() {
+            let background = ui.interact(bar, ui.id().with("title-bar"), egui::Sense::click_and_drag());
+            if background.drag_started_by(egui::PointerButton::Primary) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if background.double_clicked() {
+                let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            }
         }
         // Room for the traffic lights, which macOS hides in full screen.
         let fullscreen = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            let inset = self.title_bar.lights_end + theme::AFTER_TRAFFIC_LIGHTS - 14.0;
-            ui.add_space(if fullscreen { 0.0 } else { inset });
-            icons::show(ui, icons::Icon::Logo, 20.0, theme::TEXT_STRONG);
-            ui.label(egui::RichText::new("musicbox").font(theme::semibold(13.5)).color(theme::TEXT_STRONG));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.editing_switch(ui));
-        });
+        // In window coordinates: the panel's own margin does not count.
+        let lights = if fullscreen { 0.0 } else { self.title_bar.lights_end };
+        let switch = ui
+            .horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let inset = self.title_bar.lights_end + theme::AFTER_TRAFFIC_LIGHTS - 14.0;
+                ui.add_space(if fullscreen { 0.0 } else { inset });
+                icons::show(ui, icons::Icon::Logo, 20.0, theme::TEXT_STRONG);
+                ui.label(egui::RichText::new("musicbox").font(theme::semibold(13.5)).color(theme::TEXT_STRONG));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.editing_switch(ui)).inner
+            })
+            .inner;
+        if let Some(drag) = &self.window_drag
+            && let Ok(mut area) = drag.area.lock()
+        {
+            // From the traffic lights to the editing switch, the mark and name included.
+            *area = Some(egui::Rect::from_x_y_ranges(lights + 4.0..=switch.left() - 6.0, bar.y_range()));
+        }
     }
 
     /// Status bar: the last message on the left, running jobs with their progress on the right.
@@ -529,7 +551,8 @@ impl App {
     }
 
     /// Off by default; turning it on opens the write connection (which backs the library up).
-    fn editing_switch(&mut self, ui: &mut egui::Ui) {
+    /// The editing switch; returns where it is.
+    fn editing_switch(&mut self, ui: &mut egui::Ui) -> egui::Rect {
         let state = match &self.editor {
             Some(e) if !e.ready => deck::EditState::Starting,
             Some(_) => deck::EditState::Editing,
@@ -551,6 +574,7 @@ impl App {
                 self.edit_status = Some("Editing off".into());
             }
         }
+        response.rect
     }
 
     /// Editor replies; also locks editing again as soon as rekordbox starts.

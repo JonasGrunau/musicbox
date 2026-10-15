@@ -32,7 +32,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.21", default-features = false }
 # The title bar's toolbar (window_chrome.rs); the same versions eframe already uses.
+# The top bar's window drag (a local NSEvent monitor) needs NSEvent and blocks.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSButton", "NSControl", "NSResponder", "NSToolbar", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSButton", "NSControl", "NSEvent", "NSResponder", "NSToolbar", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSUserDefaults"] }
+block2 = "0.6"
 raw-window-handle = "0.6"

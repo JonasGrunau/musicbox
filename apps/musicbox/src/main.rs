@@ -34,8 +34,13 @@ fn main() -> anyhow::Result<()> {
             let mut app = musicbox::App::new(cc.egui_ctx.clone(), args);
             app.install_menu_bar();
             #[cfg(target_os = "macos")]
-            if let Some(title_bar) = musicbox::window_chrome::install(cc) {
-                app.set_title_bar(title_bar);
+            {
+                if let Some(title_bar) = musicbox::window_chrome::install(cc) {
+                    app.set_title_bar(title_bar);
+                }
+                if let Some(drag) = musicbox::window_chrome::install_drag(cc) {
+                    app.set_window_drag(drag);
+                }
             }
             Ok(Box::new(app))
         }),

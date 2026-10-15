@@ -45,7 +45,10 @@ Review renders: `MB_UI_SHOTS=<dir> cargo test -p musicbox --test ui_design`. Thi
 
     Clicks in the bar reach the content view in all three styles.
   - The app mark starts 10 pt after the lights (flush left in full screen).
-  - Dragging the bar's empty part moves the window, and a double click zooms it.
+  - Dragging the bar's empty part (from the traffic lights to the editing switch, the mark included) moves the window, and a double click zooms it.
+    - A double click follows the system setting for title bars (zoom, minimise or nothing).
+    - AppKit does both from the mouse-down itself (`window_chrome::install_drag`, a local event monitor): `performWindowDragWithEvent:` wants the original mouse-down and then moves the window in the Window Server.
+    - Starting the drag from an egui frame (`ViewportCommand::StartDrag`) passed a later, arbitrary event. During playback, when frames run continuously, the window lagged and then jumped to the pointer. That path is now only the fallback where the monitor is not installed (headless tests, other systems).
 - **Menu bar** (`menu_bar.rs`, the `muda` crate). File, Edit and Window live in the macOS menu bar, not in the window:
   - musicbox: About, Services, Hide, Hide Others, Show All, Quit (⌘Q, sent as a normal close request so the library connection shuts down).
   - File: Open rekordbox xml… (⌘O), Close rekordbox xml, Export Collection in xml format… (⌘E), Close Window.

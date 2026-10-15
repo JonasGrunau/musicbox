@@ -10,7 +10,8 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | Code | `mb_analysis::view` (`WaveCreator::new_view`, record A only, 1.4 s for a 7-minute track in release, handed over block by block); `waveform::ZoomViews` builds it on a worker thread from the start of the selected track, cancels it when the selection changes, keeps the last eight; the RGB strip draws it one column per pixel; both strip styles use square-root heights |
 | Follow-up | The first version showed PWV7 until the whole view was built, so the strip changed its look about 1.5 s after a click, often just after playback started. Now parts not built yet stay empty and the start is there within a few frames; PWV7 stands in only when the file cannot be read |
 | Renders | `ui_design` adds `02a-track-start` and `02b-three-band` and waits for the view |
-| Next | user check in the app: the intro of a sparse track (e.g. Lift Off) shows no gaps in either style |
+| Window drag | During playback, dragging the top bar lagged and then the window jumped to the pointer. Cause: egui's `StartDrag` reaches `performWindowDragWithEvent:` from a later frame with whatever event AppKit is handling then, while AppKit wants the original mouse-down. Now a local NSEvent monitor (`window_chrome::install_drag`) starts the drag on the mouse-down in the bar's empty part, and a double click follows the system's title-bar setting. Not testable headlessly: synthetic events would hand the real pointer to the Window Server |
+| Next | user check in the app: the intro of a sparse track (e.g. Lift Off) shows no gaps in either style; dragging the window during playback follows the pointer |
 
 ## 2026-10-14 (night) — visual overhaul of the app
 | Part | State |
