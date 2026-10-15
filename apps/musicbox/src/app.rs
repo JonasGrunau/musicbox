@@ -90,6 +90,8 @@ pub struct App {
     pub source: Source,
     pub browser: browser::State,
     waves: HashMap<PathBuf, Option<waveform::TrackWaves>>,
+    /// Zoomed waveforms built from the audio of the selected tracks.
+    zoom_views: waveform::ZoomViews,
     /// Preview player for one track (path of the open file).
     player: Option<(PathBuf, mb_player::Player)>,
     wave_style: waveform::Style,
@@ -155,6 +157,7 @@ impl App {
             source: Source { library: LibraryRef::Local, list: List::Collection },
             browser: browser::State::default(),
             waves: HashMap::new(),
+            zoom_views: waveform::ZoomViews::default(),
             player: None,
             wave_style: waveform::Style::Rgb,
             cues: HashMap::new(),
@@ -309,6 +312,11 @@ impl App {
         let waves = track.as_ref().and_then(|t| t.analysis_path.as_ref()).and_then(|path| {
             self.waves.entry(path.clone()).or_insert_with(|| waveform::load(path)).as_ref()
         });
+        // Built from the audio for tracks with analysis files (the strip needs their grid).
+        let view = match (&track, waves) {
+            (Some(t), Some(_)) => self.zoom_views.get(&t.path, ui.ctx()),
+            _ => None,
+        };
         let wave_style = &mut self.wave_style;
         let player = track.as_ref().and_then(|t| self.player.as_ref().filter(|(p, _)| *p == t.path)).map(|(_, pl)| pl);
         let playing = player.is_some_and(|p| p.is_playing());
@@ -336,7 +344,7 @@ impl App {
         ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
 
         match (&track, waves) {
-            (Some(_), Some(w)) => jump = waveform::show_detail(ui, w, &marks, position, 4_000.0, deck::DETAIL_HEIGHT, *wave_style),
+            (Some(_), Some(w)) => jump = waveform::show_detail(ui, w, view.as_deref(), &marks, position, 4_000.0, deck::DETAIL_HEIGHT, *wave_style),
             (Some(_), None) => deck::empty_well(ui, deck::DETAIL_HEIGHT, "Not analysed"),
             (None, _) => deck::empty_well(ui, deck::DETAIL_HEIGHT, ""),
         }
@@ -502,6 +510,11 @@ impl App {
                 }
             });
         });
+    }
+
+    /// The zoomed waveform of the selected track is still being built from its audio.
+    pub fn zoom_view_building(&self) -> bool {
+        self.zoom_views.building()
     }
 
     /// The selected collection track has analysis files to edit cues and grid on.

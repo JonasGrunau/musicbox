@@ -1,12 +1,22 @@
 //! Track overview drawn from rekordbox's own analysis files (docs/re/anlz.md):
 //! PWV4 colour preview or PWV6 3-band preview from .EXT/.2EX, plus cue markers; and a zoomed
-//! detail strip with the PQTZ beat grid. The strip draws the 3-band scroll wave (PWV7) when the
-//! .2EX has one: PWV5 and PWV3 keep only transient peaks (a kick is a few columns, then zeros),
-//! so drawn as they are they leave gaps; PWV7 keeps each band's decay. PWV5 is the fallback.
+//! detail strip with the PQTZ beat grid.
+//!
+//! The strip's RGB style draws what rekordbox's player draws there: a per-millisecond waveform
+//! built from the audio when the track is selected (`mb_analysis::view`, analysis-waveforms.md
+//! § 7), its height the peak level. The stored waves are only the fallback while that is built
+//! or when the file cannot be read: their heights are squared (PWV5, PWV3) or decaying band
+//! envelopes (PWV7), so quiet parts between kicks drop to nothing. The 3-band style draws PWV7,
+//! as rekordbox's 3-band view uses the same envelopes. All strip heights use a square-root scale
+//! ([`strip_height`]), so the quiet parts between kicks stay visible.
 
+use mb_analysis::view::ZoomView;
 use mb_anlz::{AnlzFile, Tag};
 use mb_anlz::tags::{Beat, CueKind, CueListExt, Wave3Band, WaveColorPreview, WaveColorScroll};
-use std::path::Path;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 pub struct TrackWaves {
     pub color: Option<WaveColorPreview>,
@@ -73,6 +83,13 @@ pub enum Style {
 const BAND_COLORS: [egui::Color32; 3] =
     [egui::Color32::from_rgb(0x1A, 0x5F, 0xE8), egui::Color32::from_rgb(0xF0, 0x9A, 0x2C), egui::Color32::from_rgb(0xF4, 0xF4, 0xF4)];
 
+/// Display height of a level in 0..=1 for the zoomed strip. rekordbox draws the strip linearly,
+/// which leaves the quiet parts between kicks (often −30 to −45 dB) as a flat line; the square
+/// root keeps them visible while the kicks still stand out.
+fn strip_height(level: f32) -> f32 {
+    level.clamp(0.0, 1.0).sqrt()
+}
+
 /// RGB style colour of three band amplitudes (low → red, mid → green, high → blue), scaled so the
 /// strongest channel is full, as the overview's PWV4 columns are coloured.
 fn band_rgb(bands: [u8; 3]) -> egui::Color32 {
@@ -112,6 +129,62 @@ pub fn load(dat: &Path) -> Option<TrackWaves> {
         push_cues(&mut cues, &list);
     }
     Some(TrackWaves { color, three_band, scroll, detail_bands, grid, cues })
+}
+
+/// Zoomed waveforms built from the audio, by audio file, built one at a time on a worker thread
+/// (about 1.5 s for a 7-minute track). The last few stay cached.
+#[derive(Default)]
+pub struct ZoomViews {
+    /// Built views; `None` when the file could not be decoded.
+    ready: HashMap<PathBuf, Option<Arc<ZoomView>>>,
+    /// Paths in `ready`, oldest first.
+    order: VecDeque<PathBuf>,
+    job: Option<(PathBuf, Receiver<Option<ZoomView>>)>,
+}
+
+impl ZoomViews {
+    const KEEP: usize = 8;
+
+    /// The view of the audio file at `path`. Starts building it unless a build is running (the
+    /// next frame after that one finishes asks again); `None` until it is ready.
+    pub fn get(&mut self, path: &Path, ctx: &egui::Context) -> Option<Arc<ZoomView>> {
+        self.collect();
+        if let Some(view) = self.ready.get(path) {
+            return view.clone();
+        }
+        if self.job.is_none() {
+            let (tx, rx) = channel();
+            let (file, ctx) = (path.to_path_buf(), ctx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(mb_analysis::view::zoom_view(&file).ok());
+                ctx.request_repaint();
+            });
+            self.job = Some((path.to_path_buf(), rx));
+        }
+        None
+    }
+
+    /// A view is being built.
+    pub fn building(&self) -> bool {
+        self.job.is_some()
+    }
+
+    fn collect(&mut self) {
+        let Some((_, rx)) = &self.job else { return };
+        let view = match rx.try_recv() {
+            Ok(view) => view,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => None,
+        };
+        let Some((path, _)) = self.job.take() else { return };
+        if self.order.len() >= Self::KEEP
+            && let Some(old) = self.order.pop_front()
+        {
+            self.ready.remove(&old);
+        }
+        self.order.push_back(path.clone());
+        self.ready.insert(path, view.map(Arc::new));
+    }
 }
 
 fn push_cues(out: &mut Vec<CueMark>, list: &CueListExt) {
@@ -209,12 +282,14 @@ pub fn show_overview(
     clicked
 }
 
-/// Zoomed strip around `center_ms` (± `half_span_ms`): PWV5 columns, beat grid (downbeats
-/// brighter), cue markers with loop spans, and the position line in the middle. A click returns
-/// the clicked position in ms.
+/// Zoomed strip around `center_ms` (± `half_span_ms`): the waveform (`view` when built, else the
+/// stored waves), beat grid (downbeats brighter), cue markers with loop spans, and the position
+/// line in the middle. A click returns the clicked position in ms.
+#[allow(clippy::too_many_arguments)]
 pub fn show_detail(
     ui: &mut egui::Ui,
     waves: &TrackWaves,
+    view: Option<&ZoomView>,
     cues: &[CueMark],
     center_ms: f64,
     half_span_ms: f64,
@@ -241,8 +316,33 @@ pub fn show_detail(
         let h = h.max(0.5);
         painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, mid - h), egui::pos2(x1, mid + h)), 0.0, color);
     };
-    match (&waves.detail_bands, &waves.scroll) {
-        (Some((bands, peak)), _) => {
+    match (view.filter(|_| style == Style::Rgb), &waves.detail_bands, &waves.scroll) {
+        (Some(view), _, _) => {
+            // One column per physical pixel: the loudest millisecond's level (full scale at the
+            // edge) and the colour of the largest band shares, as `createWaveInfo` draws them.
+            let columns = (rect.width() * ui.ctx().pixels_per_point()).round().max(1.0) as usize;
+            let width = rect.width() / columns as f32;
+            for k in 0..columns {
+                let t0 = start + span * k as f64 / columns as f64;
+                let t1 = start + span * (k + 1) as f64 / columns as f64;
+                let first = t0.floor().max(0.0) as usize;
+                let last = (t1.ceil().max(0.0) as usize).min(view.ms.len());
+                if first >= last {
+                    continue;
+                }
+                let (mut level, mut bands) = (0u16, [0u16; 3]);
+                for ms in &view.ms[first..last] {
+                    level = level.max(ms.peak);
+                    for (b, v) in bands.iter_mut().zip(ms.bands) {
+                        *b = (*b).max(v);
+                    }
+                }
+                let [r, g, b] = ZoomView::colour(bands);
+                let x0 = rect.left() + k as f32 * width;
+                bar(x0, x0 + width, strip_height(f32::from(level) / 32768.0) * half, egui::Color32::from_rgb(r, g, b));
+            }
+        }
+        (None, Some((bands, peak)), _) => {
             let (per_ms, first, last) = visible(bands.scroll.map_or(150, |(rate, _)| rate), bands.len());
             let peak = f32::from(*peak);
             for i in first..last {
@@ -251,15 +351,19 @@ pub fn show_detail(
                 let x1 = x_of((i + 1) as f64 / per_ms).max(x0 + 1.0);
                 match style {
                     Style::ThreeBand => {
+                        // Low first, then mid and high on top; a silent band draws nothing, so
+                        // the minimum line under quiet parts stays the low band's colour.
                         for (band, colour) in BAND_COLORS.iter().enumerate() {
-                            bar(x0, x1, f32::from(c[band]) / peak * half, *colour);
+                            if band == 0 || c[band] > 0 {
+                                bar(x0, x1, strip_height(f32::from(c[band]) / peak) * half, *colour);
+                            }
                         }
                     }
-                    Style::Rgb => bar(x0, x1, f32::from(c[0].max(c[1]).max(c[2])) / peak * half, band_rgb(c)),
+                    Style::Rgb => bar(x0, x1, strip_height(f32::from(c[0].max(c[1]).max(c[2])) / peak) * half, band_rgb(c)),
                 }
             }
         }
-        (None, Some(scroll)) => {
+        (None, None, Some(scroll)) => {
             let (per_ms, first, last) = visible(scroll.columns_per_second, scroll.len());
             for i in first..last {
                 let Some(col) = scroll.column(i) else { continue };
@@ -269,7 +373,7 @@ pub fn show_detail(
                 bar(x0, x1, f32::from(col.height) / 31.0 * half, egui::Color32::from_rgb(r, g, b));
             }
         }
-        (None, None) => {}
+        (None, None, None) => {}
     }
     for beat in &waves.grid {
         let ms = f64::from(beat.time_ms);

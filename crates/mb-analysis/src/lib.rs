@@ -18,6 +18,7 @@ pub mod key;
 pub mod loud;
 pub mod loudness;
 pub mod phrase;
+pub mod view;
 pub mod vocal;
 pub mod wavecreator;
 pub mod zoom;

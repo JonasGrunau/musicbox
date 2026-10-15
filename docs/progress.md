@@ -2,6 +2,15 @@
 
 Newest entry first. Each entry records what changed, what is verified, and the next action.
 
+## 2026-10-15 — zoomed waveform without gaps
+| Part | State |
+|---|---|
+| Cause | The strip drew stored tags. PWV5 heights are squared and PWV7 values are decaying band envelopes, so quiet hits between kicks (−15 to −45 dBFS) came out as 0 to 8 of 127 and read as gaps |
+| RE | rekordbox's player builds its own per-millisecond waveform from the audio (`WaveZoom::readWaveZoom`, WaveCreator's record A filters) and draws it linearly with the PWV5 colours (`WaveView::createWaveInfo`); `analysis-waveforms.md` § 7 |
+| Code | `mb_analysis::view` (`WaveCreator::new_view`, record A only, 1.4 s for a 7-minute track in release); `waveform::ZoomViews` builds it on a worker thread per selected track (one at a time, last eight cached); the RGB strip draws it one column per pixel; both strip styles use square-root heights |
+| Renders | `ui_design` adds `02a-track-start` and `02b-three-band` and waits for the view |
+| Next | user check in the app: the intro of a sparse track (e.g. Lift Off) shows no gaps in either style |
+
 ## 2026-10-14 (night) — visual overhaul of the app
 | Part | State |
 |---|---|

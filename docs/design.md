@@ -2,7 +2,7 @@
 
 Visual concept for the app. It follows rekordbox's browser layout and tone, so DJs moving between the two find things in the same places. It uses no rekordbox assets, skins, icons or fonts. Code: `apps/musicbox/src/theme.rs` (tokens and egui style), `icons.rs`, `deck.rs`, `tree.rs`, `browser.rs`, `cue_panel.rs`, `waveform.rs`.
 
-Review renders: `MB_UI_SHOTS=<dir> cargo test -p musicbox --test ui_design`. This saves eight frames: empty deck, collection, playlist, editing, context menu, dialog, device, and the 960 × 600 minimum window.
+Review renders: `MB_UI_SHOTS=<dir> cargo test -p musicbox --test ui_design`. This saves ten frames: empty deck, the track start in both waveform styles, collection, playlist, editing, context menu, dialog, device, and the 960 × 600 minimum window.
 
 ## Principles
 1. **The music is the brightest thing on screen.** Waveforms, artwork, key colours and hot-cue pads carry colour. Chrome stays grey.
@@ -57,8 +57,11 @@ Review renders: `MB_UI_SHOTS=<dir> cargo test -p musicbox --test ui_design`. Thi
   - 170 px: no track, or a device or xml track (waveforms and info).
   - 238 px: a collection track (adds the two control rows).
 - **Empty deck.** With no track it keeps its shape: empty wells, a placeholder tile, and dashes in the readouts.
-- **Zoomed waveform.** It draws the 3-band scroll wave (PWV7, `.2EX`) in the RGB style (low, mid and high as red, green and blue, height the loudest band) or in the 3-band style.
-  - PWV5 and PWV3 keep only transient peaks: a kick is 3–4 columns, then zeros. Drawn as they are, they leave gaps between beats, so PWV5 is used only when a track has no PWV7.
+- **Zoomed waveform.**
+  - **RGB style.** It draws what rekordbox's player draws there: a waveform built from the audio when a track is selected (`mb_analysis::view`, `analysis-waveforms.md` § 7). It is one column per pixel, coloured by the PWV5 colour formula, and its height is the peak level. It takes about 1.5 s per track on a worker thread; the last eight are kept.
+  - **3-band style.** It draws PWV7 (`.2EX`).
+  - **Square-root heights.** Both styles use a square-root height scale; rekordbox's is linear. On a linear scale the quiet parts between kicks (often −30 to −45 dB) shrink to a flat line, which read as gaps.
+  - **Fallback.** Until the view is built, or when the file cannot be read, the RGB style draws PWV7 (PWV5 when there is no `.2EX`). The stored tags squash quiet material: PWV5 heights are squared, PWV7 holds decaying envelopes.
   - The grid line under the controls shows the tempo at the cursor, since dynamic grids change tempo.
 - **Position.**
   - The zoomed strip and the pads move the cursor without playing.

@@ -327,3 +327,27 @@ In runs earlier the same day, the same code left 4 to 10 AAC tracks off by 1 (PW
 - **Uninitialised read.** The peak scan in `createColorWaveData` reads each column before its first write. We model that memory as zero; rekordbox's allocation is large enough to come from fresh pages, but a recycled block could differ.
 - **BALib version 1** (`BeatAnalyzer_1_0`, analysis modes other than 2–4) and the LoudViewMaker path without BeatSensor (BPM analysis off) are not ported.
 - **The end of `PeakDetect900`.** A track whose last chunk is exactly `rate/75` samples and whose final sample is off the 4-grid never sets the mid/low dot "done" flag. The port reproduces this, but no fixture exercises it.
+
+## 7. The player's zoomed waveform (not stored)
+rekordbox does not draw its deck's zoomed strip from PWV5 or PWV7. The player engine builds a waveform of its own from the audio when it loads a track, and the stored tags are only drawn for the other data class (below). Read from the binary; not compared pixel by pixel.
+
+**Building it.** `djplay::WaveZoom::readWaveZoom` @0x10198b4c4 runs the same mono mix (§ 4.2, the 0.001 rule) and the same eighteen biquads as WaveCreator, at the same per-millisecond grid:
+- For the RGB and blue styles it filters with record A's set (LP200², HP200 → LP2000², HP2000², LP400).
+- For the 3-band style it uses record C's set (LP300; HP250 → LP1200; HP3000 → LP9000).
+- `djplay::WaveDataZoom::getItem` @0x1006ab694 reads six 16-bit values per millisecond (record A's order: max, min, |LP400|, then the low, mid and high shares). The data's full scale (`getResolution`) is 32768.
+
+**RGB drawing** (`djplay::WaveView::createWaveInfo` @0x1021916c0), per pixel column:
+- The low share is the largest within ±12 ms and the mid share the largest of the previous, this and the next millisecond, as in PWV4 (§ 4.3). The high share is the millisecond's own.
+- The colour is the PWV5 colour formula (§ 4.4, steps 1–5) on these three values; white when all are 0.
+- The height is `max(|max|, |min|) / 32768` of the half height, linear, plus one pixel.
+
+**3-band drawing** (`create3BandsWaveInfo` @0x102192b48) runs PWV7's decaying envelopes (§ 4.6: 0.99, 0.98, 0.97 per millisecond, restarted 300, 200 and 100 ms back) on the record C values. It scales low and mid by the band gains and draws high through `0.5 − 0.5·cos(π·v)`.
+
+**Stored data.** `drawWaveCDJ` @0x10218ff6c and `draw3BandsWaveCDJ` @0x102190bf0 draw a `WaveDataCDJ` loaded from the stored tags (`WaveCDJ::load` @0x100277d5c). Which tracks rekordbox draws this way is open.
+
+**Why the stored tags look sparse.** PWV5 heights are squared (§ 4.4) and PWV7 values are decaying band envelopes, with the high band through a cosine. Quiet material between kicks therefore drops to 0. Example: the intro of a 125 BPM track has hits at −15 to −25 dBFS between −8 dBFS kicks. They come out as 0 in PWV5 (5-bit heights) and 2–8 of 127 in PWV7.
+
+**musicbox.**
+- `mb_analysis::view::zoom_view` builds record A only (`WaveCreator::new_view`): about 1.4 s for a 7-minute AAC file in a release build.
+- The app builds it on a worker thread when a track is selected and keeps the last eight.
+- Its strip draws heights on a square-root scale, not rekordbox's linear one, so the quiet parts between kicks stay visible (a design choice, `docs/design.md`).

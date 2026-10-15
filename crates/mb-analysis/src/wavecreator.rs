@@ -155,6 +155,8 @@ pub struct WaveCreator {
     done_ms: u64,
     /// Columns of the colour and 3-band scrolling waveforms: ⌈L · 150 / rate⌉ (+0x670, +0x8550).
     columns: usize,
+    /// Only record A is kept ([`WaveCreator::new_view`]).
+    view_only: bool,
     filters: Filters,
     /// Record A (+0x6a0): max, min, |LP400|, low, mid, high (band peak × share of samples won).
     rec_a: Vec<[i16; 6]>,
@@ -187,6 +189,7 @@ impl WaveCreator {
             n_ms,
             done_ms: 0,
             columns,
+            view_only: false,
             filters: Filters::new(rate),
             rec_a: vec![[0; 6]; n_ms as usize],
             rec_b: vec![[0; 5]; n_ms as usize],
@@ -197,6 +200,21 @@ impl WaveCreator {
             b20: Vec::new(),
             b28: Vec::new(),
         }
+    }
+
+    /// A WaveCreator that keeps only record A, the input of the player's zoomed waveform
+    /// ([`crate::view`]); [`WaveCreator::into_record_a`] takes the result.
+    pub fn new_view(rate: u32, len: u64) -> Self {
+        let mut w = Self::new(rate, len);
+        w.view_only = true;
+        w.rec_b = Vec::new();
+        w.rec_c = Vec::new();
+        w
+    }
+
+    /// Record A, one entry per millisecond: max, min, |LP400|, low, mid, high.
+    pub fn into_record_a(self) -> Vec<[i16; 6]> {
+        self.rec_a
     }
 
     /// Ranges of the milliseconds summarised from a block of `n` samples: (start, count) per
@@ -300,6 +318,11 @@ impl WaveCreator {
                 share(mid, won_mid),
                 share(high, won_high),
             ];
+        }
+
+        if self.view_only {
+            self.done_ms += (self.d * n as u64) / self.r;
+            return;
         }
 
         // Record B.
@@ -831,7 +854,7 @@ impl WaveCreator {
 }
 
 /// `juce::Colour` from `WaveCreator::calcZoomWaveColour` @0x100d573d4 (low, mid, high peaks).
-fn zoom_colour(a: f32, b: f32, c: f32) -> (u8, u8, u8) {
+pub(crate) fn zoom_colour(a: f32, b: f32, c: f32) -> (u8, u8, u8) {
     let m = if a < b {
         fmaxnm32(b, c)
     } else {

@@ -124,6 +124,14 @@ fn design_views() {
     shot(&mut h, "01-empty-deck");
 
     select_track(&mut h);
+    // The zoomed waveform is built from the audio on a worker thread.
+    wait(&mut h, "zoomed waveform", |h| !h.state().zoom_view_building());
+    shot(&mut h, "02a-track-start");
+    h.get_by_label("3-Band").click();
+    h.run_steps(2);
+    shot(&mut h, "02b-three-band");
+    h.get_by_label("RGB").click();
+    h.run_steps(2);
     // Move the cursor into the track without playing: each click near the right end of the zoomed
     // strip moves it about 4 s on (a click on the overview would start the preview player).
     let play = h.get_by_label("Play").rect();
