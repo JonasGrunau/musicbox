@@ -36,11 +36,14 @@ pub const TEXT_DIM: Color32 = rgb(0x9C9C9C);
 pub const TEXT_MUTED: Color32 = rgb(0x6C6C6C);
 pub const TEXT_HEADER: Color32 = rgb(0x8A8A8A);
 
-pub const ACCENT: Color32 = rgb(0x1473EB);
-pub const ACCENT_HOVER: Color32 = rgb(0x2A85F7);
-/// Selected rows (table and tree).
-pub const SELECTION: Color32 = rgb(0x163C66);
-pub const ROW_HOVER: Color32 = rgb(0x222629);
+/// The primary colour is white: selection edges, the editing state, focus, primary buttons.
+pub const ACCENT: Color32 = rgb(0xF2F2F2);
+pub const ACCENT_HOVER: Color32 = rgb(0xFFFFFF);
+/// Text and icons on an accent fill.
+pub const ON_ACCENT: Color32 = rgb(0x0B0B0B);
+/// Selected rows (table and tree): neutral, the text turns white.
+pub const SELECTION: Color32 = rgb(0x383838);
+pub const ROW_HOVER: Color32 = rgb(0x242424);
 
 pub const WARN: Color32 = rgb(0xFFB937);
 pub const DANGER: Color32 = rgb(0xF0524F);
@@ -51,12 +54,9 @@ pub const STAR_OFF: Color32 = rgb(0x3A3A3A);
 // Shared sizes (4 px grid).
 pub const RADIUS: u8 = 4;
 pub const ROW_HEIGHT: f32 = 24.0;
-/// The top bar is also the window's title bar: macOS centres the traffic lights 16 pt from the
-/// top of a 32 pt title bar (measured on macOS 27), so the bar is 32 pt and its content is
-/// centred on the same line.
-pub const TOP_BAR: f32 = 32.0;
-/// Width the traffic lights take at the left of the top bar (they end at 68 pt), plus a gap.
-pub const TRAFFIC_LIGHTS: f32 = 80.0;
+/// Gap between the traffic lights and the app mark in the top bar (whose height and inset come
+/// from `window_chrome::TitleBar`).
+pub const AFTER_TRAFFIC_LIGHTS: f32 = 10.0;
 pub const STATUS_BAR: f32 = 26.0;
 
 /// Named font families on top of egui's two: system font weights.
@@ -114,11 +114,11 @@ fn visuals() -> Visuals {
     v.text_edit_bg_color = Some(BG_WELL);
     v.faint_bg_color = BG_STRIPE;
     v.code_bg_color = BG_WELL;
-    v.hyperlink_color = ACCENT_HOVER;
+    v.hyperlink_color = TEXT_STRONG;
     v.warn_fg_color = WARN;
     v.error_fg_color = DANGER;
     v.selection.bg_fill = SELECTION;
-    v.selection.stroke = Stroke::new(1.0, ACCENT_HOVER);
+    v.selection.stroke = Stroke::new(1.0, TEXT_STRONG);
     v.striped = true;
     v.collapsing_header_frame = false;
     v.indent_has_left_vline = false;
@@ -149,7 +149,7 @@ fn visuals() -> Visuals {
 
     w.active.bg_fill = BG_PRESSED;
     w.active.weak_bg_fill = BG_PRESSED;
-    w.active.bg_stroke = Stroke::new(1.0, ACCENT);
+    w.active.bg_stroke = Stroke::new(1.0, rgb(0x6A6A6A));
     w.active.fg_stroke = Stroke::new(2.0, TEXT_STRONG);
     w.active.corner_radius = radius;
     w.active.expansion = 0.0;
@@ -228,7 +228,7 @@ pub fn bar_frame(fill: Color32, x: i8) -> egui::Frame {
 
 /// The primary button of a dialog (accent filled).
 pub fn primary_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(egui::RichText::new(text).color(TEXT_STRONG).font(medium(13.0))).fill(ACCENT).min_size(egui::vec2(76.0, 26.0))
+    egui::Button::new(egui::RichText::new(text).color(ON_ACCENT).font(medium(13.0))).fill(ACCENT).min_size(egui::vec2(76.0, 26.0))
 }
 
 pub fn secondary_button(text: &str) -> egui::Button<'static> {

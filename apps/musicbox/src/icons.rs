@@ -117,10 +117,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             seg(p(11.5, 4.5), p(4.5, 11.5));
         }
         Icon::Logo => {
-            // A rounded box holding three level bars.
-            painter.rect_filled(rect, 4.0 * s, color);
+            // A black rounded box with a fine edge, holding three level bars in `color` (white):
+            // the same mark as the app icon (`app_icon.rs`).
+            painter.rect_filled(rect, 4.0 * s, Color32::from_rgb(0x0B, 0x0B, 0x0B));
+            painter.rect_stroke(rect, 4.0 * s, Stroke::new(1.0, Color32::from_rgb(0x48, 0x48, 0x48)), egui::StrokeKind::Inside);
             let bar = |x: f32, h: f32| {
-                painter.rect_filled(Rect::from_min_max(p(x, 8.0 - h), p(x + 2.0, 8.0 + h)), 1.0 * s, Color32::from_rgb(0x0B, 0x0B, 0x0B));
+                painter.rect_filled(Rect::from_min_max(p(x, 8.0 - h), p(x + 2.0, 8.0 + h)), 1.0 * s, color);
             };
             bar(4.0, 2.0);
             bar(7.0, 4.5);

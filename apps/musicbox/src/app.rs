@@ -120,6 +120,8 @@ pub struct App {
     menu_bar: Option<crate::menu_bar::MenuBar>,
     /// Menu commands waiting for this frame.
     menu_commands: Vec<MenuCommand>,
+    /// The title bar the top bar covers (`window_chrome`).
+    title_bar: crate::window_chrome::TitleBar,
 }
 
 static EMPTY: std::sync::LazyLock<LibrarySnapshot> = std::sync::LazyLock::new(LibrarySnapshot::default);
@@ -165,7 +167,13 @@ impl App {
             #[cfg(target_os = "macos")]
             menu_bar: None,
             menu_commands: Vec::new(),
+            title_bar: crate::window_chrome::TitleBar::default(),
         }
+    }
+
+    /// The window's title bar layout, as `window_chrome::install` read it.
+    pub fn set_title_bar(&mut self, title_bar: crate::window_chrome::TitleBar) {
+        self.title_bar = title_bar;
     }
 
     /// Installs the native menu bar (macOS; main thread). Without it the File, Edit and app
@@ -421,9 +429,10 @@ impl App {
         let fullscreen = ui.input(|i| i.viewport().fullscreen.unwrap_or(false));
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add_space(if fullscreen { 0.0 } else { theme::TRAFFIC_LIGHTS - 14.0 });
-            icons::show(ui, icons::Icon::Logo, 18.0, theme::ACCENT);
-            ui.label(egui::RichText::new("musicbox").font(theme::semibold(13.0)).color(theme::TEXT_STRONG));
+            let inset = self.title_bar.lights_end + theme::AFTER_TRAFFIC_LIGHTS - 14.0;
+            ui.add_space(if fullscreen { 0.0 } else { inset });
+            icons::show(ui, icons::Icon::Logo, 20.0, theme::TEXT_STRONG);
+            ui.label(egui::RichText::new("musicbox").font(theme::semibold(13.5)).color(theme::TEXT_STRONG));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.editing_switch(ui));
         });
     }
@@ -1082,7 +1091,7 @@ impl eframe::App for App {
         let mut actions = self.global_input(&ctx);
         actions.extend(self.run_menu_commands(&ctx));
 
-        egui::Panel::top("top-bar").exact_size(theme::TOP_BAR).frame(theme::bar_frame(theme::BG_DECK, 14)).show(ui, |ui| self.top_bar(ui));
+        egui::Panel::top("top-bar").exact_size(self.title_bar.height).frame(theme::bar_frame(theme::BG_DECK, 14)).show(ui, |ui| self.top_bar(ui));
         egui::Panel::bottom("status").exact_size(theme::STATUS_BAR).frame(theme::bar_frame(theme::BG_DECK, 14)).show(ui, |ui| self.status(ui));
         let local_track = self.browser.selected.is_some_and(|(library, i)| library == LibraryRef::Local && i < self.library.tracks.len());
         let controls = local_track && self.waves_ready();

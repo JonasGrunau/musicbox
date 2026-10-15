@@ -154,7 +154,7 @@ impl Row<'_> {
         }
         let icon_rect = egui::Rect::from_center_size(egui::pos2(x + 22.0, cy), egui::vec2(14.0, 14.0));
         let strong = self.selected || response.hovered();
-        icons::paint(painter, icon_rect, self.icon, if self.selected { theme::ACCENT_HOVER } else { theme::TEXT_DIM });
+        icons::paint(painter, icon_rect, self.icon, if self.selected { theme::TEXT_STRONG } else { theme::TEXT_DIM });
         let text_left = icon_rect.right() + 8.0;
         let mut right = rect.right() - 10.0;
         if let Some(n) = self.count {

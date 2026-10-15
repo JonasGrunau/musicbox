@@ -101,7 +101,11 @@ pub fn play_button(ui: &mut egui::Ui, playing: bool, enabled: bool) -> egui::Res
     };
     ui.painter().circle_filled(rect.center(), size / 2.0, fill);
     let icon = if playing { Icon::Pause } else { Icon::Play };
-    let color = if enabled { theme::TEXT_STRONG } else { theme::TEXT_MUTED };
+    let color = match () {
+        _ if playing => theme::ON_ACCENT,
+        _ if enabled => theme::TEXT_STRONG,
+        _ => theme::TEXT_MUTED,
+    };
     // The triangle's optical centre sits right of its box centre.
     let nudge = if playing { 0.0 } else { 1.0 };
     icons::paint(ui.painter(), egui::Rect::from_center_size(rect.center() + egui::vec2(nudge, 0.0), egui::vec2(13.0, 13.0)), icon, color);
@@ -160,17 +164,17 @@ pub fn editing_switch(ui: &mut egui::Ui, state: EditState) -> egui::Response {
     };
     let font = theme::medium(12.0);
     let galley = ui.painter().layout_no_wrap(label.to_owned(), font, theme::TEXT);
-    let size = egui::vec2(galley.size().x + 40.0, 22.0);
+    let size = egui::vec2(galley.size().x + 42.0, 26.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, label));
     let (fill, stroke, fg) = match (on, response.hovered()) {
-        (true, _) => (theme::SELECTION, theme::ACCENT, theme::TEXT_STRONG),
+        (true, _) => (theme::ACCENT, theme::ACCENT, theme::ON_ACCENT),
         (false, true) => (theme::BG_HOVER, theme::BG_HOVER, theme::TEXT_STRONG),
         (false, false) => (theme::BG_RAISED, theme::BG_RAISED, theme::TEXT),
     };
-    ui.painter().rect(rect, 11.0, fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-    let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 16.0, rect.center().y), egui::vec2(11.0, 11.0));
-    icons::paint(ui.painter(), icon_rect, icon, if on { theme::ACCENT_HOVER } else { theme::TEXT_DIM });
-    ui.painter().galley_with_override_text_color(egui::pos2(rect.left() + 28.0, rect.center().y - galley.size().y / 2.0), galley, fg);
+    ui.painter().rect(rect, 13.0, fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    let icon_rect = egui::Rect::from_center_size(egui::pos2(rect.left() + 17.0, rect.center().y), egui::vec2(12.0, 12.0));
+    icons::paint(ui.painter(), icon_rect, icon, if on { theme::ON_ACCENT } else { theme::TEXT_DIM });
+    ui.painter().galley_with_override_text_color(egui::pos2(rect.left() + 30.0, rect.center().y - galley.size().y / 2.0), galley, fg);
     response
 }

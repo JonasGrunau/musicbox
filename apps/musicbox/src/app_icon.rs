@@ -1,6 +1,7 @@
-//! The app icon (Dock, window, `musicbox.app`): the musicbox mark from `icons::Icon::Logo`, a blue
-//! rounded tile holding three level bars, drawn on the macOS icon grid (an 824/1024 body with a
-//! soft shadow). Rendered in code at any size, so no image file is kept in the repo.
+//! The app icon (Dock, window, `musicbox.app`): the musicbox mark from `icons::Icon::Logo`, a black
+//! rounded tile holding three white level bars, drawn on the macOS icon grid (an 824/1024 body
+//! with a fine light edge and a soft shadow). Rendered in code at any size, so no image file is
+//! kept in the repo.
 
 /// Straight-alpha RGBA pixels of the icon, `size` × `size`.
 pub fn rgba(size: u32) -> Vec<u8> {
@@ -22,8 +23,9 @@ pub fn rgba(size: u32) -> Vec<u8> {
         .collect();
     let shadow = RoundRect { cy: body.cy + 10.0 * s, ..body };
     let blur = (24.0 * s).max(1.0);
-    let top = [0x33u8, 0x8F, 0xFF].map(f32::from);
-    let bottom = [0x0Eu8, 0x58, 0xCC].map(f32::from);
+    let top = [0x2Au8, 0x2A, 0x2A].map(f32::from);
+    let bottom = [0x06u8, 0x06, 0x06].map(f32::from);
+    let edge = (3.0 * s).max(1.0);
     let mut out = vec![0u8; (size * size * 4) as usize];
     for y in 0..size {
         for x in 0..size {
@@ -35,10 +37,14 @@ pub fn rgba(size: u32) -> Vec<u8> {
             // Body with a vertical gradient.
             let t = ((py - (body.cy - body.hh)) / (2.0 * body.hh)).clamp(0.0, 1.0);
             let fill = [0, 1, 2].map(|i| top[i] + (bottom[i] - top[i]) * t);
-            over(&mut color, &mut alpha, fill, coverage(body.distance(px, py)));
-            // Bars, near black.
+            let d_body = body.distance(px, py);
+            over(&mut color, &mut alpha, fill, coverage(d_body));
+            // A fine light edge, so the black tile stands out on a dark Dock.
+            let ring = coverage(d_body) * (1.0 - coverage(d_body + edge));
+            over(&mut color, &mut alpha, [255.0, 255.0, 255.0], ring * 0.16);
+            // Bars, white.
             let bar = bars.iter().map(|b| coverage(b.distance(px, py))).fold(0.0, f32::max);
-            over(&mut color, &mut alpha, [11.0, 11.0, 11.0], bar * 0.94);
+            over(&mut color, &mut alpha, [245.0, 245.0, 245.0], bar);
             let i = ((y * size + x) * 4) as usize;
             out[i..i + 3].copy_from_slice(&color.map(|c| c.round().clamp(0.0, 255.0) as u8));
             out[i + 3] = (alpha * 255.0).round().clamp(0.0, 255.0) as u8;

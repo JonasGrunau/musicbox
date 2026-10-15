@@ -22,6 +22,7 @@ pub mod smartlist_ui;
 pub mod theme;
 pub mod tree;
 pub mod waveform;
+pub mod window_chrome;
 pub mod xml_bridge;
 
 pub use app::{App, MenuCommand};

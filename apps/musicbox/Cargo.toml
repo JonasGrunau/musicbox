@@ -30,3 +30,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The native menu bar (macOS); a generic crate, nothing rekordbox-specific.
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "0.21", default-features = false }
+# The title bar's toolbar (window_chrome.rs); the same versions eframe already uses.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSButton", "NSControl", "NSResponder", "NSToolbar", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString"] }
+raw-window-handle = "0.6"
