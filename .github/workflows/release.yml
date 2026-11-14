@@ -1,0 +1,131 @@
+# Builds the macOS installer package and publishes it with a GitHub release.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# A release made on GitHub with a new tag (Releases > Draft a new release) gets the package
+# attached too: publishing it pushes the tag. A tag with a suffix (v0.2.0-beta.1) becomes a
+# pre-release. Running the workflow by hand (Actions > Release > Run workflow) builds the package
+# and keeps it as a workflow artifact, without a release.
+#
+# The package installs /Applications/musicbox.app through the system installer, the install
+# whose app writes no `._` files to sticks (tools/bundle/bundle.sh, docs/re/export.md § 8):
+#   sudo installer -pkg musicbox-<version>-macOS.pkg -target /
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then v=${GITHUB_REF_NAME#v}; else v=0.0.0-dev.${GITHUB_SHA::7}; fi
+          if [[ ! "${v%%-*}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH[-suffix]"; exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PKG: dist/musicbox-${{ needs.version.outputs.version }}-macOS.pkg
+      # Signing and notarization run when the certificate secret is set (the same four secrets
+      # as build-app: MACOS_CERTIFICATES_P12/_PASSWORD, NOTARY_APPLE_ID, NOTARY_PASSWORD).
+      SIGN: ${{ secrets.MACOS_CERTIFICATES_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Import Developer ID certificates
+        if: env.SIGN == 'true'
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATES_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATES_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpass=$(uuidgen)
+          base64 --decode <<<"$P12" > "$RUNNER_TEMP/certs.p12"
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          security import "$RUNNER_TEMP/certs.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpass" "$kc" > /dev/null
+          security list-keychains -d user | xargs security list-keychains -d user -s "$kc"
+          rm "$RUNNER_TEMP/certs.p12"
+
+          app=$(security find-identity -v -p codesigning "$kc" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
+          installer=$(security find-identity -v "$kc" | sed -n 's/.*"\(Developer ID Installer: .*\)"/\1/p' | head -1)
+          if [[ -z "$app" || -z "$installer" ]]; then
+            echo "::error::The .p12 needs both the Developer ID Application and the Developer ID Installer identity"; exit 1
+          fi
+          team=${app##*(}
+          # bundle.sh signs the app (hardened runtime) and the package with these.
+          { echo "MB_SIGN_IDENTITY=$app"; echo "MB_INSTALLER_IDENTITY=$installer"; echo "TEAM_ID=${team%)}"; } >> "$GITHUB_ENV"
+
+      - name: Package
+        env:
+          MB_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          [[ "$SIGN" == true ]] || echo "::warning::MACOS_CERTIFICATES_P12 is not set, so the app is signed ad hoc and the package is neither signed nor notarized"
+          tools/bundle/bundle.sh --pkg
+          mkdir -p dist
+          mv target/bundle/musicbox.pkg "$PKG"
+
+      - name: Notarize
+        if: env.SIGN == 'true'
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          auth=(--apple-id "$NOTARY_APPLE_ID" --password "$NOTARY_PASSWORD" --team-id "$TEAM_ID")
+          result=$(xcrun notarytool submit "$PKG" "${auth[@]}" --wait --timeout 1h --output-format json)
+          echo "$result"
+          if [[ $(jq -r .status <<<"$result") != Accepted ]]; then
+            xcrun notarytool log "$(jq -r .id <<<"$result")" "${auth[@]}"; exit 1
+          fi
+          xcrun stapler staple "$PKG"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [version, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # Made on GitHub: the package joins it.
+            gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            flags=()
+            [[ "$VERSION" == *-* ]] && flags+=(--prerelease)
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --title "musicbox $VERSION" --generate-notes "${flags[@]}"
+          fi

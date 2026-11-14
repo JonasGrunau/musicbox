@@ -38,7 +38,8 @@ The full plan is in `docs/plan.md`; progress and handoffs are in `docs/progress.
 ## Commands
 - `cargo build` / `cargo test --workspace`
 - `cargo run -p musicbox` — the app
-- `tools/bundle/bundle.sh [--install] [--pkg]` — release build as `target/bundle/musicbox.app`, signed ad hoc (`--install` copies it to `~/Applications`; `--pkg` builds `target/bundle/musicbox.pkg` for `sudo installer -pkg … -target /`, the install whose app writes no `._` files to sticks, `docs/re/export.md` § 8). Don't launch it during development sessions; it opens a window on the user's screen.
+- `tools/bundle/bundle.sh [--install] [--pkg]` — release build as `target/bundle/musicbox.app`, signed ad hoc (`--install` copies it to `~/Applications`; `--pkg` builds `target/bundle/musicbox.pkg` for `sudo installer -pkg … -target /`, the install whose app writes no `._` files to sticks, `docs/re/export.md` § 8). `MB_VERSION`, `MB_SIGN_IDENTITY` (Developer ID: hardened runtime + `tools/bundle/musicbox.entitlements`) and `MB_INSTALLER_IDENTITY` set the version and signing. Don't launch it during development sessions; it opens a window on the user's screen.
+- Release: `git tag vX.Y.Z && git push origin vX.Y.Z` (or a release made on GitHub with a new tag) runs `.github/workflows/release.yml`, which builds `musicbox-X.Y.Z-macOS.pkg` and attaches it to the release; signed and notarized once the four secrets of build-app are set on this repo.
 - `cargo run -p mb-masterdb --example probe -- <options.json> [master.db]` — table row counts
 - `cargo run -p mb-masterdb --example schema -- <options.json> <master.db>` — schema dump
 - `re/ghidra/decompile.sh dump <0xaddr|qualified::name|~substr>...` decompiles into `~/re-work/decomp/`; `re/ghidra/decompile.sh list <substr>` lists matching functions.

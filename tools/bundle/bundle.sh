@@ -9,6 +9,13 @@
 # made by a process started from a terminal (`--install`) is tagged, and every file and folder
 # it creates on the stick is then written twice and its companion deleted again; an export runs
 # 3.7x faster without (docs/re/export.md § 8).
+# Environment (all optional; the release workflow sets them, .github/workflows/release.yml):
+#   MB_VERSION             version for Info.plist and the package (default: Cargo.toml's);
+#                          a suffix (1.2.0-beta.1) is dropped there, which takes MAJOR.MINOR.PATCH
+#   MB_SIGN_IDENTITY       codesign identity, e.g. "Developer ID Application: …" (default: ad hoc);
+#                          a real identity signs with the hardened runtime and
+#                          tools/bundle/musicbox.entitlements
+#   MB_INSTALLER_IDENTITY  "Developer ID Installer: …" to sign the package (default: unsigned)
 # Nothing from rekordbox is bundled: libmpg123 and AudioToolbox are loaded at run time
 # (docs/re/decode.md), and the app reads the user's own library and settings.
 set -eu
@@ -23,7 +30,9 @@ for arg in "$@"; do
     *) echo "bundle.sh: unknown option $arg" >&2; exit 2 ;;
   esac
 done
-VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+VERSION="${MB_VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
+VERSION="${VERSION%%-*}"
+SIGN_IDENTITY="${MB_SIGN_IDENTITY:--}"
 cargo build --release -p musicbox
 APP="$ROOT/target/bundle/musicbox.app"
 rm -rf "$APP"
@@ -54,8 +63,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --sign - --timestamp=none "$APP"
-codesign --verify --verbose=1 "$APP"
+if [ "$SIGN_IDENTITY" = - ]; then
+  codesign --force --sign - --timestamp=none "$APP"
+else
+  # Notarization needs the hardened runtime; the entitlements let it load rekordbox's libmpg123,
+  # which another team signed.
+  codesign --force --timestamp --options runtime \
+    --entitlements "$ROOT/tools/bundle/musicbox.entitlements" --sign "$SIGN_IDENTITY" "$APP"
+fi
+codesign --verify --strict --verbose=1 "$APP"
 echo "built $APP"
 if [ "$INSTALL" = 1 ]; then
   mkdir -p "$HOME/Applications"
@@ -82,7 +98,13 @@ if [ "$PKG" = 1 ]; then
   rm -f "$WORK/expanded/Payload" "$WORK/expanded/Bom"
   ditto -c -z --norsrc --noextattr --noacl --noqtn "$WORK/root" "$WORK/expanded/Payload"
   mkbom "$WORK/root" "$WORK/expanded/Bom"
-  pkgutil --flatten "$WORK/expanded" "$PKGFILE"
+  if [ -n "${MB_INSTALLER_IDENTITY:-}" ]; then
+    pkgutil --flatten "$WORK/expanded" "$WORK/unsigned.pkg"
+    productsign --timestamp --sign "$MB_INSTALLER_IDENTITY" "$WORK/unsigned.pkg" "$PKGFILE"
+    pkgutil --check-signature "$PKGFILE"
+  else
+    pkgutil --flatten "$WORK/expanded" "$PKGFILE"
+  fi
   if pkgutil --payload-files "$PKGFILE" | grep -q '/\._'; then
     echo "bundle.sh: the package payload still holds extended attributes" >&2
     exit 1
