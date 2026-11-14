@@ -2299,7 +2299,7 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "mb-analysis"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "mb-anlz",
@@ -2315,14 +2315,14 @@ dependencies = [
 
 [[package]]
 name = "mb-anlz"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "mb-audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "libloading",
@@ -2335,14 +2335,14 @@ dependencies = [
 
 [[package]]
 name = "mb-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "unicode-normalization",
 ]
 
 [[package]]
 name = "mb-devlib"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blowfish",
@@ -2355,11 +2355,11 @@ dependencies = [
 
 [[package]]
 name = "mb-dsp"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "mb-library"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "image",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "mb-masterdb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2398,7 +2398,7 @@ dependencies = [
 
 [[package]]
 name = "mb-nn"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libloading",
  "md-5",
@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "mb-pdb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mb-core",
  "thiserror 2.0.21",
@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "mb-player"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "mb-audio",
@@ -2425,7 +2425,7 @@ dependencies = [
 
 [[package]]
 name = "mb-usb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2446,7 +2446,7 @@ dependencies = [
 
 [[package]]
 name = "mb-xml"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mb-core",
  "quick-xml 0.42.0",
@@ -2561,7 +2561,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "musicbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -3434,7 +3434,7 @@ checksum = "e8cf8e6a8aa66ce33f63993ffc4ea4271eb5b0530a9002db8455ea6050c77bfa"
 
 [[package]]
 name = "probegen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "hound",
@@ -3578,7 +3578,7 @@ dependencies = [
 
 [[package]]
 name = "rbdiff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "mb-anlz",
