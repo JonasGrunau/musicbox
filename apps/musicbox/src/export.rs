@@ -70,19 +70,35 @@ impl ExportJob {
     }
 }
 
+fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+}
+
 fn run(source: &Source, playlist: &DbId, root: &std::path::Path, cancel: &CancelToken, progress: &mut dyn FnMut(&Progress)) -> Result<String, String> {
-    if let Some(reason) = crate::protect::write_refusal(root) {
+    // The stick side (the protection check runs `diskutil`; the load reads the whole stick) and
+    // the library side are independent: both run at once. Nothing is written before both
+    // checks have passed.
+    let (refusal, device, local) = std::thread::scope(|s| {
+        let refusal = s.spawn(|| crate::protect::write_refusal(root));
+        let device = s.spawn(|| DeviceState::load(root, None).map_err(|e| e.to_string()));
+        let local = (|| {
+            let running = mb_masterdb::running_rekordbox();
+            if !running.is_empty() {
+                return Err(format!("Quit {} before exporting", running.join(", ")));
+            }
+            let library = LibraryDir::open_paths(&source.db_path, &source.passphrase, source.analysis_root.clone(), source.settings_root.clone())
+                .map_err(|e| e.to_string())?;
+            let selection = vec![SelectionItem::Playlist(playlist.0.clone())];
+            let src = SourceLibrary::load(library.connection(), &library.analysis_root, &selection).map_err(|e| e.to_string())?;
+            Ok((library, selection, src))
+        })();
+        (join(refusal), join(device), local)
+    });
+    if let Some(reason) = refusal {
         return Err(reason);
     }
-    let running = mb_masterdb::running_rekordbox();
-    if !running.is_empty() {
-        return Err(format!("Quit {} before exporting", running.join(", ")));
-    }
-    let library = LibraryDir::open_paths(&source.db_path, &source.passphrase, source.analysis_root.clone(), source.settings_root.clone())
-        .map_err(|e| e.to_string())?;
-    let selection = vec![SelectionItem::Playlist(playlist.0.clone())];
-    let src = SourceLibrary::load(library.connection(), &library.analysis_root, &selection).map_err(|e| e.to_string())?;
-    let device = DeviceState::load(root, None).map_err(|e| e.to_string())?;
+    let (library, selection, src) = local?;
+    let device = device?;
     let mut plan_options = PlanOptions::default();
     if let Some(t) = mb_usb::settings::hot_cue_color_type(&library.settings_root) {
         plan_options.hot_cue_color_type = t;

@@ -27,8 +27,10 @@ fn is_apple_double(path: &Path) -> bool {
         .is_ok_and(|()| head == MAGIC)
 }
 
+/// A missing file fails the open and a folder the read, so no separate `stat` (each call is a
+/// round trip on FSKit).
 fn remove_if_apple_double(path: &Path) -> bool {
-    path.is_file() && is_apple_double(path) && std::fs::remove_file(path).is_ok()
+    is_apple_double(path) && std::fs::remove_file(path).is_ok()
 }
 
 /// Removes the companions of `paths` and of their folders up to (not including) `root`.
@@ -48,6 +50,65 @@ pub fn remove_companions<'a>(root: &Path, paths: impl IntoIterator<Item = &'a Pa
                 removed += 1;
             }
             p = cur.parent();
+        }
+    }
+    removed
+}
+
+/// Removes the companions of files as they are written, from several threads: the file's own,
+/// and those of its folders up to `root`, each folder once. The kernel creates a folder's
+/// companion with the folder, so a folder seen once has nothing new later. Renames carry the
+/// companion along and deletes remove it (checked on FSKit FAT, 2026-10-15), so cleaning the
+/// final paths is enough. File systems with native extended attributes never get companions.
+pub struct Cleaner {
+    root: PathBuf,
+    enabled: bool,
+    seen: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+}
+
+impl Cleaner {
+    /// `filesystem`: the `statfs` type name of the volume (`None` when unknown: cleans).
+    pub fn new(root: &Path, filesystem: Option<&str>) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            enabled: !matches!(filesystem, Some("apfs" | "hfs")),
+            seen: Default::default(),
+        }
+    }
+
+    /// Removes the companions of `path` and of its folders below the root.
+    pub fn clean(&self, path: &Path) {
+        if !self.enabled || !path.starts_with(&self.root) {
+            return;
+        }
+        if let Some(c) = companion(path) {
+            remove_if_apple_double(&c);
+        }
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if d == self.root || !d.starts_with(&self.root) {
+                break;
+            }
+            if !self.seen.lock().unwrap().insert(d.to_path_buf()) {
+                break;
+            }
+            if let Some(c) = companion(d) {
+                remove_if_apple_double(&c);
+            }
+            dir = d.parent();
+        }
+    }
+}
+
+/// Removes the AppleDouble companions directly inside `dir` (not below it), and those of `dir`
+/// and its folders up to `root`: for an operation that writes the files of one folder only.
+pub fn clean_dir(root: &Path, dir: &Path) -> usize {
+    let mut removed = remove_companions(root, [dir]);
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if e.file_name().to_str().is_some_and(|n| n.starts_with("._"))
+            && remove_if_apple_double(&e.path())
+        {
+            removed += 1;
         }
     }
     removed
@@ -104,6 +165,38 @@ mod tests {
         assert!(sub.join("._notes").exists(), "not AppleDouble: kept");
         assert!(dir.join("Contents/._other.mp3").exists(), "not written by us: kept");
         assert!(!dir.join("._PIONEER").exists() && !dir.join("._Contents").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cleaner_removes_file_and_folder_companions() {
+        let dir = std::env::temp_dir().join(format!("mb-appledouble-c-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("PIONEER/USBANLZ/P001")).unwrap();
+        let mut ad = MAGIC.to_vec();
+        ad.resize(4096, 0);
+        for p in [
+            "PIONEER/USBANLZ/P001/._ANLZ0000.DAT",
+            "PIONEER/USBANLZ/._P001",
+            "PIONEER/._USBANLZ",
+            "._PIONEER",
+        ] {
+            std::fs::write(dir.join(p), &ad).unwrap();
+        }
+        std::fs::write(dir.join("PIONEER/USBANLZ/P001/ANLZ0000.DAT"), b"x").unwrap();
+        std::fs::write(dir.join("PIONEER/USBANLZ/P001/._notes"), b"not apple double").unwrap();
+        let c = Cleaner::new(&dir, Some("msdos"));
+        c.clean(&dir.join("PIONEER/USBANLZ/P001/ANLZ0000.DAT"));
+        let left: Vec<_> = ["._ANLZ0000.DAT", "../._P001", "../../._USBANLZ", "../../../._PIONEER"]
+            .iter()
+            .filter(|p| dir.join("PIONEER/USBANLZ/P001").join(p).exists())
+            .collect();
+        assert!(left.is_empty(), "left: {left:?}");
+        assert!(dir.join("PIONEER/USBANLZ/P001/._notes").exists());
+        // Native extended attributes: nothing to do (and nothing touched).
+        std::fs::write(dir.join("PIONEER/._USBANLZ"), &ad).unwrap();
+        Cleaner::new(&dir, Some("apfs")).clean(&dir.join("PIONEER/USBANLZ/x"));
+        assert!(dir.join("PIONEER/._USBANLZ").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

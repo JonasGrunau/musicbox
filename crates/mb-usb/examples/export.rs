@@ -11,6 +11,10 @@
 //! - `--log-dir <dir>`: where to write the export log; default: no log.
 //! - `--date <YYYY-MM-DD>`: the date for a new stick's databases; default: today.
 //! - `--dry-run`: print the plan only.
+//! - `--stop-after <n>`: cancel when the track after the first `n` starts (a shorter run of a
+//!   big playlist; the databases then hold the tracks done).
+//! - `--tiny-audio`: copy 1 KiB stand-ins instead of the audio (same files and folders; for
+//!   timing the executor's per-file work on a small disk image).
 //!
 //! The library is never opened in place (master.db is copied to a temp dir). Never point the
 //! device root at a reference stick.
@@ -27,6 +31,8 @@ fn main() -> anyhow::Result<()> {
     let mut opts = ExportOptions::default();
     let mut plan_opts = PlanOptions::default();
     let mut dry_run = false;
+    let mut tiny_audio = false;
+    let mut stop_after: Option<usize> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -34,6 +40,8 @@ fn main() -> anyhow::Result<()> {
             "--log-dir" => opts.log_dir = args.next().map(PathBuf::from),
             "--date" => plan_opts.today = args.next().unwrap_or_default(),
             "--dry-run" => dry_run = true,
+            "--tiny-audio" => tiny_audio = true,
+            "--stop-after" => stop_after = args.next().and_then(|n| n.parse().ok()),
             _ => positional.push(a),
         }
     }
@@ -64,8 +72,11 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .map(|name| Ok(SelectionItem::Playlist(all.find_playlist(name)?.id.clone())))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let t0 = std::time::Instant::now();
     let source = SourceLibrary::load(library.connection(), &library.analysis_root, &selection)?;
+    let t1 = std::time::Instant::now();
     let device = DeviceState::load(&root, None)?;
+    let t2 = std::time::Instant::now();
     println!(
         "device {} ({}), {}",
         root.display(),
@@ -79,7 +90,25 @@ fn main() -> anyhow::Result<()> {
     if let Some(t) = opts.settings_dir.as_deref().and_then(mb_usb::settings::hot_cue_color_type) {
         plan_opts.hot_cue_color_type = t;
     }
-    let plan = plan_export(&source, &device, &selection, &plan_opts)?;
+    let mut plan = plan_export(&source, &device, &selection, &plan_opts)?;
+    println!(
+        "load: source {:.2} s, device {:.2} s, plan {:.2} s",
+        (t1 - t0).as_secs_f64(),
+        (t2 - t1).as_secs_f64(),
+        t2.elapsed().as_secs_f64()
+    );
+    if tiny_audio {
+        let stand_in = std::env::temp_dir().join("mb-export-tiny-audio");
+        std::fs::write(&stand_in, [0u8; 1024])?;
+        for step in plan.jobs.iter_mut().flat_map(|j| j.steps.iter_mut()) {
+            for f in &mut step.files {
+                if let mb_usb::plan::FileOp::CopyAudio { from, size, .. } = f {
+                    *from = stand_in.clone();
+                    *size = 1024;
+                }
+            }
+        }
+    }
     for job in &plan.jobs {
         let mut counts = std::collections::BTreeMap::<u32, usize>::new();
         for s in &job.steps {
@@ -111,7 +140,22 @@ fn main() -> anyhow::Result<()> {
     }
     let cancel = CancelToken::new();
     let mut last = std::time::Instant::now();
+    // Wall time per phase, printed at the end (for comparing executor changes).
+    let mut phases: Vec<(mb_usb::Phase, std::time::Instant)> = Vec::new();
+    let mut started: Vec<String> = Vec::new();
+    let stopper = cancel.clone();
     let report = execute(&plan, &device, &opts, &cancel, &mut |p| {
+        if let (Some(n), Some(title)) = (stop_after, &p.current)
+            && started.last() != Some(title)
+        {
+            started.push(title.clone());
+            if started.len() > n {
+                stopper.cancel();
+            }
+        }
+        if phases.last().is_none_or(|(ph, _)| *ph != p.phase) {
+            phases.push((p.phase, std::time::Instant::now()));
+        }
         if last.elapsed().as_millis() > 500 {
             last = std::time::Instant::now();
             eprintln!(
@@ -125,6 +169,16 @@ fn main() -> anyhow::Result<()> {
             );
         }
     })?;
+    let end = std::time::Instant::now();
+    let timing: Vec<String> = phases
+        .iter()
+        .enumerate()
+        .map(|(i, (ph, at))| {
+            let next = phases.get(i + 1).map_or(end, |(_, t)| *t);
+            format!("{ph:?} {:.2} s", (next - *at).as_secs_f64())
+        })
+        .collect();
+    println!("timing: {}", timing.join(", "));
     println!(
         "done: {} of {} tracks exported, cancelled {}, error {:?}",
         report.exported(),

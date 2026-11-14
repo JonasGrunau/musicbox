@@ -326,8 +326,13 @@ fn cancellation_keeps_the_stick_consistent() {
     let plan = plan_export(&lib, &dev, &sel, &PlanOptions::default()).unwrap();
     let cancel = CancelToken::new();
     let c = cancel.clone();
+    // Cancel as the second track starts: the first one's files are written (its ANLZ set may
+    // still be in flight on a worker thread, and is waited for), the second one's are not.
+    let mut first = None;
     let r = execute(&plan, &dev, &ExportOptions::default(), &cancel, &mut |p| {
-        if p.tracks_done == 1 {
+        if let Some(title) = &p.current
+            && first.get_or_insert_with(|| title.clone()) != title
+        {
             c.cancel();
         }
     })

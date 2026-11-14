@@ -9,12 +9,21 @@
 //!
 //! rekordbox runs every statement in autocommit mode. [`DevLibWriter::begin`] /
 //! [`DevLibWriter::commit`] may wrap a batch for speed; the stored rows are the same.
+//!
+//! Speed (musicbox's own, no effect on the stored rows): statements are prepared once and
+//! reused, and the writer keeps in memory what rekordbox re-reads with a table scan per track
+//! (see [`Caches`]): the name → ID maps of the lookup tables and albums, `count(*)` of
+//! `content` for `numberOfContents`, and the entry count of each playlist being filled. Every
+//! cache gives the value the SQL would; writes through [`DevLibWriter::connection`] that insert
+//! or delete rows of those tables must be followed by [`DevLibWriter::invalidate_caches`].
 
 use crate::model::ListAttribute;
 use crate::schema::{DB_VERSION_FRESH_STICK, DB_VERSION_INIT, INDEXES, MenuSeed, TABLES};
 use crate::{Error, Result, passphrase};
-use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
+use rusqlite::types::{Value, ValueRef};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, ToSql, params, params_from_iter};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Values for the seed rows written when the database is created.
@@ -222,6 +231,15 @@ impl Lookup {
             Lookup::Key => "key",
         }
     }
+
+    fn index(self) -> usize {
+        match self {
+            Lookup::Artist => 0,
+            Lookup::Genre => 1,
+            Lookup::Label => 2,
+            Lookup::Key => 3,
+        }
+    }
 }
 
 /// Today's date as `DBToolBox::getDateString` writes it (local time, `YYYY-MM-DD`).
@@ -229,11 +247,105 @@ pub fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
+/// Prepared statements kept per connection. An export uses a few dozen distinct statements
+/// (one per table for `max(id)`, the inserts, the `modify<Column>` updates).
+const STATEMENT_CACHE: usize = 128;
+
+/// Page cache of the writer's connection, in KiB (`PRAGMA cache_size = -N`): 64 MiB keeps the
+/// `content` table of a large stick in memory (SQLCipher decrypts every page it reads in).
+/// Connection-only; nothing is stored in the file.
+const PAGE_CACHE_KIB: i64 = 65_536;
+
+/// A cache slot: not read yet, loaded, or off because the table's DDL is not the one from
+/// [`TABLES`] (the SQL then runs as is, so a foreign schema cannot change a match).
+#[derive(Debug, Default)]
+enum Slot<T> {
+    #[default]
+    Unloaded,
+    Loaded(T),
+    Off,
+}
+
+/// A stored integer-affinity value as SQL `=` against a bound integer sees it: equal only to
+/// an INTEGER of the same value or a REAL that equals it numerically; NULL, TEXT and BLOB never.
+#[derive(Debug, Clone, Copy)]
+enum Num {
+    Int(i64),
+    Real(f64),
+    Other,
+}
+
+impl Num {
+    fn from_ref(v: ValueRef<'_>) -> Self {
+        match v {
+            ValueRef::Integer(i) => Num::Int(i),
+            ValueRef::Real(r) => Num::Real(r),
+            _ => Num::Other,
+        }
+    }
+
+    fn equals(self, bound: i64) -> bool {
+        match self {
+            Num::Int(i) => i == bound,
+            // `bound` is a u32/u8 value, exact as f64.
+            Num::Real(r) => r == bound as f64,
+            Num::Other => false,
+        }
+    }
+}
+
+/// One `album` row as `getAndAddAlbumID`'s select matches it.
+#[derive(Debug, Clone, Copy)]
+struct AlbumRow {
+    id: i64,
+    artist_id: Num,
+    compilation: Num,
+}
+
+/// What the writer remembers between statements instead of scanning the table again. Each
+/// entry reproduces one select exactly:
+/// - `lookups[Lookup::index]`: `select <t>_id from <t> where name = ?` (first row in rowid
+///   order, BINARY text comparison) → name bytes to the lowest rowid with that name;
+/// - `albums`: `getAndAddAlbumID`'s select → the rows per name in rowid order, matched on
+///   `artist_id` / `isComplation` like SQL `=`;
+/// - `content_count`: `select count(*) from content` (`update_property_num_content`);
+/// - `entry_counts`: `select count(content_id) from playlist_content where playlist_id = ?`.
+///
+/// Every write path of the writer keeps them in step or drops them; an error drops them all
+/// (a statement may have rolled the transaction back).
+#[derive(Debug, Default)]
+struct Caches {
+    lookups: [Slot<HashMap<Vec<u8>, i64>>; 4],
+    albums: Slot<HashMap<Vec<u8>, Vec<AlbumRow>>>,
+    content_count: Option<i64>,
+    entry_counts: HashMap<u32, i64>,
+    /// `content` has the DDL of [`TABLES`] (see [`DevLibWriter::add_track`]).
+    content_standard: Option<bool>,
+}
+
+/// `insert into <table>(<columns>) values (?, …)`.
+fn insert_sql<'a>(table: &str, columns: impl Iterator<Item = &'a str>) -> String {
+    let columns: Vec<&str> = columns.collect();
+    format!(
+        "insert into {table}({}) values ({})",
+        columns.join(", "),
+        vec!["?"; columns.len()].join(", ")
+    )
+}
+
+/// A lookup ID as `insertTrack` writes it: only when non-zero (NULL otherwise).
+fn non_zero(id: u32) -> Option<u32> {
+    (id != 0).then_some(id)
+}
+
 /// A read-write connection to exportLibrary.db.
 pub struct DevLibWriter {
     conn: Connection,
     path: PathBuf,
     today: String,
+    caches: RefCell<Caches>,
+    /// A transaction opened with [`DevLibWriter::begin`] is open.
+    in_tx: Cell<bool>,
 }
 
 impl DevLibWriter {
@@ -308,6 +420,10 @@ impl DevLibWriter {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX | extra,
         )?;
         conn.pragma_update(None, "key", passphrase())?;
+        // musicbox's own, connection-only (not stored in the file): a larger page cache and
+        // statement cache.
+        conn.execute_batch(&format!("PRAGMA cache_size = -{PAGE_CACHE_KIB}"))?;
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         // `DevSQLiteDB::openDB` @0x1007399D4.
         conn.execute_batch("PRAGMA synchronous = NORMAL")?;
         let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
@@ -318,11 +434,49 @@ impl DevLibWriter {
             conn,
             path: path.to_path_buf(),
             today: today(),
+            caches: RefCell::default(),
+            in_tx: Cell::new(false),
         })
     }
 
+    /// The raw connection. A write through it that inserts or deletes rows of `artist`,
+    /// `genre`, `label`, `key`, `album`, `content` or `playlist_content` (or a `ROLLBACK`)
+    /// must be followed by [`DevLibWriter::invalidate_caches`]; updates of other columns
+    /// (e.g. a `content` lookup ID) need nothing.
     pub fn connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Forgets every in-memory map and counter; the next use reads them from the database
+    /// again.
+    pub fn invalidate_caches(&self) {
+        *self.caches.borrow_mut() = Caches::default();
+    }
+
+    /// Drops the caches when the transaction opened with [`DevLibWriter::begin`] is gone
+    /// without [`DevLibWriter::commit`]: SQLite rolls it back by itself after some errors
+    /// (SQLITE_FULL, SQLITE_IOERR, …), and a `ROLLBACK` may have come through
+    /// [`DevLibWriter::connection`]. Called before every cache read.
+    fn check_transaction(&self) {
+        if self.in_tx.get() && self.conn.is_autocommit() {
+            self.in_tx.set(false);
+            self.invalidate_caches();
+        }
+    }
+
+    /// Drops every cache when `result` is an error: the failed statement may have rolled the
+    /// transaction back, or left a cache ahead of the database.
+    fn guarded<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let result = f();
+        if result.is_err() {
+            self.invalidate_caches();
+        }
+        result
+    }
+
+    /// `Connection::execute` through the prepared-statement cache; returns the changed rows.
+    fn exec_cached<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<usize> {
+        Ok(self.conn.prepare_cached(sql)?.execute(params)?)
     }
 
     /// Overrides the date used for `createdDate` / empty `dateAdded` (default: today).
@@ -349,12 +503,23 @@ impl DevLibWriter {
     }
 
     pub fn begin(&self) -> Result<()> {
+        self.check_transaction();
         self.conn.execute_batch("BEGIN")?;
+        self.in_tx.set(true);
         Ok(())
     }
 
     pub fn commit(&self) -> Result<()> {
-        self.conn.execute_batch("COMMIT")?;
+        self.check_transaction();
+        self.in_tx.set(false);
+        self.guarded(|| Ok(self.conn.execute_batch("COMMIT")?))
+    }
+
+    /// Rolls back the transaction opened with [`DevLibWriter::begin`] (and drops the caches).
+    pub fn rollback(&self) -> Result<()> {
+        self.in_tx.set(false);
+        self.invalidate_caches();
+        self.conn.execute_batch("ROLLBACK")?;
         Ok(())
     }
 
@@ -391,7 +556,9 @@ impl DevLibWriter {
         Ok(())
     }
 
-    /// Multi-row insert, as `SQLiteDB::insertIntoMultiple` sends it.
+    /// Multi-row insert, as `SQLiteDB::insertIntoMultiple` sends it. Small statements (a
+    /// track's My Tag links) go through the statement cache; the large ones of
+    /// [`DevLibWriter::insert_all`] are prepared once and dropped.
     fn insert_multiple(&self, table: &str, columns: &[&str], rows: &[Vec<Value>]) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
@@ -402,8 +569,12 @@ impl DevLibWriter {
             columns.join(", "),
             vec![placeholders; rows.len()].join(", ")
         );
-        self.conn
-            .execute(&sql, params_from_iter(rows.iter().flatten()))?;
+        let params = params_from_iter(rows.iter().flatten());
+        if rows.len() * columns.len() <= 64 {
+            self.exec_cached(&sql, params)?;
+        } else {
+            self.conn.execute(&sql, params)?;
+        }
         Ok(())
     }
 
@@ -412,11 +583,14 @@ impl DevLibWriter {
     /// parameters store the same values, so the statement is split into chunks that stay below
     /// SQLite's parameter limit (the rows and their rowids come out the same).
     pub fn insert_all(&self, table: &str, columns: &[&str], rows: &[Vec<Value>]) -> Result<()> {
+        self.invalidate_caches();
         let per_chunk = (32_000 / columns.len().max(1)).max(1);
-        for chunk in rows.chunks(per_chunk) {
-            self.insert_multiple(table, columns, chunk)?;
-        }
-        Ok(())
+        self.guarded(|| {
+            for chunk in rows.chunks(per_chunk) {
+                self.insert_multiple(table, columns, chunk)?;
+            }
+            Ok(())
+        })
     }
 
     /// `initPropertyTable` @0x1006F26A8 on a new file: the property row first (`dbVersion`
@@ -437,6 +611,7 @@ impl DevLibWriter {
     /// Device Library Plus conversion (trace phase 2): `drop table if exists` + `create table`
     /// per table in creation order, then `drop index if exists` + `create index` per index.
     fn recreate_all(&self) -> Result<()> {
+        self.invalidate_caches();
         for (name, ddl) in TABLES {
             self.conn
                 .execute_batch(&format!("drop table if exists {name}"))?;
@@ -528,13 +703,41 @@ impl DevLibWriter {
 
     // ---- property -------------------------------------------------------------------------
 
-    /// `update_property_num_content` @0x10070669C.
+    /// `update_property_num_content` @0x10070669C: `numberOfContents = (select count(*) from
+    /// content)`. The count is kept in memory once it has been read (one scan, then +1 per
+    /// [`DevLibWriter::add_track`]); the stored value is the same.
     pub fn update_number_of_contents(&self) -> Result<()> {
-        self.conn.execute(
-            "update property set numberOfContents = (select count(*) from content)",
-            [],
-        )?;
-        Ok(())
+        self.guarded(|| {
+            let count = self.content_count()?;
+            self.conn
+                .prepare_cached("update property set numberOfContents = ?1")?
+                .execute([count])?;
+            Ok(())
+        })
+    }
+
+    /// `select count(*) from content`, read once and then kept in step.
+    fn content_count(&self) -> Result<i64> {
+        self.check_transaction();
+        if let Some(count) = self.caches.borrow().content_count {
+            return Ok(count);
+        }
+        let count: i64 = self
+            .conn
+            .prepare_cached("select count(*) from content")?
+            .query_row([], |r| r.get(0))?;
+        self.caches.borrow_mut().content_count = Some(count);
+        Ok(count)
+    }
+
+    /// [`Caches::content_standard`], read once.
+    fn content_is_standard(&self) -> Result<bool> {
+        if let Some(standard) = self.caches.borrow().content_standard {
+            return Ok(standard);
+        }
+        let standard = self.standard_table("content")?;
+        self.caches.borrow_mut().content_standard = Some(standard);
+        Ok(standard)
     }
 
     /// `updateDeviceName` @0x1006F7D3C.
@@ -562,31 +765,80 @@ impl DevLibWriter {
 
     // ---- IDs ------------------------------------------------------------------------------
 
-    /// `get_next_id` @0x100703FF4: `max(<id>) + 1`, 1 for an empty table.
+    /// `get_next_id` @0x100703FF4: `max(<id>) + 1`, 1 for an empty table. On the integer
+    /// primary key this is a single b-tree lookup, so it is not cached.
     fn next_id(&self, table: &str, id_column: &str) -> Result<i64> {
-        let max: Option<i64> = self.conn.query_row(
-            &format!("select max({id_column}) as maxId from {table}"),
-            [],
-            |r| r.get(0),
-        )?;
+        let max: Option<i64> = self
+            .conn
+            .prepare_cached(&format!("select max({id_column}) as maxId from {table}"))?
+            .query_row([], |r| r.get(0))?;
         Ok(max.unwrap_or(0) + 1)
     }
 
     // ---- lookups --------------------------------------------------------------------------
 
+    /// Whether `table` has exactly the DDL of [`TABLES`] (as `sqlite_master` stores it), so
+    /// its column affinities and collations are the ones the caches assume.
+    fn standard_table(&self, table: &str) -> Result<bool> {
+        let Some((_, ddl)) = TABLES.iter().find(|(name, _)| *name == table) else {
+            return Ok(false);
+        };
+        let sql: Option<Option<String>> = self
+            .conn
+            .prepare_cached("select sql from sqlite_master where type = 'table' and name = ?1")?
+            .query_row([table], |r| r.get(0))
+            .optional()?;
+        Ok(sql.flatten().as_deref()
+            == Some(ddl.replacen("create table", "CREATE TABLE", 1).as_str()))
+    }
+
+    /// Loads the name map of `lookup` unless it is loaded or off.
+    fn ensure_lookup(&self, lookup: Lookup) -> Result<()> {
+        self.check_transaction();
+        let i = lookup.index();
+        if !matches!(self.caches.borrow().lookups[i], Slot::Unloaded) {
+            return Ok(());
+        }
+        let table = lookup.table();
+        let slot = if self.standard_table(table)? {
+            // Rowid order = the order of the full scan `where name = ?` runs, so the first
+            // row kept per name is the one the select returns. NULL and BLOB names never
+            // equal a text value.
+            let mut map: HashMap<Vec<u8>, i64> = HashMap::new();
+            let mut stmt = self.conn.prepare(&format!(
+                "select {table}_id, name from {table} order by rowid"
+            ))?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let id: i64 = r.get(0)?;
+                if let ValueRef::Text(name) = r.get_ref(1)? {
+                    map.entry(name.to_vec()).or_insert(id);
+                }
+            }
+            Slot::Loaded(map)
+        } else {
+            Slot::Off
+        };
+        self.caches.borrow_mut().lookups[i] = slot;
+        Ok(())
+    }
+
     /// `get{Artist,Genre,Label,Key}ID`: exact (case-sensitive) name match, 0 when not found.
     pub fn lookup_id(&self, lookup: Lookup, name: &str) -> Result<u32> {
-        let table = lookup.table();
-        Ok(self
-            .conn
-            .query_row(
-                &format!("select {table}_id from {table} where name = ?1"),
-                [name],
-                |r| r.get::<_, Option<i64>>(0),
-            )
-            .optional()?
-            .flatten()
-            .unwrap_or(0) as u32)
+        self.guarded(|| {
+            self.ensure_lookup(lookup)?;
+            if let Slot::Loaded(map) = &self.caches.borrow().lookups[lookup.index()] {
+                return Ok(map.get(name.as_bytes()).map_or(0, |&id| id as u32));
+            }
+            let table = lookup.table();
+            Ok(self
+                .conn
+                .prepare_cached(&format!("select {table}_id from {table} where name = ?1"))?
+                .query_row([name], |r| r.get::<_, Option<i64>>(0))
+                .optional()?
+                .flatten()
+                .unwrap_or(0) as u32)
+        })
     }
 
     /// `getAndAdd{Artist,Genre,Label,Key}ID` (@0x10070421C, @0x100703C3C, …): the existing ID
@@ -598,17 +850,53 @@ impl DevLibWriter {
         if name.is_empty() {
             return Ok(0);
         }
-        let found = self.lookup_id(lookup, name)?;
-        if found != 0 {
-            return Ok(found);
+        self.guarded(|| {
+            let found = self.lookup_id(lookup, name)?;
+            if found != 0 {
+                return Ok(found);
+            }
+            let table = lookup.table();
+            let id = self.next_id(table, &format!("{table}_id"))?;
+            self.conn
+                .prepare_cached(&format!(
+                    "insert into {table}({table}_id, name) values (?1, ?2)"
+                ))?
+                .execute(params![id, name])?;
+            // max + 1 is above every ID, so a name already in the map keeps its lower one.
+            if let Slot::Loaded(map) = &mut self.caches.borrow_mut().lookups[lookup.index()] {
+                map.entry(name.as_bytes().to_vec()).or_insert(id);
+            }
+            Ok(id as u32)
+        })
+    }
+
+    /// Loads the album map unless it is loaded or off.
+    fn ensure_albums(&self) -> Result<()> {
+        self.check_transaction();
+        if !matches!(self.caches.borrow().albums, Slot::Unloaded) {
+            return Ok(());
         }
-        let table = lookup.table();
-        let id = self.next_id(table, &format!("{table}_id"))?;
-        self.conn.execute(
-            &format!("insert into {table}({table}_id, name) values (?1, ?2)"),
-            params![id, name],
-        )?;
-        Ok(id as u32)
+        let slot = if self.standard_table("album")? {
+            let mut map: HashMap<Vec<u8>, Vec<AlbumRow>> = HashMap::new();
+            let mut stmt = self.conn.prepare(
+                "select album_id, name, artist_id, isComplation from album order by rowid",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                if let ValueRef::Text(name) = r.get_ref(1)? {
+                    map.entry(name.to_vec()).or_default().push(AlbumRow {
+                        id: r.get(0)?,
+                        artist_id: Num::from_ref(r.get_ref(2)?),
+                        compilation: Num::from_ref(r.get_ref(3)?),
+                    });
+                }
+            }
+            Slot::Loaded(map)
+        } else {
+            Slot::Off
+        };
+        self.caches.borrow_mut().albums = slot;
+        Ok(())
     }
 
     /// `getAndAddAlbumID(name, compilation, albumArtist, …)` @0x100704388:
@@ -623,37 +911,76 @@ impl DevLibWriter {
         if name.is_empty() {
             return Ok(0);
         }
-        let artist_id = self.get_or_add(Lookup::Artist, album_artist)?;
-        let mut sql = String::from("select album_id from album where name = ?1");
-        let mut args: Vec<Value> = vec![name.to_string().into()];
-        if artist_id != 0 {
-            sql.push_str(" and artist_id = ?2");
-            args.push(artist_id.into());
-        }
-        if compilation != 0 {
-            sql.push_str(&format!(" and isComplation = ?{}", args.len() + 1));
-            args.push(i64::from(compilation).into());
-        }
-        let found: Option<Option<i64>> = self
-            .conn
-            .query_row(&sql, params_from_iter(args), |r| r.get(0))
-            .optional()?;
-        if let Some(Some(id)) = found.filter(|id| id.unwrap_or(0) != 0) {
-            return Ok(id as u32);
-        }
-        let id = self.next_id("album", "album_id")?;
-        if artist_id != 0 {
-            self.conn.execute(
-                "insert into album(album_id, name, artist_id, isComplation) values (?1, ?2, ?3, ?4)",
-                params![id, name, artist_id, compilation],
-            )?;
-        } else {
-            self.conn.execute(
-                "insert into album(album_id, name, isComplation) values (?1, ?2, ?3)",
-                params![id, name, compilation],
-            )?;
-        }
-        Ok(id as u32)
+        self.guarded(|| {
+            let artist_id = self.get_or_add(Lookup::Artist, album_artist)?;
+            self.ensure_albums()?;
+            let cached: Option<Option<i64>> = match &self.caches.borrow().albums {
+                Slot::Loaded(map) => Some(
+                    map.get(name.as_bytes())
+                        .and_then(|rows| {
+                            rows.iter().find(|a| {
+                                (artist_id == 0 || a.artist_id.equals(i64::from(artist_id)))
+                                    && (compilation == 0
+                                        || a.compilation.equals(i64::from(compilation)))
+                            })
+                        })
+                        .map(|a| a.id),
+                ),
+                _ => None,
+            };
+            let found: Option<i64> = match cached {
+                Some(found) => found,
+                None => {
+                    let mut sql = String::from("select album_id from album where name = ?1");
+                    let mut args: Vec<Value> = vec![name.to_string().into()];
+                    if artist_id != 0 {
+                        sql.push_str(" and artist_id = ?2");
+                        args.push(artist_id.into());
+                    }
+                    if compilation != 0 {
+                        sql.push_str(&format!(" and isComplation = ?{}", args.len() + 1));
+                        args.push(i64::from(compilation).into());
+                    }
+                    self.conn
+                        .prepare_cached(&sql)?
+                        .query_row(params_from_iter(args), |r| r.get::<_, Option<i64>>(0))
+                        .optional()?
+                        .flatten()
+                }
+            };
+            if let Some(id) = found.filter(|&id| id != 0) {
+                return Ok(id as u32);
+            }
+            let id = self.next_id("album", "album_id")?;
+            if artist_id != 0 {
+                self.conn
+                    .prepare_cached(
+                        "insert into album(album_id, name, artist_id, isComplation) \
+                         values (?1, ?2, ?3, ?4)",
+                    )?
+                    .execute(params![id, name, artist_id, compilation])?;
+            } else {
+                self.conn
+                    .prepare_cached(
+                        "insert into album(album_id, name, isComplation) values (?1, ?2, ?3)",
+                    )?
+                    .execute(params![id, name, compilation])?;
+            }
+            if let Slot::Loaded(map) = &mut self.caches.borrow_mut().albums {
+                map.entry(name.as_bytes().to_vec())
+                    .or_default()
+                    .push(AlbumRow {
+                        id,
+                        artist_id: if artist_id != 0 {
+                            Num::Int(i64::from(artist_id))
+                        } else {
+                            Num::Other
+                        },
+                        compilation: Num::Int(i64::from(compilation)),
+                    });
+            }
+            Ok(id as u32)
+        })
     }
 
     // ---- content --------------------------------------------------------------------------
@@ -669,97 +996,118 @@ impl DevLibWriter {
     ///    `titleForSearch` and the three `*UpdateCount` markers are never written;
     /// 4. `numberOfContents` is refreshed.
     pub fn add_track(&self, t: &NewTrack) -> Result<u32> {
-        let artist = self.get_or_add(Lookup::Artist, &t.artist)?;
-        let genre = self.get_or_add(Lookup::Genre, &t.genre)?;
-        let album = self.get_or_add_album(&t.album, t.compilation, &t.album_artist)?;
-        let remixer = self.get_or_add(Lookup::Artist, &t.remixer)?;
-        let label = self.get_or_add(Lookup::Label, &t.label)?;
-        let original_artist = self.get_or_add(Lookup::Artist, &t.original_artist)?;
-        let key = self.get_or_add(Lookup::Key, &t.key)?;
-        let composer = self.get_or_add(Lookup::Artist, &t.composer)?;
+        self.guarded(|| {
+            let artist = self.get_or_add(Lookup::Artist, &t.artist)?;
+            let genre = self.get_or_add(Lookup::Genre, &t.genre)?;
+            let album = self.get_or_add_album(&t.album, t.compilation, &t.album_artist)?;
+            let remixer = self.get_or_add(Lookup::Artist, &t.remixer)?;
+            let label = self.get_or_add(Lookup::Label, &t.label)?;
+            let original_artist = self.get_or_add(Lookup::Artist, &t.original_artist)?;
+            let key = self.get_or_add(Lookup::Key, &t.key)?;
+            let composer = self.get_or_add(Lookup::Artist, &t.composer)?;
 
-        let content_id = self.next_id("content", "content_id")?;
-        let file_name = if t.file_name.is_empty() {
-            t.path.rsplit('/').next().unwrap_or_default().to_string()
-        } else {
-            t.file_name.clone()
-        };
-        let date_added = if t.date_added.is_empty() {
-            self.today.clone()
-        } else {
-            t.date_added.clone()
-        };
-        let lyricist = self.get_or_add(Lookup::Artist, &t.lyricist)?;
+            let content_id = self.next_id("content", "content_id")?;
+            let file_name = if t.file_name.is_empty() {
+                t.path.rsplit('/').next().unwrap_or_default()
+            } else {
+                t.file_name.as_str()
+            };
+            let date_added = if t.date_added.is_empty() {
+                self.today.as_str()
+            } else {
+                t.date_added.as_str()
+            };
+            let lyricist = self.get_or_add(Lookup::Artist, &t.lyricist)?;
 
-        // Column order = the NamedValueSet insertion order in insertTrack (SQL trace).
-        let mut cols: Vec<(&'static str, Value)> = vec![
-            ("content_id", content_id.into()),
-            ("path", t.path.clone().into()),
-            ("fileName", file_name.into()),
-            ("title", t.title.clone().into()),
-        ];
-        // Lookup IDs and image_id are only put into the row when non-zero.
-        fn opt(cols: &mut Vec<(&'static str, Value)>, name: &'static str, id: u32) {
-            if id != 0 {
-                cols.push((name, id.into()));
+            // Widths as RowDataTrack stores them.
+            let bpm = t.bpm_x100 as i32;
+            let length = i64::from(t.length as i16);
+            let track_no = t.track_no as i32;
+            let bitrate = t.bitrate as i32;
+            let bit_depth = i64::from(t.bit_depth as i16);
+            let file_type = i64::from(t.file_type as i8);
+            let rating = i64::from(t.rating as i8);
+            let release_year = i64::from(t.release_year as i16);
+            let color_id = i64::from(t.color_id as i8);
+            let play_count = i64::from(t.play_count as i16);
+            let file_size = t.file_size as u32;
+            let disc_no = i64::from(t.disc_no as i16);
+            let analysed_bits = i64::from(t.analysed_bits as i8);
+            let has_modified = i64::from(t.has_modified);
+            let hot_cue_auto_load = i64::from(t.hot_cue_auto_load);
+            let kuvo_deliver = i64::from(t.kuvo_deliver);
+            // (column, value, written by rekordbox). Column order = the NamedValueSet insertion
+            // order in insertTrack (SQL trace); lookup IDs and image_id are only put into the
+            // row when non-zero.
+            let row: [(&str, &dyn ToSql, bool); 42] = [
+                ("content_id", &content_id, true),
+                ("path", &t.path, true),
+                ("fileName", &file_name, true),
+                ("title", &t.title, true),
+                ("artist_id_artist", &non_zero(artist), artist != 0),
+                ("album_id", &non_zero(album), album != 0),
+                ("genre_id", &non_zero(genre), genre != 0),
+                ("bpmx100", &bpm, true),
+                ("length", &length, true),
+                ("trackNo", &track_no, true),
+                ("bitrate", &bitrate, true),
+                ("bitDepth", &bit_depth, true),
+                ("djComment", &t.comment, true),
+                ("fileType", &file_type, true),
+                ("rating", &rating, true),
+                ("releaseYear", &release_year, true),
+                ("artist_id_remixer", &non_zero(remixer), remixer != 0),
+                ("label_id", &non_zero(label), label != 0),
+                (
+                    "artist_id_originalArtist",
+                    &non_zero(original_artist),
+                    original_artist != 0,
+                ),
+                ("key_id", &key, true),
+                ("dateCreated", &t.date_created, true),
+                ("color_id", &color_id, true),
+                ("djPlayCount", &play_count, true),
+                ("image_id", &non_zero(t.image_id), t.image_id != 0),
+                ("masterDbId", &t.master_db_id, true),
+                ("masterContentId", &t.master_content_id, true),
+                ("analysisDataFilePath", &t.analysis_path, true),
+                ("fileSize", &file_size, true),
+                ("discNo", &disc_no, true),
+                ("artist_id_composer", &non_zero(composer), composer != 0),
+                ("subtitle", &t.subtitle, true),
+                ("samplingRate", &t.sample_rate, true),
+                ("analysedBits", &analysed_bits, true),
+                ("releaseDate", &t.release_date, true),
+                ("dateAdded", &date_added, true),
+                ("contentLink", &t.content_link, true),
+                ("hasModified", &has_modified, true),
+                ("isHotCueAutoLoadOn", &hot_cue_auto_load, true),
+                ("isKuvoDeliverStatusOn", &kuvo_deliver, true),
+                ("kuvoDeliveryComment", &t.kuvo_comment, true),
+                ("artist_id_lyricist", &lyricist, true),
+                ("isrc", &t.isrc, true),
+            ];
+            if self.content_is_standard()? {
+                // Every column named, NULL bound where rekordbox leaves one out: the same row
+                // (no column of the standard DDL has a default) with one statement text for
+                // every track, so it is prepared once.
+                static SQL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+                let sql = SQL.get_or_init(|| insert_sql("content", row.iter().map(|c| c.0)));
+                let values: Vec<&dyn ToSql> = row.iter().map(|c| c.1).collect();
+                self.conn.prepare_cached(sql)?.execute(&values[..])?;
+            } else {
+                let kept: Vec<_> = row.iter().filter(|c| c.2).collect();
+                let values: Vec<&dyn ToSql> = kept.iter().map(|c| c.1).collect();
+                self.conn
+                    .prepare_cached(&insert_sql("content", kept.iter().map(|c| c.0)))?
+                    .execute(&values[..])?;
             }
-        }
-        opt(&mut cols, "artist_id_artist", artist);
-        opt(&mut cols, "album_id", album);
-        opt(&mut cols, "genre_id", genre);
-        cols.extend([
-            ("bpmx100", (t.bpm_x100 as i32).into()),
-            ("length", i64::from(t.length as i16).into()),
-            ("trackNo", (t.track_no as i32).into()),
-            ("bitrate", (t.bitrate as i32).into()),
-            ("bitDepth", i64::from(t.bit_depth as i16).into()),
-            ("djComment", t.comment.clone().into()),
-            ("fileType", i64::from(t.file_type as i8).into()),
-            ("rating", i64::from(t.rating as i8).into()),
-            ("releaseYear", i64::from(t.release_year as i16).into()),
-        ]);
-        opt(&mut cols, "artist_id_remixer", remixer);
-        opt(&mut cols, "label_id", label);
-        opt(&mut cols, "artist_id_originalArtist", original_artist);
-        cols.extend([
-            ("key_id", key.into()),
-            ("dateCreated", t.date_created.clone().into()),
-            ("color_id", i64::from(t.color_id as i8).into()),
-            ("djPlayCount", i64::from(t.play_count as i16).into()),
-        ]);
-        opt(&mut cols, "image_id", t.image_id);
-        cols.extend([
-            ("masterDbId", t.master_db_id.into()),
-            ("masterContentId", t.master_content_id.into()),
-            ("analysisDataFilePath", t.analysis_path.clone().into()),
-            ("fileSize", (t.file_size as u32).into()),
-            ("discNo", i64::from(t.disc_no as i16).into()),
-        ]);
-        opt(&mut cols, "artist_id_composer", composer);
-        cols.extend([
-            ("subtitle", t.subtitle.clone().into()),
-            ("samplingRate", t.sample_rate.into()),
-            ("analysedBits", i64::from(t.analysed_bits as i8).into()),
-            ("releaseDate", t.release_date.clone().into()),
-            ("dateAdded", date_added.into()),
-            ("contentLink", t.content_link.into()),
-            ("hasModified", i64::from(t.has_modified).into()),
-            ("isHotCueAutoLoadOn", i64::from(t.hot_cue_auto_load).into()),
-            ("isKuvoDeliverStatusOn", i64::from(t.kuvo_deliver).into()),
-            ("kuvoDeliveryComment", t.kuvo_comment.clone().into()),
-            ("artist_id_lyricist", lyricist.into()),
-            ("isrc", t.isrc.clone().into()),
-        ]);
-        let names: Vec<&str> = cols.iter().map(|(n, _)| *n).collect();
-        let sql = format!(
-            "insert into content({}) values ({})",
-            names.join(", "),
-            vec!["?"; names.len()].join(", ")
-        );
-        self.conn
-            .execute(&sql, params_from_iter(cols.into_iter().map(|(_, v)| v)))?;
-        self.update_number_of_contents()?;
-        Ok(content_id as u32)
+            if let Some(count) = &mut self.caches.borrow_mut().content_count {
+                *count += 1;
+            }
+            self.update_number_of_contents()?;
+            Ok(content_id as u32)
+        })
     }
 
     /// Content row of a track already on the device, matched like
@@ -769,7 +1117,7 @@ impl DevLibWriter {
         master_db_id: u32,
         master_content_id: u32,
     ) -> Result<Vec<u32>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "select content_id from content where masterDbId = ?1 and masterContentId = ?2",
         )?;
         let ids = stmt
@@ -785,7 +1133,7 @@ impl DevLibWriter {
     /// type, file size and sample rate (`RowDataTrack::isSameTrackForDuplicateId`, compared at
     /// the widths `insertTrack` stores). A re-encoded file therefore counts as a new track.
     pub fn find_exported_track(&self, t: &NewTrack) -> Result<Option<u32>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "select content_id, length, bitrate, bitDepth, fileType, fileSize, samplingRate \
              from content where masterDbId = ?1 and masterContentId = ?2 order by content_id",
         )?;
@@ -819,30 +1167,30 @@ impl DevLibWriter {
             Value::Real(r) => r.to_string(),
             Value::Text(t) => t,
         };
-        Ok(self.conn.query_row(
-            "select informationUpdateCount, analysisDataUpdateCount, cueUpdateCount \
-             from content where content_id = ?1",
-            [content_id],
-            |r| Ok((as_text(r.get(0)?), as_text(r.get(1)?), as_text(r.get(2)?))),
-        )?)
+        Ok(self
+            .conn
+            .prepare_cached(
+                "select informationUpdateCount, analysisDataUpdateCount, cueUpdateCount \
+                 from content where content_id = ?1",
+            )?
+            .query_row([content_id], |r| {
+                Ok((as_text(r.get(0)?), as_text(r.get(1)?), as_text(r.get(2)?)))
+            })?)
     }
 
     /// `contentLink` of a device row (`get_content_link` @0x1007251EC); NULL reads as 0.
     pub fn content_link(&self, content_id: u32) -> Result<u32> {
         Ok(self
             .conn
-            .query_row(
-                "select contentLink from content where content_id = ?1",
-                [content_id],
-                |r| r.get::<_, Option<i64>>(0),
-            )?
+            .prepare_cached("select contentLink from content where content_id = ?1")?
+            .query_row([content_id], |r| r.get::<_, Option<i64>>(0))?
             .unwrap_or(0) as u32)
     }
 
     /// `setTrackUpdated` @0x1006F1FEC: stores the info change marker (`informationUpdateCount`,
     /// bound as text, so a number gets integer affinity and "" stays text).
     pub fn set_track_updated(&self, content_id: u32, info_marker: &str) -> Result<()> {
-        self.conn.execute(
+        self.exec_cached(
             "update content set informationUpdateCount = ?1 where content_id = ?2",
             params![info_marker, content_id],
         )?;
@@ -858,7 +1206,7 @@ impl DevLibWriter {
         analysis_marker: &str,
         cue_marker: &str,
     ) -> Result<()> {
-        self.conn.execute(
+        self.exec_cached(
             "update content set analysedBits = ?1, cueUpdateCount = ?2, \
              analysisDataUpdateCount = ?3 where content_id = ?4",
             params![analysed, cue_marker, analysis_marker, content_id],
@@ -868,7 +1216,7 @@ impl DevLibWriter {
 
     /// `modifyContentLink` @0x10071EAAC.
     pub fn set_content_link(&self, content_id: u32, content_link: u32) -> Result<()> {
-        self.conn.execute(
+        self.exec_cached(
             "update content set contentLink = ?1 where content_id = ?2",
             params![content_link, content_id],
         )?;
@@ -877,7 +1225,7 @@ impl DevLibWriter {
 
     /// `setAnalysisDataPath` @0x100722A24.
     pub fn set_analysis_path(&self, content_id: u32, path: &str) -> Result<()> {
-        self.conn.execute(
+        self.exec_cached(
             "update content set analysisDataFilePath = ?1 where content_id = ?2",
             params![path, content_id],
         )?;
@@ -893,7 +1241,7 @@ impl DevLibWriter {
         column: ContentColumn,
         value: Value,
     ) -> Result<()> {
-        self.conn.execute(
+        self.exec_cached(
             &format!(
                 "update content set {} = ?1 where content_id = ?2",
                 column.name()
@@ -909,15 +1257,17 @@ impl DevLibWriter {
     /// empty name), then delete lookup rows no track uses any more (`delete_unused_record`
     /// @0x100719890).
     pub fn modify_lookup(&self, content_id: u32, column: LookupColumn, name: &str) -> Result<()> {
-        let id = self.get_or_add(column.lookup(), name)?;
-        self.conn.execute(
-            &format!(
-                "update content set {} = ?1 where content_id = ?2",
-                column.name()
-            ),
-            params![id, content_id],
-        )?;
-        self.delete_unused(column.lookup())
+        self.guarded(|| {
+            let id = self.get_or_add(column.lookup(), name)?;
+            self.exec_cached(
+                &format!(
+                    "update content set {} = ?1 where content_id = ?2",
+                    column.name()
+                ),
+                params![id, content_id],
+            )?;
+            self.delete_unused(column.lookup())
+        })
     }
 
     /// `delete_unused_record` @0x100719890 for one lookup table: rows that no `content`
@@ -942,7 +1292,10 @@ impl DevLibWriter {
                 "delete from key where key_id not in (select key_id from content where key_id > 0)"
             }
         };
-        self.conn.execute(sql, [])?;
+        let deleted = self.guarded(|| self.exec_cached(sql, []))?;
+        if deleted > 0 {
+            self.caches.borrow_mut().lookups[lookup.index()] = Slot::Unloaded;
+        }
         Ok(())
     }
 
@@ -955,7 +1308,7 @@ impl DevLibWriter {
     pub fn add_image(&self, owner: ImageOwner, hidden_pioneer: bool) -> Result<(u32, String)> {
         let id = self.next_id("image", "image_id")? as u32;
         let path = device_image_path(id, hidden_pioneer);
-        self.conn.execute(
+        self.exec_cached(
             "insert into image(image_id, path) values (?1, ?2)",
             params![id, path],
         )?;
@@ -964,7 +1317,7 @@ impl DevLibWriter {
             ImageOwner::Playlist(id) => ("playlist", id),
             ImageOwner::HotCueBankList(id) => ("hotCueBankList", id),
         };
-        self.conn.execute(
+        self.exec_cached(
             &format!("update {table} set image_id = ?1 where {table}_id = ?2"),
             params![id, owner_id],
         )?;
@@ -1114,42 +1467,62 @@ impl DevLibWriter {
     }
 
     /// Appends a track to a playlist like the export (`add_track_to_device_playlist`): entry
-    /// `sequenceNo = count(entries) + 1` (1-based).
+    /// `sequenceNo = count(entries) + 1` (1-based). The count (`count(content_id)` of the
+    /// list's entries) is read once per list and then kept in memory.
     pub fn append_playlist_entry(&self, playlist_id: u32, content_id: u32) -> Result<()> {
-        let count: i64 = self.conn.query_row(
-            "select count(content_id) as numSongs from playlist_content where playlist_id = ?1",
-            [playlist_id],
-            |r| r.get(0),
-        )?;
-        self.conn.execute(
-            "insert into playlist_content(playlist_id, content_id, sequenceNo) values (?1, ?2, ?3)",
-            params![playlist_id, content_id, count + 1],
-        )?;
-        Ok(())
+        self.check_transaction();
+        self.guarded(|| {
+            let cached = self.caches.borrow().entry_counts.get(&playlist_id).copied();
+            let count = match cached {
+                Some(count) => count,
+                None => self
+                    .conn
+                    .prepare_cached(
+                        "select count(content_id) as numSongs from playlist_content \
+                         where playlist_id = ?1",
+                    )?
+                    .query_row([playlist_id], |r| r.get::<_, i64>(0))?,
+            };
+            self.exec_cached(
+                "insert into playlist_content(playlist_id, content_id, sequenceNo) values (?1, ?2, ?3)",
+                params![playlist_id, content_id, count + 1],
+            )?;
+            // content_id is never NULL, so the new entry counts.
+            self.caches
+                .borrow_mut()
+                .entry_counts
+                .insert(playlist_id, count + 1);
+            Ok(())
+        })
     }
 
     /// `deleteAllTracksFromPlaylist` @0x1007089BC (a changed list is emptied before re-export).
     pub fn clear_playlist(&self, playlist_id: u32) -> Result<()> {
-        self.conn.execute(
-            "delete from playlist_content where playlist_id = ?1",
-            [playlist_id],
-        )?;
-        Ok(())
+        self.caches.borrow_mut().entry_counts.remove(&playlist_id);
+        self.guarded(|| {
+            self.exec_cached(
+                "delete from playlist_content where playlist_id = ?1",
+                [playlist_id],
+            )?;
+            Ok(())
+        })
     }
 
     /// Runs `f` in a transaction unless the caller already opened one (rekordbox's
-    /// `transactionStart(2)` … `transactionFinish`).
+    /// `transactionStart(2)` … `transactionFinish`). Any error drops the caches.
     fn in_transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        let own = self.conn.is_autocommit();
-        if own {
-            self.conn.execute_batch("BEGIN")?;
-        }
-        let result = f();
-        if own {
-            self.conn
-                .execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
-        }
-        result
+        self.guarded(|| {
+            let own = self.conn.is_autocommit();
+            if own {
+                self.conn.execute_batch("BEGIN")?;
+            }
+            let result = f();
+            if own {
+                self.conn
+                    .execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+            }
+            result
+        })
     }
 
     /// `deleteList` @0x100708C04 for a playlist or folder (`docs/re/export.md` § 4.3): the list
@@ -1159,6 +1532,10 @@ impl DevLibWriter {
     /// (`renumber_as_delete_children` @0x10072684C → `renumber_sequence` @0x10070F3B8). Returns
     /// `(deleted list IDs: descendants depth first, the list itself last; content IDs)`.
     pub fn delete_playlist(&self, playlist_id: u32) -> Result<(Vec<u32>, Vec<u32>)> {
+        self.guarded(|| self.delete_playlist_inner(playlist_id))
+    }
+
+    fn delete_playlist_inner(&self, playlist_id: u32) -> Result<(Vec<u32>, Vec<u32>)> {
         let parent: Option<Option<i64>> = self
             .conn
             .query_row(
@@ -1181,7 +1558,7 @@ impl DevLibWriter {
         )?;
         let mut contents = Vec::new();
         for l in &lists {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = self.conn.prepare_cached(
                 "select content_id from playlist_content where playlist_id = ?1 order by sequenceNo",
             )?;
             for c in stmt.query_map([l], |r| r.get::<_, Option<i64>>(0))? {
@@ -1192,13 +1569,14 @@ impl DevLibWriter {
             &format!("delete from playlist_content where playlist_id in ({ids})"),
             [],
         )?;
+        self.caches.borrow_mut().entry_counts.clear();
         self.renumber_children(parent)?;
         Ok((lists, contents))
     }
 
     fn collect_child_lists(&self, parent: u32, out: &mut Vec<u32>) -> Result<()> {
         let kids: Vec<u32> = {
-            let mut stmt = self.conn.prepare(
+            let mut stmt = self.conn.prepare_cached(
                 "select playlist_id from playlist where playlist_id_parent = ?1 and playlist_id != ?1 \
                  order by sequenceNo, playlist_id",
             )?;
@@ -1227,7 +1605,7 @@ impl DevLibWriter {
                     .collect::<rusqlite::Result<_>>()?
             };
             for (i, id) in kids.iter().enumerate() {
-                self.conn.execute(
+                self.exec_cached(
                     "update playlist set sequenceNo = ?1 where playlist_id = ?2",
                     params![i as i64, id],
                 )?;
@@ -1257,6 +1635,7 @@ impl DevLibWriter {
             };
             self.conn
                 .execute(&format!("delete from content where content_id in ({ids})"), [])?;
+            self.caches.borrow_mut().content_count = None;
             self.update_number_of_contents()?;
             let cues: Vec<u32> = {
                 let mut stmt = self.conn.prepare(&format!(
@@ -1281,6 +1660,7 @@ impl DevLibWriter {
                     [],
                 )?;
             }
+            self.caches.borrow_mut().entry_counts.clear();
             if !images.is_empty() {
                 self.conn.execute(
                     &format!("delete from image where image_id in ({})", join_ids(&images)),
@@ -1304,10 +1684,15 @@ impl DevLibWriter {
 
     /// `delete_unused_record` @0x100719890 for albums: rows no `content.album_id` > 0 references.
     pub fn delete_unused_albums(&self) -> Result<()> {
-        self.conn.execute(
-            "delete from album where album_id not in (select album_id from content where album_id > 0)",
-            [],
-        )?;
+        let deleted = self.guarded(|| {
+            self.exec_cached(
+                "delete from album where album_id not in (select album_id from content where album_id > 0)",
+                [],
+            )
+        })?;
+        if deleted > 0 {
+            self.caches.borrow_mut().albums = Slot::Unloaded;
+        }
         Ok(())
     }
 
@@ -1407,7 +1792,7 @@ impl DevLibWriter {
             .optional()?;
         let first = last.map_or(1, |s| s.unwrap_or(0) + 1);
         for (i, content_id) in content_ids.iter().enumerate() {
-            self.conn.execute(
+            self.exec_cached(
                 "insert into history_content(history_id, content_id, sequenceNo) values (?1, ?2, ?3)",
                 params![history_id, content_id, first + i as i64],
             )?;
@@ -1423,7 +1808,7 @@ impl DevLibWriter {
     /// `active_loop: Some(_)` (`enableActiveLoop`).
     pub fn add_cue(&self, cue: &NewCue) -> Result<u32> {
         let id = self.next_id("cue", "cue_id")?;
-        self.conn.execute(
+        self.exec_cached(
             "insert into cue(cue_id, content_id, kind, inUsec, outUsec, in150FramePerSec, \
              out150FramePerSec, inMpegFrameNumber, outMpegFrameNumber, inMpegAbs, outMpegAbs) \
              values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -1441,7 +1826,7 @@ impl DevLibWriter {
                 cue.out_mpeg_abs,
             ],
         )?;
-        self.conn.execute(
+        self.exec_cached(
             "update cue set kind = ?1, colorTableIndex = ?2, cueComment = ?3, inUsec = ?4, \
              outUsec = ?5, in150FramePerSec = ?6, out150FramePerSec = ?7, \
              inMpegFrameNumber = ?8, outMpegFrameNumber = ?9, inMpegAbs = ?10, outMpegAbs = ?11, \
@@ -1473,7 +1858,7 @@ impl DevLibWriter {
             ],
         )?;
         if let Some(active) = cue.active_loop {
-            self.conn.execute(
+            self.exec_cached(
                 "update cue set isActiveLoop = ?1 where cue_id = ?2",
                 params![i64::from(active), id],
             )?;
@@ -1539,7 +1924,7 @@ impl DevLibWriter {
         }
         let result = (|| {
             let cue_id = self.add_cue(cue)?;
-            self.conn.execute(
+            self.exec_cached(
                 "insert into hotCueBankList_cue(hotCueBankList_id, cue_id, sequenceNo) \
                  values (?1, ?2, ?3)",
                 params![list_id, cue_id, seq],
@@ -1563,7 +1948,7 @@ impl DevLibWriter {
         content_id_2: u32,
         created_ms: i64,
     ) -> Result<()> {
-        self.conn.execute(
+        self.exec_cached(
             "insert into recommendedLike(content_id_1, content_id_2, createdDate) values (?1, ?2, ?3)",
             params![content_id_1, content_id_2, created_ms],
         )?;

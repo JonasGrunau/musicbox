@@ -186,70 +186,22 @@ impl DeviceState {
             filesystem,
             ..Default::default()
         };
-        let export_path = rb.join("export.pdb");
-        if export_path.is_file() {
-            let export_bytes = read(&export_path)?;
-            let export = ExportDb::read(&Pdb::parse(export_bytes.clone())?)?;
-            let ext_path = rb.join("exportExt.pdb");
-            let (ext_bytes, ext) = if ext_path.is_file() {
-                let b = read(&ext_path)?;
-                let e = ExtDb::read(&Pdb::parse(b.clone())?)?;
-                (Some(b), Some(e))
-            } else {
-                (None, None)
-            };
-            state.pdb = Some(PdbFiles {
-                export_bytes,
-                export,
-                ext_bytes,
-                ext,
-            });
-        }
-        let devlib_path = rb.join("exportLibrary.db");
-        if devlib_path.is_file() {
-            for side in ["-wal", "-shm"] {
-                let p = PathBuf::from(format!("{}{side}", devlib_path.display()));
-                if p.exists() {
-                    return Err(Error::Device(format!(
-                        "{} exists: exportLibrary.db was not closed cleanly",
-                        p.display()
-                    )));
-                }
-            }
-            state.devlib = Some(load_devlib(&devlib_path)?);
-        }
-        walk_files(&root.join("Contents"), "/Contents", &mut |dev, _| {
-            state.contents.insert(path_key(dev));
-        })?;
         let art_prefix = format!("/{}/Artwork", pioneer_dir(hidden));
-        walk_files(&pioneer.join("Artwork"), &art_prefix, &mut |dev, _| {
-            state.artwork.insert(path_key(dev));
-        })?;
         let anlz_prefix = format!("/{}/USBANLZ", pioneer_dir(hidden));
-        let mut anlz: HashMap<String, Vec<AnlzEntry>> = HashMap::new();
-        walk_files(
-            &pioneer.join("USBANLZ"),
-            &anlz_prefix,
-            &mut |dev, fs_path| {
-                let Some((folder, name)) = dev.rsplit_once('/') else {
-                    return;
-                };
-                let Some(number) = anlz_number(name) else {
-                    return;
-                };
-                let ppth = name
-                    .to_ascii_uppercase()
-                    .ends_with(".DAT")
-                    .then(|| read_ppth(fs_path))
-                    .flatten();
-                anlz.entry(path_key(folder)).or_default().push(AnlzEntry {
-                    number,
-                    file: dev.to_owned(),
-                    ppth,
-                });
-            },
-        )?;
-        state.anlz = anlz;
+        // The databases and the three folder walks are independent and run at the same time: on
+        // FSKit FAT every directory read and file open is a round trip to the file-system
+        // process, and concurrent requests overlap.
+        let (dbs, contents, artwork, anlz) = std::thread::scope(|s| {
+            let contents = s.spawn(|| file_keys(&root.join("Contents"), "/Contents"));
+            let artwork = s.spawn(|| file_keys(&pioneer.join("Artwork"), &art_prefix));
+            let anlz = s.spawn(|| load_anlz(&pioneer.join("USBANLZ"), &anlz_prefix));
+            let dbs = load_databases(&rb);
+            (dbs, join(contents), join(artwork), join(anlz))
+        });
+        (state.pdb, state.devlib) = dbs?;
+        state.contents = contents?;
+        state.artwork = artwork?;
+        state.anlz = anlz?;
         Ok(state)
     }
 
@@ -257,6 +209,133 @@ impl DeviceState {
     pub fn pioneer_path(&self) -> PathBuf {
         self.root.join(pioneer_dir(self.hidden))
     }
+}
+
+/// export.pdb, exportExt.pdb and exportLibrary.db from the `rekordbox` folder, when present.
+fn load_databases(rb: &Path) -> Result<(Option<PdbFiles>, Option<DevlibState>)> {
+    let (mut pdb, mut devlib) = (None, None);
+    let export_path = rb.join("export.pdb");
+    if export_path.is_file() {
+        let export_bytes = read(&export_path)?;
+        let export = ExportDb::read(&Pdb::parse(export_bytes.clone())?)?;
+        let ext_path = rb.join("exportExt.pdb");
+        let (ext_bytes, ext) = if ext_path.is_file() {
+            let b = read(&ext_path)?;
+            let e = ExtDb::read(&Pdb::parse(b.clone())?)?;
+            (Some(b), Some(e))
+        } else {
+            (None, None)
+        };
+        pdb = Some(PdbFiles {
+            export_bytes,
+            export,
+            ext_bytes,
+            ext,
+        });
+    }
+    let devlib_path = rb.join("exportLibrary.db");
+    if devlib_path.is_file() {
+        for side in ["-wal", "-shm"] {
+            let p = PathBuf::from(format!("{}{side}", devlib_path.display()));
+            if p.exists() {
+                return Err(Error::Device(format!(
+                    "{} exists: exportLibrary.db was not closed cleanly",
+                    p.display()
+                )));
+            }
+        }
+        devlib = Some(load_devlib(&devlib_path)?);
+    }
+    Ok((pdb, devlib))
+}
+
+fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+}
+
+/// [`path_key`]s of every file below `dir`.
+fn file_keys(dir: &Path, prefix: &str) -> Result<HashSet<String>> {
+    let mut keys = HashSet::new();
+    walk_files(dir, prefix, &mut |dev, _| {
+        keys.insert(path_key(dev));
+    })?;
+    Ok(keys)
+}
+
+/// Threads reading the `USBANLZ` folders.
+const LOAD_THREADS: usize = 8;
+
+/// The ANLZ files below `USBANLZ` (`dir`) by folder, with the PPTH of every `.DAT`: one file
+/// read per track, the slow part of loading a big stick. The `Pxxx` folders are shared out to
+/// [`LOAD_THREADS`] threads; the files of each folder keep their directory order.
+fn load_anlz(dir: &Path, prefix: &str) -> Result<HashMap<String, Vec<AnlzEntry>>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(Error::io(dir, e)),
+    };
+    let mut anlz: HashMap<String, Vec<AnlzEntry>> = HashMap::new();
+    let mut add = |dev: &str, fs_path: &Path| {
+        if let Some((folder, entry)) = anlz_entry(dev, fs_path) {
+            anlz.entry(folder).or_default().push(entry);
+        }
+    };
+    let mut folders = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::io(dir, e))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let ty = entry.file_type().map_err(|e| Error::io(&path, e))?;
+        let dev = format!("{prefix}/{name}");
+        if ty.is_dir() {
+            folders.push((path, dev));
+        } else if ty.is_file() {
+            add(&dev, &path);
+        }
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let found = std::thread::scope(|s| {
+        let threads: Vec<_> = (0..LOAD_THREADS.min(folders.len()))
+            .map(|_| {
+                s.spawn(|| {
+                    let mut found = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((path, dev)) = folders.get(i) else {
+                            return Ok(found);
+                        };
+                        walk_files(path, dev, &mut |dev, fs_path| {
+                            found.extend(anlz_entry(dev, fs_path));
+                        })?;
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().map(join).collect::<Result<Vec<_>>>()
+    })?;
+    for (folder, entry) in found.into_iter().flatten() {
+        anlz.entry(folder).or_default().push(entry);
+    }
+    Ok(anlz)
+}
+
+/// One file below `USBANLZ`: its folder's [`path_key`] and entry (`None`: not an ANLZ file).
+fn anlz_entry(dev: &str, fs_path: &Path) -> Option<(String, AnlzEntry)> {
+    let (folder, name) = dev.rsplit_once('/')?;
+    let number = anlz_number(name)?;
+    let ppth = name
+        .to_ascii_uppercase()
+        .ends_with(".DAT")
+        .then(|| read_ppth(fs_path))
+        .flatten();
+    Some((
+        path_key(folder),
+        AnlzEntry {
+            number,
+            file: dev.to_owned(),
+            ppth,
+        },
+    ))
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {

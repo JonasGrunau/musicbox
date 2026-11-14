@@ -16,7 +16,6 @@
 use crate::device::DeviceState;
 use crate::naming::{path_key, pioneer_dir};
 use crate::{Error, Result};
-use mb_devlib::DevLibWriter;
 use mb_pdb::writer::{Exporter, ExtEditor};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -487,30 +486,12 @@ pub fn execute_remove(plan: &RemovePlan, dev: &DeviceState) -> Result<RemoveRepo
     let mut report = RemoveReport::default();
 
     if !plan.devlib_lists.is_empty() || !plan.devlib_tracks.is_empty() {
-        let target = rb.join("exportLibrary.db");
-        let tmp = rb.join(".exportLibrary.db.musicbox");
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", tmp.display()));
-        }
-        std::fs::copy(&target, &tmp).map_err(|e| Error::io(&target, e))?;
-        let result = (|| -> Result<()> {
-            let w = DevLibWriter::open(&tmp)?;
+        crate::exec::edit_devlib(&rb, |w| {
             for id in &plan.devlib_lists {
                 w.delete_playlist(*id)?;
             }
-            w.remove_tracks(&plan.devlib_tracks)?;
-            w.close()?;
-            Ok(())
-        })();
-        if let Err(e) = result {
-            for suffix in ["", "-wal", "-shm", "-journal"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", tmp.display()));
-            }
-            return Err(e);
-        }
-        full_fsync(&tmp)?;
-        std::fs::rename(&tmp, &target).map_err(|e| Error::io(&target, e))?;
-        full_fsync(&target)?;
+            Ok(w.remove_tracks(&plan.devlib_tracks)?)
+        })?;
     }
 
     if let Some(files) = &dev.pdb
@@ -574,7 +555,8 @@ pub fn execute_remove(plan: &RemovePlan, dev: &DeviceState) -> Result<RemoveRepo
             }
         }
     }
-    crate::appledouble::clean_tree(&plan.root, &plan.root.join(pioneer_dir(plan.hidden)));
+    // Deleting a file deletes its companion; the databases and sync files are all in `rb`.
+    crate::appledouble::clean_dir(&plan.root, &rb);
     let _ = std::fs::File::open(&plan.root).and_then(|f| f.sync_all());
     Ok(report)
 }

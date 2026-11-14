@@ -5,24 +5,29 @@
 //! 1. `PIONEER/rekordbox/`, the "export in progress" markers (`sync.temp`,
 //!    `sync.devlibplus.temp`, § 4.5), `DeviceLibBackup/rbDevLibBaInfo_<DBID>.json`, the settings
 //!    files (§ 5).
-//! 2. Per track, in plan order: audio (bytes only: no extended attributes, so no AppleDouble
-//!    `._` files on FAT), stale ANLZ sets deleted, the USB ANLZ set, artwork. Each file is
-//!    `fsync`ed; a free-space check (≥ 1.5 × the file) precedes each copy.
-//! 3. One `F_FULLFSYNC`, then the databases: exportLibrary.db, export.pdb, exportExt.pdb, each
-//!    built next to its final name and renamed into place, each `F_FULLFSYNC`ed. Only the
-//!    tracks whose files were all written are in them.
-//! 4. The markers are deleted; the AppleDouble companions of everything written are removed
-//!    ([`crate::appledouble`]); the export log is written for tracks that were not exported.
+//! 2. Per track, in plan order: audio (bytes only: no extended attributes), stale ANLZ sets
+//!    deleted, the USB ANLZ set, artwork. A free-space check (≥ 1.5 × the file) precedes each
+//!    copy. The audio is one sequential stream; the ANLZ sets and artwork are written by worker
+//!    threads meanwhile, and a background flusher gets everything onto the medium in batches
+//!    (`run_tracks`). Existing files are replaced by renames once the new data is flushed.
+//! 3. One flush of the whole volume (drive cache included), then the databases:
+//!    exportLibrary.db (built in a local temp folder and copied over in one write), export.pdb,
+//!    exportExt.pdb, each renamed into place and `F_FULLFSYNC`ed. Only the tracks whose files
+//!    were all written are in them.
+//! 4. The markers are deleted; the AppleDouble companions of everything written are removed as
+//!    it is written ([`crate::appledouble::Cleaner`]); the export log is written for tracks that
+//!    were not exported.
 //!
-//! Cancellation or a failed copy stops before the next track; the databases are still written
-//! for the tracks done so far, so the stick stays consistent.
+//! Cancellation or a failed copy stops new tracks (the ones in flight finish); the databases are
+//! still written for the tracks done so far, so the stick stays consistent.
 
 use crate::device::{DeviceState, free_bytes};
 use crate::log::{LogStrings, entries, write_log};
 use crate::naming::pioneer_dir;
+use crate::appledouble::Cleaner;
 use crate::plan::{
     ArtworkSize, DevlibChange, DevlibOp, ExportPlan, ExtOp, FileOp, PdbLookup, PdbOp, TrackResult,
-    blank_pdb_track,
+    TrackStep, blank_pdb_track,
 };
 use crate::settings::settings_writes;
 use crate::source::LocalArtwork;
@@ -33,10 +38,12 @@ use mb_pdb::schema::DbKind;
 use mb_pdb::tables::{Artwork, MyTag, MyTagTrack, TypedRow};
 use mb_pdb::writer::{Exporter, Lookups, insert_row, locate_rows};
 use mb_pdb::{ExtDb, Pdb};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 /// Cancels a running export at the next track (or the next 1 MiB of audio).
 #[derive(Debug, Clone, Default)]
@@ -143,8 +150,6 @@ struct Ctx<'a> {
     progress: &'a mut dyn FnMut(&Progress),
     state: Progress,
     check_space: bool,
-    /// Audio files written, for the AppleDouble cleanup.
-    written: Vec<PathBuf>,
 }
 
 impl Ctx<'_> {
@@ -169,6 +174,9 @@ pub fn execute(
     let rb = pioneer.join("rekordbox");
     mkdirs(&rb)?;
     let steps: Vec<_> = plan.steps().collect();
+    let cleaner = Cleaner::new(root, dev.filesystem.as_deref());
+    // Written outside the track phase; their AppleDouble companions are removed at the end.
+    let mut side_files = vec![rb.clone()];
     let mut ctx = Ctx {
         root,
         cancel,
@@ -182,7 +190,6 @@ pub fn execute(
             current: None,
         },
         check_space: opts.check_free_space,
-        written: Vec::new(),
     };
     ctx.report();
     check_unchanged(dev, &rb)?;
@@ -205,6 +212,7 @@ pub fn execute(
                 &file,
                 format!("{{\r\n  \"uuid\": \"{uuid}\",\r\n  \"info\": []\r\n}}").as_bytes(),
             )?;
+            side_files.push(file);
         }
     }
     for (path, bytes) in settings_writes(
@@ -213,11 +221,12 @@ pub fn execute(
         opts.apply_my_settings,
     ) {
         write_replace(&path, &bytes)?;
+        side_files.push(path);
     }
     // Device Library Plus conversion: `a` artwork copied to `b` (§ 6.4; the database itself is
     // built with the others at the end).
     if let Some(conv) = &plan.devlib_convert {
-        crate::convert::copy_artwork(root, conv)?;
+        side_files.extend(crate::convert::copy_artwork(root, conv)?);
     }
 
     // Tracks.
@@ -226,34 +235,19 @@ pub fn execute(
         ..Default::default()
     };
     ctx.state.phase = Phase::Tracks;
-    for (i, step) in steps.iter().enumerate() {
-        if cancel.is_cancelled() {
-            report.cancelled = true;
-            break;
-        }
-        ctx.state.current = Some(step.title.clone());
-        ctx.report();
-        match run_files(&mut ctx, &step.files) {
-            Ok(()) => {}
-            Err(StepError::Cancelled) => {
-                report.cancelled = true;
-                break;
-            }
-            Err(StepError::Failed(result, e)) => {
-                report.results[i] = result;
-                report.error = Some(e.to_string());
-                break;
-            }
-        }
-        report.completed = i + 1;
-        ctx.state.tracks_done = i + 1;
+    let tracks = run_tracks(&mut ctx, &steps, &cleaner);
+    report.completed = tracks.completed;
+    report.cancelled = tracks.cancelled;
+    if let Some((i, result, e)) = tracks.failed {
+        report.results[i] = result;
+        report.error = Some(e.to_string());
     }
     ctx.state.current = None;
+    ctx.state.tracks_done = report.completed;
 
-    // Databases last.
+    // Databases last (`run_tracks` ended with the volume flushed, drive cache included).
     ctx.state.phase = Phase::Databases;
     ctx.report();
-    full_fsync_dir(root);
     let completed = Some(report.completed);
     write_devlib(plan, &rb, completed)?;
     let pdb_ops = opts
@@ -266,6 +260,7 @@ pub fn execute(
         .clone()
         .unwrap_or_else(|| plan.ext_ops(completed));
     write_ext(plan, dev, &rb, &ext_ops)?;
+    side_files.extend(["exportLibrary.db", "export.pdb", "exportExt.pdb"].map(|n| rb.join(n)));
 
     ctx.state.phase = Phase::Finish;
     ctx.report();
@@ -274,15 +269,15 @@ pub fn execute(
             let _ = std::fs::remove_file(m);
         }
     }
-    crate::appledouble::clean_tree(root, &pioneer);
-    crate::appledouble::remove_companions(root, ctx.written.iter().map(PathBuf::as_path));
+    for path in &side_files {
+        cleaner.clean(path);
+    }
     full_fsync_dir(&rb);
     if let Some(dir) = &opts.log_dir {
         let body = entries(&plan.jobs, &report.results);
         report.log_file =
             write_log(dir, &plan.today, &opts.log_strings, &body).map_err(|e| Error::io(dir, e))?;
     }
-    ctx.state.tracks_done = report.completed;
     ctx.report();
     Ok(report)
 }
@@ -304,42 +299,345 @@ fn check_unchanged(dev: &DeviceState, rb: &Path) -> Result<()> {
     Ok(())
 }
 
+// ---- tracks ---------------------------------------------------------------------------------
+
+/// The flusher syncs the volume once this much is written since its last sync.
+const FLUSH_EVERY: u64 = 32 << 20;
+
+/// How far the copy may run ahead of the device: written bytes not yet flushed (the page cache
+/// takes writes at memory speed, so without a limit the progress would be meaningless and the
+/// whole export would sit in RAM). More than [`FLUSH_EVERY`], so the flusher always has a batch
+/// when the copy waits for it.
+const MAX_UNFLUSHED: u64 = 128 << 20;
+
+const ANLZ_EXTS: [&str; 3] = ["DAT", "EXT", "2EX"];
+
 enum StepError {
     Cancelled,
     Failed(TrackResult, Error),
 }
 
-fn run_files(ctx: &mut Ctx, files: &[FileOp]) -> std::result::Result<(), StepError> {
-    for f in files {
-        match f {
-            FileOp::CopyAudio { from, to, size } => {
+/// The outcome of the track phase.
+struct Tracks {
+    /// Steps whose files are all written and on the medium: a prefix of the plan.
+    completed: usize,
+    cancelled: bool,
+    /// The first step that failed, its result and the error.
+    failed: Option<(usize, TrackResult, Error)>,
+}
+
+/// Work for the small-file threads.
+enum Job<'a> {
+    /// The ANLZ and artwork operations of one step.
+    Files { step: usize, ops: Vec<&'a FileOp> },
+    /// Remove the AppleDouble companions of a file written by the calling thread (audio).
+    Clean(PathBuf),
+}
+
+/// What one step's small-file job wrote.
+#[derive(Default)]
+struct Written {
+    /// Every file written (new files at their final path, replacements under their temporary
+    /// name), for the `fsync` fallback of the flusher.
+    files: Vec<PathBuf>,
+    bytes: u64,
+    /// Replacements of existing files: (temporary, final). Renamed into place only after the
+    /// last flush, so the old file stays whole until the new one is on the medium.
+    renames: Vec<(PathBuf, PathBuf)>,
+}
+
+type JobResult = (usize, std::result::Result<Written, (TrackResult, Error)>);
+
+/// Files the flusher must get onto the medium, for one step.
+struct Flush {
+    step: usize,
+    files: Vec<PathBuf>,
+    bytes: u64,
+}
+
+/// The flusher's progress, shared with the copying thread.
+#[derive(Default)]
+struct Flushed {
+    state: Mutex<FlushState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct FlushState {
+    bytes: u64,
+    /// The lowest step whose files could not be flushed.
+    failed: Option<(usize, Error)>,
+    /// The flusher has stopped.
+    done: bool,
+}
+
+impl Flushed {
+    fn lock(&self) -> std::sync::MutexGuard<'_, FlushState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn bytes(&self) -> u64 {
+        self.lock().bytes
+    }
+    /// Blocks until at least `bytes` are flushed (or the flusher has stopped).
+    fn wait_for(&self, bytes: u64) {
+        let state = self.lock();
+        let _unused = self
+            .changed
+            .wait_while(state, |s| s.bytes < bytes && !s.done)
+            .unwrap_or_else(|e| e.into_inner());
+    }
+    fn update(&self, f: impl FnOnce(&mut FlushState)) {
+        f(&mut self.lock());
+        self.changed.notify_all();
+    }
+}
+
+/// Bookkeeping of the copying thread.
+struct TrackState {
+    /// Per step: its small files are written (or it has none).
+    small_done: Vec<bool>,
+    /// Steps whose audio is written and whose small-file job is queued.
+    queued: usize,
+    /// Steps whose files are all written: a prefix.
+    written: usize,
+    /// Bytes handed to the flusher.
+    requested: u64,
+    failed: Option<(usize, TrackResult, Error)>,
+    cancelled: bool,
+    /// Audio files written, by step.
+    audio: Vec<(usize, PathBuf)>,
+    /// Deferred replacements, by step.
+    renames: Vec<(usize, PathBuf, PathBuf)>,
+}
+
+impl TrackState {
+    fn fail(&mut self, step: usize, result: TrackResult, e: Error) {
+        if self.failed.as_ref().is_none_or(|(i, ..)| step < *i) {
+            self.failed = Some((step, result, e));
+        }
+    }
+
+    fn flush(&mut self, tx: &mpsc::Sender<Flush>, step: usize, files: Vec<PathBuf>, bytes: u64) {
+        self.requested += bytes;
+        let _ = tx.send(Flush { step, files, bytes });
+    }
+
+    fn job_done(&mut self, (step, result): JobResult, tx: &mpsc::Sender<Flush>) {
+        match result {
+            Ok(w) => {
+                self.small_done[step] = true;
+                self.renames
+                    .extend(w.renames.into_iter().map(|(tmp, path)| (step, tmp, path)));
+                self.flush(tx, step, w.files, w.bytes);
+            }
+            Err((result, e)) => self.fail(step, result, e),
+        }
+    }
+
+    fn advance(&mut self) {
+        while self.written < self.queued && self.small_done[self.written] {
+            self.written += 1;
+        }
+    }
+}
+
+/// Writes the files of every step: the audio on this thread, the ANLZ sets and artwork on one
+/// other thread meanwhile (in plan order), all flushed to the medium in the background by
+/// [`flusher`]. More writer threads do not help on a real stick: FSKit FAT handles one request
+/// at a time there, and parallel requests only add contention (RBTEST, 30 tracks, 302 MB:
+/// 61 s with one writer thread, 71 s with four, 76 s for the old sequential executor; on a
+/// FAT32 disk image four threads were faster, which misled). The audio stays one sequential
+/// stream, so the FAT allocator keeps each audio file contiguous. A step counts once all its
+/// files are written; the first failure or a cancel stops new steps and the
+/// ones in flight finish. Ends with every counted step on the medium: the deferred renames and
+/// one flush of the whole volume, drive cache included. Audio and replacements of steps that do
+/// not count are removed again; their new ANLZ sets and artwork stay unreferenced, as after an
+/// interrupted export.
+fn run_tracks(ctx: &mut Ctx, steps: &[&TrackStep], cleaner: &Cleaner) -> Tracks {
+    let root = ctx.root;
+    let flushed = Flushed::default();
+    let mut t = TrackState {
+        small_done: vec![false; steps.len()],
+        queued: 0,
+        written: 0,
+        requested: 0,
+        failed: None,
+        cancelled: false,
+        audio: Vec::new(),
+        renames: Vec::new(),
+    };
+    std::thread::scope(|s| {
+        let (job_tx, job_rx) = mpsc::sync_channel::<Job>(4);
+        let (done_tx, done_rx) = mpsc::channel::<JobResult>();
+        s.spawn(move || small_file_thread(root, job_rx, done_tx, cleaner));
+        let (flush_tx, flush_rx) = mpsc::channel::<Flush>();
+        let flushed = &flushed;
+        s.spawn(move || flusher(root, flush_rx, flushed));
+        // Takes in finished small-file jobs; called per step and per 1 MiB of audio.
+        let poll = |t: &mut TrackState, progress: &mut Progress| {
+            for r in done_rx.try_iter() {
+                t.job_done(r, &flush_tx);
+            }
+            t.advance();
+            progress.tracks_done = t.written;
+        };
+
+        for (i, step) in steps.iter().enumerate() {
+            poll(&mut t, &mut ctx.state);
+            if t.failed.is_some() {
+                break;
+            }
+            if ctx.cancel.is_cancelled() {
+                t.cancelled = true;
+                break;
+            }
+            ctx.state.current = Some(step.title.clone());
+            ctx.report();
+            let mut error = None;
+            for f in &step.files {
+                let FileOp::CopyAudio { from, to, size } = f else {
+                    continue;
+                };
                 let dest = ctx.fs(to);
+                flushed.wait_for(t.requested.saturating_sub(MAX_UNFLUSHED));
+                let unflushed = t.requested.saturating_sub(flushed.bytes());
+                let mut copied = Ok(());
                 if ctx.check_space {
-                    let parent = dest.parent().unwrap_or(ctx.root);
-                    let probe = if parent.exists() { parent } else { ctx.root };
-                    match free_bytes(probe) {
-                        Some(0) => {
-                            return Err(StepError::Failed(
-                                TrackResult::DeviceGone,
-                                Error::Device("the volume reports no space".into()),
-                            ));
-                        }
-                        Some(free) if (free as f64) < 1.5 * (*size as f64) => {
-                            return Err(StepError::Failed(
-                                TrackResult::NoSpace,
-                                Error::Device(format!("{free} bytes free, {size} needed × 1.5")),
-                            ));
-                        }
-                        _ => {}
+                    copied = check_space(ctx.root, &dest, *size, unflushed);
+                }
+                if copied.is_ok() {
+                    copied = copy_audio(ctx, from, &dest, &mut |p| poll(&mut t, p));
+                }
+                match copied {
+                    Ok(()) => {
+                        t.audio.push((i, dest.clone()));
+                        t.flush(&flush_tx, i, vec![dest.clone()], *size);
+                        let _ = job_tx.send(Job::Clean(dest));
+                    }
+                    Err(e) => {
+                        error = Some(e);
+                        break;
                     }
                 }
-                copy_audio(ctx, from, &dest)?;
-                ctx.written.push(dest);
             }
+            match error {
+                Some(StepError::Cancelled) => {
+                    t.cancelled = true;
+                    break;
+                }
+                Some(StepError::Failed(result, e)) => {
+                    t.fail(i, result, e);
+                    break;
+                }
+                None => {}
+            }
+            let ops: Vec<&FileOp> = step
+                .files
+                .iter()
+                .filter(|f| !matches!(f, FileOp::CopyAudio { .. }))
+                .collect();
+            if ops.is_empty() {
+                t.small_done[i] = true;
+            } else {
+                let _ = job_tx.send(Job::Files { step: i, ops });
+            }
+            t.queued = i + 1;
+        }
+        // No new steps; the jobs in flight finish.
+        drop(job_tx);
+        for r in done_rx.iter() {
+            t.job_done(r, &flush_tx);
+        }
+        t.advance();
+        drop(flush_tx);
+    });
+    if let Some((step, e)) = flushed.lock().failed.take() {
+        t.fail(step, TrackResult::CopyFailed, e);
+    }
+    let completed = t
+        .failed
+        .as_ref()
+        .map_or(t.written, |(i, ..)| t.written.min(*i));
+
+    // Files of steps that do not count are not in the databases: not left behind.
+    for (i, path) in &t.audio {
+        if *i >= completed {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    let (renames, dropped): (Vec<_>, Vec<_>) =
+        t.renames.into_iter().partition(|(i, ..)| *i < completed);
+    for (_, tmp, _) in dropped {
+        let _ = std::fs::remove_file(tmp);
+    }
+    // The replacements, now that their data is on the medium.
+    let completed = match rename_all(&renames, cleaner) {
+        Some((i, e)) => {
+            if t.failed.as_ref().is_none_or(|(j, ..)| i < *j) {
+                t.failed = Some((i, TrackResult::CopyFailed, e));
+            }
+            completed.min(i)
+        }
+        None => completed,
+    };
+    if sync_volume(root, true).is_err() {
+        full_fsync_dir(root);
+    }
+    Tracks {
+        completed,
+        cancelled: t.cancelled,
+        failed: t.failed,
+    }
+}
+
+fn small_file_thread(
+    root: &Path,
+    jobs: mpsc::Receiver<Job>,
+    done: mpsc::Sender<JobResult>,
+    cleaner: &Cleaner,
+) {
+    for job in jobs {
+        match job {
+            Job::Clean(path) => cleaner.clean(&path),
+            Job::Files { step, ops } => {
+                if done.send((step, small_files(root, &ops, cleaner))).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// One step's ANLZ and artwork operations. A failed ANLZ set is
+/// [`TrackResult::AnalysisFailed`], failed artwork [`TrackResult::CopyFailed`].
+fn small_files(
+    root: &Path,
+    ops: &[&FileOp],
+    cleaner: &Cleaner,
+) -> std::result::Result<Written, (TrackResult, Error)> {
+    let fs = |p: &str| root.join(p.trim_start_matches('/'));
+    // Parts this step writes again are replaced rather than deleted first, so the old ones stay
+    // whole until the new ones are on the medium.
+    let mut rewritten = HashSet::new();
+    for op in ops {
+        if let FileOp::WriteAnlz { dat, parts, .. } = op {
+            for (ext, _) in ANLZ_EXTS.iter().zip(parts).filter(|(_, p)| **p) {
+                rewritten.insert(fs(dat).with_extension(ext));
+            }
+        }
+    }
+    let mut out = Written::default();
+    // `a` and `b` files of one image are the same bytes (§ 3): read or made once.
+    let mut artwork: HashMap<(&Path, u32), Vec<u8>> = HashMap::new();
+    for op in ops {
+        match op {
+            FileOp::CopyAudio { .. } => {}
             FileOp::DeleteAnlz { dat } => {
-                let p = ctx.fs(dat);
-                for ext in ["DAT", "EXT", "2EX"] {
-                    let _ = std::fs::remove_file(p.with_extension(ext));
+                for ext in ANLZ_EXTS {
+                    let p = fs(dat).with_extension(ext);
+                    if !rewritten.contains(&p) {
+                        let _ = std::fs::remove_file(p);
+                    }
                 }
             }
             FileOp::WriteAnlz {
@@ -349,25 +647,172 @@ fn run_files(ctx: &mut Ctx, files: &[FileOp]) -> std::result::Result<(), StepErr
                 ppth,
                 cues,
             } => {
-                let dest = ctx.fs(dat);
-                write_anlz(local_dat, *parts, &dest, ppth, cues)
-                    .map_err(|e| StepError::Failed(TrackResult::AnalysisFailed, e))?;
+                let fail = |e| (TrackResult::AnalysisFailed, e);
+                for (ext, _) in ANLZ_EXTS.iter().zip(parts).filter(|(_, p)| **p) {
+                    let bytes = usb_anlz(&local_dat.with_extension(ext), ext, ppth, cues)
+                        .map_err(fail)?;
+                    put(&fs(dat).with_extension(ext), &bytes, &mut out, cleaner).map_err(fail)?;
+                }
             }
             FileOp::Artwork { from, size, to } => {
-                let dest = ctx.fs(to);
-                let bytes = artwork_bytes(from, *size)
-                    .map_err(|e| StepError::Failed(TrackResult::CopyFailed, e))?;
-                write_replace(&dest, &bytes)
-                    .map_err(|e| StepError::Failed(TrackResult::CopyFailed, e))?;
+                let fail = |e| (TrackResult::CopyFailed, e);
+                let bytes = match artwork.entry((from.base.as_path(), size.pixels())) {
+                    Entry::Occupied(e) => e.into_mut(),
+                    Entry::Vacant(e) => e.insert(artwork_bytes(from, *size).map_err(fail)?),
+                };
+                put(&fs(to), bytes, &mut out, cleaner).map_err(fail)?;
             }
         }
+    }
+    Ok(out)
+}
+
+/// Writes `bytes` to `path` without waiting for the device (the flusher does that). A new file
+/// is written in place; an existing one is written next to it and renamed into place after the
+/// last flush ([`Written::renames`]), like [`write_replace`]. A failed write leaves no partial
+/// file behind.
+fn put(path: &Path, bytes: &[u8], out: &mut Written, cleaner: &Cleaner) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        mkdirs(dir)?;
+    }
+    let new = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path);
+    let (target, mut file, replace) = match new {
+        Ok(f) => (path.to_path_buf(), f, false),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let tmp = temp_path(path);
+            let f = std::fs::File::create(&tmp).map_err(|e| Error::io(&tmp, e))?;
+            (tmp, f, true)
+        }
+        Err(e) => return Err(Error::io(path, e)),
+    };
+    if let Err(e) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(&target);
+        return Err(Error::io(&target, e));
+    }
+    out.files.push(target.clone());
+    out.bytes += bytes.len() as u64;
+    if replace {
+        out.renames.push((target, path.to_path_buf()));
+    } else {
+        cleaner.clean(path);
     }
     Ok(())
 }
 
+/// Renames the deferred replacements into place, in plan order, up to the first failure (the
+/// temporary files from there on are removed). Returns the step that failed.
+fn rename_all(
+    renames: &[(usize, PathBuf, PathBuf)],
+    cleaner: &Cleaner,
+) -> Option<(usize, Error)> {
+    let mut failed = None;
+    for (i, tmp, path) in renames {
+        if failed.is_none() {
+            match std::fs::rename(tmp, path) {
+                Ok(()) => {
+                    cleaner.clean(path);
+                    continue;
+                }
+                Err(e) => failed = Some((*i, Error::io(path, e))),
+            }
+        }
+        let _ = std::fs::remove_file(tmp);
+    }
+    failed
+}
+
+/// Gets written files onto the medium in the background: one [`sync_volume`] per
+/// [`FLUSH_EVERY`] bytes written, and one at the end. The copy never waits for the device
+/// between files, and the file system's metadata goes out once per batch instead of once per
+/// file. Each sync slows the file system for the other threads (FSKit FAT, small-file creates:
+/// 2 ms, 6 ms during volume syncs, 20 ms during per-file `fsync`s; measured 2026-10-15), so
+/// it runs no more often than that. On a file system that refuses it: `fsync` per file.
+fn flusher(root: &Path, requests: mpsc::Receiver<Flush>, flushed: &Flushed) {
+    // Marks the flusher stopped however it ends, so `Flushed::wait_for` never waits for nothing.
+    struct Stopped<'a>(&'a Flushed);
+    impl Drop for Stopped<'_> {
+        fn drop(&mut self) {
+            self.0.update(|s| s.done = true);
+        }
+    }
+    let _stopped = Stopped(flushed);
+    let mut batch: Vec<Flush> = Vec::new();
+    let mut open = true;
+    while open {
+        match requests.recv() {
+            Ok(f) => batch.push(f),
+            Err(_) => open = false,
+        }
+        batch.extend(requests.try_iter());
+        let bytes: u64 = batch.iter().map(|f| f.bytes).sum();
+        if batch.is_empty() || open && bytes < FLUSH_EVERY {
+            continue;
+        }
+        let mut failed = None;
+        if sync_volume(root, false).is_err() {
+            'batch: for f in &batch {
+                for p in &f.files {
+                    if let Err(e) = std::fs::File::open(p).and_then(|file| fsync(&file)) {
+                        failed = Some((f.step, Error::io(p, e)));
+                        break 'batch;
+                    }
+                }
+            }
+        }
+        batch.clear();
+        flushed.update(|s| {
+            s.bytes += bytes;
+            if let Some((i, e)) = failed
+                && s.failed.as_ref().is_none_or(|(j, _)| i < *j)
+            {
+                s.failed = Some((i, e));
+            }
+        });
+    }
+}
+
+/// rekordbox's free-space rule: at least 1.5 × the file (§ 1.2 step 7.1). FSKit FAT counts
+/// written data as used only once it is flushed (checked 2026-10-15), so `unflushed` bytes are
+/// taken off.
+fn check_space(
+    root: &Path,
+    dest: &Path,
+    size: u64,
+    unflushed: u64,
+) -> std::result::Result<(), StepError> {
+    let parent = dest.parent().unwrap_or(root);
+    let probe = if parent.exists() { parent } else { root };
+    match free_bytes(probe) {
+        Some(0) => Err(StepError::Failed(
+            TrackResult::DeviceGone,
+            Error::Device("the volume reports no space".into()),
+        )),
+        Some(free) if (free.saturating_sub(unflushed) as f64) < 1.5 * (size as f64) => {
+            Err(StepError::Failed(
+                TrackResult::NoSpace,
+                Error::Device(format!(
+                    "{free} bytes free ({unflushed} not yet flushed), {size} needed × 1.5"
+                )),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Copies the audio bytes only (no extended attributes or resource forks, which macOS would
-/// store as `._` AppleDouble files on FAT), 1 MiB at a time, checking for cancellation.
-fn copy_audio(ctx: &mut Ctx, from: &Path, dest: &Path) -> std::result::Result<(), StepError> {
+/// store as `._` AppleDouble files on FAT), 1 MiB at a time, checking for cancellation. Not
+/// flushed here: the flusher does that in the background. `poll` updates the progress before
+/// each report.
+fn copy_audio(
+    ctx: &mut Ctx,
+    from: &Path,
+    dest: &Path,
+    poll: &mut dyn FnMut(&mut Progress),
+) -> std::result::Result<(), StepError> {
     let failed = |e: Error| StepError::Failed(TrackResult::CopyFailed, e);
     if let Some(dir) = dest.parent() {
         mkdirs(dir).map_err(failed)?;
@@ -386,14 +831,14 @@ fn copy_audio(ctx: &mut Ctx, from: &Path, dest: &Path) -> std::result::Result<()
             }
             let n = src.read(&mut buf).map_err(|e| failed(Error::io(from, e)))?;
             if n == 0 {
-                break;
+                return Ok(());
             }
             out.write_all(&buf[..n])
                 .map_err(|e| failed(Error::io(dest, e)))?;
             ctx.state.bytes_done += n as u64;
+            poll(&mut ctx.state);
             ctx.report();
         }
-        fsync(&out).map_err(|e| failed(Error::io(dest, e)))
     })();
     if result.is_err() {
         drop(out);
@@ -402,30 +847,22 @@ fn copy_audio(ctx: &mut Ctx, from: &Path, dest: &Path) -> std::result::Result<()
     result
 }
 
-/// The USB ANLZ set from the local one (`ExportAnalysisData*`, `docs/re/anlz.md` § Local vs
-/// USB): PPTH = device path, PSSI/PVDI scrambled, the cue lists from master.db (`.DAT` and
-/// `.EXT`), everything else unchanged. `.3EX` is never exported.
-fn write_anlz(local_dat: &Path, parts: [bool; 3], dest_dat: &Path, ppth: &str, cues: &crate::cues::DeviceCues) -> Result<()> {
-    for (ext, present) in ["DAT", "EXT", "2EX"].iter().zip(parts) {
-        if !present {
-            continue;
-        }
-        let src = local_dat.with_extension(ext);
-        let bytes = std::fs::read(&src).map_err(|e| Error::io(&src, e))?;
-        let file = mb_anlz::AnlzFile::parse(&bytes).map_err(|source| Error::Anlz {
-            path: src.clone(),
-            source,
-        })?;
-        let mut usb = mb_anlz::usb::to_usb(&file, ppth);
-        match *ext {
-            "DAT" => crate::cues::apply_dat(&mut usb, cues),
-            "EXT" => crate::cues::apply_ext(&mut usb, cues),
-            _ => {}
-        }
-        let usb = usb.to_bytes();
-        write_replace(&dest_dat.with_extension(ext), &usb)?;
+/// One file of the USB ANLZ set, made from the local one (`ExportAnalysisData*`,
+/// `docs/re/anlz.md` § Local vs USB): PPTH = device path, PSSI/PVDI scrambled, the cue lists from
+/// master.db (`.DAT` and `.EXT`), everything else unchanged. `.3EX` is never exported.
+fn usb_anlz(src: &Path, ext: &str, ppth: &str, cues: &crate::cues::DeviceCues) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(src).map_err(|e| Error::io(src, e))?;
+    let file = mb_anlz::AnlzFile::parse(&bytes).map_err(|source| Error::Anlz {
+        path: src.to_path_buf(),
+        source,
+    })?;
+    let mut usb = mb_anlz::usb::to_usb(&file, ppth);
+    match ext {
+        "DAT" => crate::cues::apply_dat(&mut usb, cues),
+        "EXT" => crate::cues::apply_ext(&mut usb, cues),
+        _ => {}
     }
-    Ok(())
+    Ok(usb.to_bytes())
 }
 
 /// The bytes of one device artwork file: the local variant as is, or — when the variant is
@@ -451,13 +888,17 @@ fn artwork_bytes(art: &LocalArtwork, size: ArtworkSize) -> Result<Vec<u8>> {
 
 // ---- databases ------------------------------------------------------------------------------
 
+/// Builds exportLibrary.db in a local temp folder and puts it on the device with one sequential
+/// write: SQLite's page writes and the WAL checkpoint are small random writes, which USB sticks
+/// are slowest at, and an existing file is read from the stick once instead of copied
+/// stick-to-stick. Renamed into place as before; nothing is left on the stick on failure.
 fn write_devlib(plan: &ExportPlan, rb: &Path, completed: Option<usize>) -> Result<()> {
     let target = rb.join("exportLibrary.db");
-    let tmp = rb.join(".exportLibrary.db.musicbox");
-    remove_db_files(&tmp);
-    let mut writer = match (&plan.devlib_create, &plan.devlib_convert) {
+    let local = LocalDir::new("devlib")?;
+    let db = local.path().join("exportLibrary.db");
+    let writer = match (&plan.devlib_create, &plan.devlib_convert) {
         (Some(create), _) => DevLibWriter::create(
-            &tmp,
+            &db,
             &CreateOptions {
                 created_date: Some(create.created_date.clone()),
                 menus: create.menus.clone(),
@@ -467,43 +908,80 @@ fn write_devlib(plan: &ExportPlan, rb: &Path, completed: Option<usize>) -> Resul
         // Device Library Plus conversion of an old stick (§ 6.4), then the export's operations.
         (None, Some(conv)) => {
             let w = DevLibWriter::create_for_conversion(
-                &tmp,
+                &db,
                 &CreateOptions {
                     created_date: Some(conv.today.clone()),
                     menus: conv.menus.clone(),
                     ..CreateOptions::default()
                 },
             )?;
-            if let Err(e) = conv.write(&w) {
-                drop(w);
-                remove_db_files(&tmp);
-                return Err(e);
-            }
+            conv.write(&w)?;
             w
         }
         (None, None) => {
-            std::fs::copy(&target, &tmp).map_err(|e| Error::io(&target, e))?;
-            DevLibWriter::open(&tmp)?
+            copy_file(&target, &db)?;
+            DevLibWriter::open(&db)?
         }
     };
+    let mut writer = writer;
     writer.set_today(&plan.today);
-    let result = (|| -> Result<()> {
-        writer.begin()?;
-        for op in plan.devlib_ops(completed) {
-            apply_devlib(&writer, &op, plan.hidden)?;
-        }
-        writer.commit()?;
-        Ok(())
-    })();
-    if let Err(e) = result {
-        drop(writer);
-        remove_db_files(&tmp);
-        return Err(e);
+    writer.begin()?;
+    for op in plan.devlib_ops(completed) {
+        apply_devlib(&writer, &op, plan.hidden)?;
     }
+    writer.commit()?;
     writer.close()?;
+    put_devlib(&db, rb)
+}
+
+/// Changes the device's exportLibrary.db (in `rb`) with `edit`, on a local copy like
+/// [`write_devlib`]: one sequential read and one sequential write on the stick.
+pub(crate) fn edit_devlib(rb: &Path, edit: impl FnOnce(&DevLibWriter) -> Result<()>) -> Result<()> {
+    let local = LocalDir::new("devlib")?;
+    let db = local.path().join("exportLibrary.db");
+    copy_file(&rb.join("exportLibrary.db"), &db)?;
+    let writer = DevLibWriter::open(&db)?;
+    edit(&writer)?;
+    writer.close()?;
+    put_devlib(&db, rb)
+}
+
+/// Puts the closed database `db` on the device as `rb/exportLibrary.db`: written next to it,
+/// `F_FULLFSYNC`ed, renamed into place.
+fn put_devlib(db: &Path, rb: &Path) -> Result<()> {
+    let target = rb.join("exportLibrary.db");
+    let tmp = rb.join(".exportLibrary.db.musicbox");
+    remove_db_files(&tmp);
+    copy_file(db, &tmp)?;
     full_fsync_file(&tmp)?;
     std::fs::rename(&tmp, &target).map_err(|e| Error::io(&target, e))?;
     full_fsync_file(&target)
+}
+
+/// A folder in the local temp directory, removed with its contents when dropped.
+pub(crate) struct LocalDir(PathBuf);
+
+impl LocalDir {
+    pub(crate) fn new(what: &str) -> Result<Self> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!(
+            "mb-usb-{what}-{}-{nanos}",
+            std::process::id()
+        ));
+        mkdirs(&dir)?;
+        Ok(Self(dir))
+    }
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for LocalDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn remove_db_files(path: &Path) {
@@ -832,21 +1310,63 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     fsync(&f).map_err(|e| Error::io(path, e))
 }
 
-/// Writes `bytes` next to `path`, `fsync`s and renames it into place.
-pub(crate) fn write_replace(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    mkdirs(dir)?;
+/// The temporary name a replacement of `path` is written under: `.<name>.musicbox` next to it.
+fn temp_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.musicbox"));
+    path.with_file_name(format!(".{name}.musicbox"))
+}
+
+/// Writes `bytes` next to `path`, `fsync`s and renames it into place.
+pub(crate) fn write_replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    mkdirs(dir)?;
+    let tmp = temp_path(path);
     {
         let mut f = std::fs::File::create(&tmp).map_err(|e| Error::io(&tmp, e))?;
         f.write_all(bytes).map_err(|e| Error::io(&tmp, e))?;
         fsync(&f).map_err(|e| Error::io(&tmp, e))?;
     }
     std::fs::rename(&tmp, path).map_err(|e| Error::io(path, e))
+}
+
+/// Copies the bytes of `from` to a new file `to` (no extended attributes: `std::fs::copy` would
+/// add them, and on FAT each becomes an AppleDouble file), and `fsync`s it.
+fn copy_file(from: &Path, to: &Path) -> Result<()> {
+    let mut src = std::fs::File::open(from).map_err(|e| Error::io(from, e))?;
+    let mut out = std::fs::File::create(to).map_err(|e| Error::io(to, e))?;
+    std::io::copy(&mut src, &mut out).map_err(|e| Error::io(to, e))?;
+    fsync(&out).map_err(|e| Error::io(to, e))
+}
+
+/// `sync_volume_np(3)`: writes every dirty buffer of the volume holding `path` and waits for
+/// it; with `full`, also flushes the drive cache (`F_FULLFSYNC`). One call for any number of
+/// files. Works on FSKit FAT (checked 2026-10-15: 300 MB flushed in 0.55 s, an `fsync` right
+/// after took 1 ms).
+fn sync_volume(path: &Path, full: bool) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn sync_volume_np(path: *const libc::c_char, flags: libc::c_int) -> libc::c_int;
+        }
+        const SYNC_VOLUME_FULLSYNC: libc::c_int = 0x01;
+        const SYNC_VOLUME_WAIT: libc::c_int = 0x02;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+        let flags = SYNC_VOLUME_WAIT | if full { SYNC_VOLUME_FULLSYNC } else { 0 };
+        // SAFETY: `c` is a valid NUL-terminated path for the duration of the call.
+        match unsafe { sync_volume_np(c.as_ptr(), flags) } {
+            0 => Ok(()),
+            errno => Err(std::io::Error::from_raw_os_error(errno)),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (path, full);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// 32 lowercase hex digits (a `juce::Uuid` as rekordbox prints it).

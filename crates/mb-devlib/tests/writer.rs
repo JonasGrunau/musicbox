@@ -428,3 +428,313 @@ fn oracle_a_rebuild_matches_rekordbox() {
     assert_eq!(setting("page_count").left, setting("page_count").right);
     assert_eq!(setting("journal_mode").left, "wal");
 }
+
+// ---- caches ---------------------------------------------------------------------------------
+// The writer answers the lookup / album / count / entry-count selects from memory; every result
+// must be the one the select gives on the database as it stands.
+
+/// `getAndAdd*ID` asked of SQLite: the first row in rowid order with that name, else max + 1.
+fn expected_get_or_add(w: &DevLibWriter, table: &str, name: &str) -> u32 {
+    use rusqlite::OptionalExtension;
+    if name.is_empty() {
+        return 0;
+    }
+    let found = w
+        .connection()
+        .query_row(
+            &format!("select {table}_id from {table} where name = ?1"),
+            [name],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .unwrap()
+        .flatten()
+        .unwrap_or(0) as u32;
+    if found != 0 {
+        return found;
+    }
+    let max: Option<i64> = w
+        .connection()
+        .query_row(&format!("select max({table}_id) from {table}"), [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    (max.unwrap_or(0) + 1) as u32
+}
+
+/// `getAndAddAlbumID` asked of SQLite (the album artist as `expected_get_or_add` gives it).
+fn expected_album(w: &DevLibWriter, name: &str, compilation: u8, album_artist: &str) -> u32 {
+    use rusqlite::OptionalExtension;
+    if name.is_empty() {
+        return 0;
+    }
+    let artist_id = expected_get_or_add(w, "artist", album_artist);
+    let mut sql = String::from("select album_id from album where name = ?1");
+    let mut args: Vec<Value> = vec![name.to_string().into()];
+    if artist_id != 0 {
+        sql.push_str(" and artist_id = ?2");
+        args.push(i64::from(artist_id).into());
+    }
+    if compilation != 0 {
+        sql.push_str(&format!(" and isComplation = ?{}", args.len() + 1));
+        args.push(i64::from(compilation).into());
+    }
+    let found: Option<i64> = w
+        .connection()
+        .query_row(&sql, rusqlite::params_from_iter(args), |r| r.get(0))
+        .optional()
+        .unwrap()
+        .flatten();
+    if let Some(id) = found.filter(|&id| id != 0) {
+        return id as u32;
+    }
+    let max: Option<i64> = w
+        .connection()
+        .query_row("select max(album_id) from album", [], |r| r.get(0))
+        .unwrap();
+    (max.unwrap_or(0) + 1) as u32
+}
+
+fn assert_count_matches(w: &DevLibWriter) {
+    assert_eq!(
+        value(w, "select numberOfContents from property"),
+        value(w, "select count(*) from content")
+    );
+}
+
+fn next_entry_seq(w: &DevLibWriter, list: u32) -> i64 {
+    w.connection()
+        .query_row(
+            "select count(content_id) from playlist_content where playlist_id = ?1",
+            [list],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+        + 1
+}
+
+fn last_entry_seq(w: &DevLibWriter, list: u32) -> i64 {
+    w.connection()
+        .query_row(
+            "select sequenceNo from playlist_content where playlist_id = ?1 order by rowid desc",
+            [list],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn caches_give_what_the_selects_give() {
+    use mb_devlib::Lookup;
+    let tmp = TempDir::new("writer-caches").unwrap();
+    let path = tmp.0.join("exportLibrary.db");
+    let w = DevLibWriter::create(&path, &options()).unwrap();
+
+    // Rows the writer did not insert: duplicate names (lowest rowid wins), case variants, NULL
+    // and BLOB names, ID 0 (found, but 0 means "not found"), albums with NULL / text / real
+    // artist IDs.
+    w.connection()
+        .execute_batch(
+            "insert into artist(artist_id, name) values (10, 'Dup'), (5, 'Dup'), (7, 'dup'), \
+             (8, NULL), (3, x'447570'), (0, 'Zero');
+             insert into genre(genre_id, name) values (4, 'House'), (2, 'House');
+             insert into album(album_id, name, artist_id, isComplation) values \
+             (20, 'Alb', NULL, 0), (21, 'Alb', 5, 1), (22, 'Alb', 7, 0), (23, 'Alb', 'x7', 1), \
+             (24, 'Alb', 7.5, 1), (0, 'Zero', NULL, 0), (30, 'Real', 7.0, 1.0);",
+        )
+        .unwrap();
+    w.invalidate_caches();
+
+    let lookups: &[(Lookup, &str, &str)] = &[
+        (Lookup::Artist, "artist", "Dup"),
+        (Lookup::Artist, "artist", "dup"),
+        (Lookup::Artist, "artist", "DUP"),
+        (Lookup::Artist, "artist", "Zero"),
+        (Lookup::Artist, "artist", "Zero"),
+        (Lookup::Artist, "artist", "New"),
+        (Lookup::Artist, "artist", "New"),
+        (Lookup::Artist, "artist", ""),
+        (Lookup::Genre, "genre", "House"),
+        (Lookup::Genre, "genre", "house"),
+        (Lookup::Key, "key", "8A"),
+        (Lookup::Label, "label", "Label"),
+    ];
+    for &(lookup, table, name) in lookups {
+        let expected = expected_get_or_add(&w, table, name);
+        assert_eq!(
+            w.get_or_add(lookup, name).unwrap(),
+            expected,
+            "{table} {name:?}"
+        );
+    }
+    assert_eq!(w.lookup_id(Lookup::Artist, "Dup").unwrap(), 5);
+    assert_eq!(w.lookup_id(Lookup::Artist, "dUp").unwrap(), 0);
+
+    let albums: &[(&str, u8, &str)] = &[
+        ("Alb", 0, ""),
+        ("Alb", 1, ""),
+        ("Alb", 0, "dup"),
+        ("Alb", 1, "dup"),
+        ("Alb", 1, "dup"),
+        ("Alb", 0, "Dup"),
+        ("Alb", 1, "Other"),
+        ("Zero", 0, ""),
+        ("Zero", 0, ""),
+        ("Real", 1, "dup"),
+        ("Real", 0, "dup"),
+        ("", 0, "dup"),
+    ];
+    for &(name, compilation, artist) in albums {
+        let expected = expected_album(&w, name, compilation, artist);
+        assert_eq!(
+            w.get_or_add_album(name, compilation, artist).unwrap(),
+            expected,
+            "album {name:?} {compilation} {artist:?}"
+        );
+    }
+
+    // Tracks, removals and numberOfContents; lookups after unused rows are deleted.
+    let list = w.create_playlist("list", 0, false, Some(0)).unwrap();
+    let mut ids = Vec::new();
+    for i in 0..12 {
+        let mut t = track(&format!("T{i}"), if i % 3 == 0 { "Dup" } else { "Solo" });
+        t.genre = if i % 2 == 0 {
+            "House".into()
+        } else {
+            "Techno".into()
+        };
+        t.album = "Alb".into();
+        t.album_artist = if i % 4 == 0 {
+            "dup".into()
+        } else {
+            String::new()
+        };
+        let artist = expected_get_or_add(&w, "artist", &t.artist);
+        let id = w.add_track(&t).unwrap();
+        assert_eq!(
+            row_of(&w, id, "artist_id_artist"),
+            Value::Integer(artist.into())
+        );
+        assert_count_matches(&w);
+        let seq = next_entry_seq(&w, list);
+        w.append_playlist_entry(list, id).unwrap();
+        assert_eq!(last_entry_seq(&w, list), seq);
+        ids.push(id);
+    }
+    w.remove_tracks(&ids[..5]).unwrap();
+    assert_count_matches(&w);
+    for &(lookup, table, name) in lookups {
+        let expected = expected_get_or_add(&w, table, name);
+        assert_eq!(
+            w.get_or_add(lookup, name).unwrap(),
+            expected,
+            "{table} {name:?}"
+        );
+    }
+    for &(name, compilation, artist) in albums {
+        let expected = expected_album(&w, name, compilation, artist);
+        assert_eq!(
+            w.get_or_add_album(name, compilation, artist).unwrap(),
+            expected
+        );
+    }
+    // Entries after removed tracks, after an entry with NULL content_id (not counted), after
+    // clearing, and in a list that reuses a deleted list's ID.
+    for _ in 0..2 {
+        let seq = next_entry_seq(&w, list);
+        w.append_playlist_entry(list, ids[6]).unwrap();
+        assert_eq!(last_entry_seq(&w, list), seq);
+    }
+    w.connection()
+        .execute(
+            "insert into playlist_content(playlist_id, content_id, sequenceNo) values (?1, NULL, 99)",
+            [list],
+        )
+        .unwrap();
+    w.invalidate_caches();
+    let seq = next_entry_seq(&w, list);
+    w.append_playlist_entry(list, ids[7]).unwrap();
+    assert_eq!(last_entry_seq(&w, list), seq);
+    w.clear_playlist(list).unwrap();
+    w.append_playlist_entry(list, ids[7]).unwrap();
+    assert_eq!(last_entry_seq(&w, list), 1);
+    w.append_playlist_entry(list, ids[8]).unwrap();
+    w.delete_playlist(list).unwrap();
+    let again = w.create_playlist("again", 0, false, Some(0)).unwrap();
+    assert_eq!(again, list, "max + 1 reuses the deleted ID");
+    w.append_playlist_entry(again, ids[9]).unwrap();
+    assert_eq!(last_entry_seq(&w, again), 1);
+
+    // A rolled-back transaction: rows inserted in it are gone, IDs are handed out again.
+    for explicit in [true, false] {
+        w.begin().unwrap();
+        let mut t = track("Rolled", "Rolled Artist");
+        t.genre = "Rolled Genre".into();
+        t.album = "Rolled Album".into();
+        w.add_track(&t).unwrap();
+        w.append_playlist_entry(again, ids[9]).unwrap();
+        if explicit {
+            w.rollback().unwrap();
+        } else {
+            // Behind the writer's back; noticed because the transaction is gone.
+            w.connection().execute_batch("ROLLBACK").unwrap();
+        }
+        let artist = expected_get_or_add(&w, "artist", "Rolled Artist");
+        let genre = expected_get_or_add(&w, "genre", "Rolled Genre");
+        let album = expected_album(&w, "Rolled Album", 0, "");
+        let seq = next_entry_seq(&w, again);
+        let id = w.add_track(&t).unwrap();
+        assert_eq!(
+            row_of(&w, id, "artist_id_artist"),
+            Value::Integer(artist.into())
+        );
+        assert_eq!(row_of(&w, id, "genre_id"), Value::Integer(genre.into()));
+        assert_eq!(row_of(&w, id, "album_id"), Value::Integer(album.into()));
+        assert_count_matches(&w);
+        w.append_playlist_entry(again, id).unwrap();
+        assert_eq!(last_entry_seq(&w, again), seq);
+        w.remove_tracks(&[id]).unwrap();
+    }
+    w.close().unwrap();
+}
+
+/// A table whose DDL differs from rekordbox's (a NOCASE name, a column default) is not cached:
+/// the select and the insert run as rekordbox sends them.
+#[test]
+fn foreign_schema_falls_back_to_plain_statements() {
+    use mb_devlib::Lookup;
+    let tmp = TempDir::new("writer-foreign").unwrap();
+    let path = tmp.0.join("exportLibrary.db");
+    let w = DevLibWriter::create(&path, &options()).unwrap();
+    assert_eq!(w.get_or_add(Lookup::Artist, "Before").unwrap(), 1);
+    w.connection()
+        .execute_batch(
+            "drop table artist;
+             create table artist(artist_id integer primary key, name varchar collate nocase, nameForSearch varchar);
+             insert into artist(artist_id, name) values (1, 'Abc');",
+        )
+        .unwrap();
+    w.invalidate_caches();
+    assert_eq!(w.lookup_id(Lookup::Artist, "ABC").unwrap(), 1);
+    assert_eq!(w.get_or_add(Lookup::Artist, "aBc").unwrap(), 1);
+    assert_eq!(w.get_or_add(Lookup::Artist, "Other").unwrap(), 2);
+    assert_eq!(w.get_or_add(Lookup::Artist, "OTHER").unwrap(), 2);
+
+    // A content table with a column default: the insert leaves out the zero lookup IDs like
+    // rekordbox's statement, so the default applies (the standard DDL gets NULL).
+    let standard = w.add_track(&track("Standard", "A")).unwrap();
+    assert_eq!(row_of(&w, standard, "artist_id_remixer"), Value::Null);
+    let ddl = TABLES[0].1.replace(
+        "artist_id_remixer integer,",
+        "artist_id_remixer integer default 0,",
+    );
+    w.connection()
+        .execute_batch(&format!("drop table content; {ddl};"))
+        .unwrap();
+    w.invalidate_caches();
+    let foreign = w.add_track(&track("Foreign", "A")).unwrap();
+    assert_eq!(foreign, 1);
+    assert_eq!(row_of(&w, foreign, "artist_id_remixer"), Value::Integer(0));
+    assert_eq!(row_of(&w, foreign, "artist_id_composer"), Value::Null);
+    w.close().unwrap();
+}

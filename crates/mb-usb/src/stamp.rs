@@ -7,7 +7,6 @@
 
 use crate::remove::{check_unchanged, full_fsync, refuse_reference_stick};
 use crate::{DeviceState, Error, Result};
-use mb_devlib::DevLibWriter;
 use mb_pdb::writer::Exporter;
 
 /// Sets `masterDbId` / `masterContentId` of export.pdb tracks (by ID) and of the exportLibrary.db
@@ -39,38 +38,21 @@ pub fn stamp_master_ids(dev: &DeviceState, stamps: &[(u32, u32, u32)]) -> Result
     }
 
     if dev.devlib.is_some() {
-        let target = rb.join("exportLibrary.db");
-        let tmp = rb.join(".exportLibrary.db.musicbox");
-        for suffix in ["", "-wal", "-shm", "-journal"] {
-            let _ = std::fs::remove_file(format!("{}{suffix}", tmp.display()));
-        }
-        std::fs::copy(&target, &tmp).map_err(|e| Error::io(&target, e))?;
-        let result = (|| -> Result<()> {
-            let w = DevLibWriter::open(&tmp)?;
+        crate::exec::edit_devlib(&rb, |w| {
             for (path, dbid, cid) in &paths {
                 w.connection().execute(
                     "UPDATE content SET masterDbId = ?1, masterContentId = ?2 WHERE path = ?3",
                     rusqlite::params![i64::from(*dbid), i64::from(*cid), path],
                 )?;
             }
-            w.close()?;
             Ok(())
-        })();
-        if let Err(e) = result {
-            for suffix in ["", "-wal", "-shm", "-journal"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", tmp.display()));
-            }
-            return Err(e);
-        }
-        full_fsync(&tmp)?;
-        std::fs::rename(&tmp, &target).map_err(|e| Error::io(&target, e))?;
-        full_fsync(&target)?;
+        })?;
     }
 
     let path = rb.join("export.pdb");
     check_unchanged(&path, &files.export_bytes)?;
     crate::exec::write_replace(&path, &ex.finish())?;
     full_fsync(&path)?;
-    crate::appledouble::clean_tree(&dev.root, &dev.root.join(crate::naming::pioneer_dir(dev.hidden)));
+    crate::appledouble::clean_dir(&dev.root, &rb);
     Ok(())
 }

@@ -459,16 +459,44 @@ pub fn load_master_cues(master: &Connection) -> Result<HashMap<String, Vec<crate
     load_cues(master)
 }
 
+const CUE_COLUMNS: &str = "ContentID, Kind, InMsec, InMpegFrame, InMpegAbs, OutMsec, \
+    OutMpegFrame, OutMpegAbs, Color, ColorTableIndex, ActiveLoop, Comment, BeatLoopSize, \
+    CueMicrosec, InPointSeekInfo, OutPointSeekInfo";
+
 /// Every live `djmdCue` row by `ContentID`, in row order: `getContentCueInfo` selects them
 /// without ORDER BY through the `(ContentID, rb_local_deleted)` index.
 fn load_cues(master: &Connection) -> Result<HashMap<String, Vec<crate::cues::SourceCue>>> {
-    let mut stmt = master.prepare(
-        "select ContentID, Kind, InMsec, InMpegFrame, InMpegAbs, OutMsec, OutMpegFrame, OutMpegAbs, \
-         Color, ColorTableIndex, ActiveLoop, Comment, BeatLoopSize, CueMicrosec, InPointSeekInfo, \
-         OutPointSeekInfo from djmdCue where rb_local_deleted = 0 order by rowid",
-    )?;
+    let mut stmt = master.prepare(&format!(
+        "select {CUE_COLUMNS} from djmdCue where rb_local_deleted = 0 order by rowid"
+    ))?;
     let mut out: HashMap<String, Vec<crate::cues::SourceCue>> = HashMap::new();
-    let rows = stmt.query_map([], |r| {
+    for row in stmt.query_map([], cue_row)? {
+        let (content, cue) = row?;
+        out.entry(content).or_default().push(cue);
+    }
+    Ok(out)
+}
+
+/// [`load_cues`] for the given tracks only, one indexed query each (same rows, same order).
+fn load_cues_of<'a>(
+    master: &Connection,
+    ids: impl Iterator<Item = &'a String>,
+) -> Result<HashMap<String, Vec<crate::cues::SourceCue>>> {
+    let mut stmt = master.prepare(&format!(
+        "select {CUE_COLUMNS} from djmdCue where ContentID = ?1 and rb_local_deleted = 0 \
+         order by rowid"
+    ))?;
+    let mut out: HashMap<String, Vec<crate::cues::SourceCue>> = HashMap::new();
+    for id in ids {
+        for row in stmt.query_map([id], cue_row)? {
+            let (content, cue) = row?;
+            out.entry(content).or_default().push(cue);
+        }
+    }
+    Ok(out)
+}
+
+fn cue_row(r: &rusqlite::Row) -> rusqlite::Result<(String, crate::cues::SourceCue)> {
         Ok((
             text(r, 0)?,
             crate::cues::SourceCue {
@@ -489,12 +517,6 @@ fn load_cues(master: &Connection) -> Result<HashMap<String, Vec<crate::cues::Sou
                 out_point_seek_info: text(r, 15)?,
             },
         ))
-    })?;
-    for row in rows {
-        let (content, cue) = row?;
-        out.entry(content).or_default().push(cue);
-    }
-    Ok(out)
 }
 
 /// Paths in master.db that start with `/PIONEER/` are relative to the analysis-data root.
@@ -578,14 +600,12 @@ impl SourceLibrary {
             let (content, tag) = row?;
             song_tags.entry(content).or_default().push(tag as u32);
         }
-        let mut cues = load_cues(master)?;
         let mut stmt = master.prepare(TRACK_SQL)?;
         let mut rows = stmt
             .query_map([], track_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for t in &mut rows {
             t.my_tags = song_tags.remove(&t.id).unwrap_or_default();
-            t.cues = cues.remove(&t.id).unwrap_or_default();
         }
         lib.collection_order = rows.iter().map(|t| t.id.clone()).collect();
 
@@ -611,10 +631,18 @@ impl SourceLibrary {
             lib.entries.insert(list.clone(), ids);
         }
 
+        // Cues are only used for the exported tracks: read just theirs (through the
+        // `ContentID` index) unless that is most of the collection.
         let needed: HashSet<&String> = needed_tracks.iter().collect();
+        let mut cues = if needed.len() * 8 < rows.len() {
+            load_cues_of(master, needed.iter().copied())?
+        } else {
+            load_cues(master)?
+        };
         for mut t in rows {
             if needed.contains(&t.id) {
                 resolve_files(&mut t, analysis_root);
+                t.cues = cues.remove(&t.id).unwrap_or_default();
             }
             lib.by_master_content_id
                 .entry(t.device_master_content_id())
