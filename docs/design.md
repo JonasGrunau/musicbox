@@ -139,17 +139,21 @@ Windows and menus use `#242424` with a `#383838` edge, 10 px (window) or 8 px (m
   - the app mark.
 
 ## Performance
-`apps/musicbox/tests/perf_lists.rs` (run with `--release --ignored --nocapture`) times frames on 50 000 tracks with 400 playlists and a 20 000-track list:
+`apps/musicbox/tests/perf_lists.rs` (run with `--release --ignored --nocapture --test-threads 1`) times frames on 50 000 tracks with 400 playlists, a 20 000-track list, a smart list and 1 800 histories (tessellation included):
 
 | Action | Release |
 |---|---|
-| Idle frame | 0.5 ms |
-| Scrolling | 1.3 ms |
-| Typing a search, per key | 2.6 ms |
-| Sorting | 4–9 ms |
-| Opening the 20 000-track list | 2.4 ms |
+| Idle frame | 0.6 ms |
+| Scrolling | 1.4 ms |
+| Typing a search, per key | 2.5 ms |
+| Sorting (2 frames) | 4–9 ms |
+| Opening the 20 000-track list (2 frames) | 4.3 ms |
+| Smart list: opening / a search key | 9 ms / 1.0 ms |
+| Context menu on 5 000 selected tracks | 0.8 ms |
+| Device tree with 2 000 playlists open | 0.8 ms |
+| Deck waveforms while playing | 0.2–0.3 ms |
 
-Each lookup is built once per library snapshot and reused (`browser::Lookups`): the content-ID index, the lower-case search text, the sort keys of each text column, and whether each artwork file exists. A debug build is 10–40× slower (scrolling 35–73 ms per frame), so `start.sh` runs a release build. The check for a running rekordbox reads the process list on a worker thread.
+Each lookup is built once per library snapshot and reused (`browser::Lookups`): the content-ID index, the lower-case search text, the sort keys of each text column, each track's thumbnail file (the 80 px `_s` variant) and the smart-list results. The table keeps at most 256 thumbnails loaded and frees the least recently shown (`browser::Thumbs`); the overview waveform is one cached mesh. File reads, device scans, imports and opening the player run on worker threads. A debug build is 10–40× slower (scrolling 35–73 ms per frame), so `start.sh` runs a release build. The check for a running rekordbox reads the process list on a worker thread.
 
 ## Accessibility labels the UI tests rely on
 The custom widgets report the same names the egui widgets had, so `egui_kittest` finds them by label. Do not rename them without updating `apps/musicbox/tests/`:

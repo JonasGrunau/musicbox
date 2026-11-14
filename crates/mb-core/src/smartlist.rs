@@ -467,7 +467,7 @@ fn compile(c: &Condition, clock: Clock) -> Option<Compiled> {
 impl Compiled {
     fn matches(&self, t: &Track, tags: &[i64]) -> bool {
         match self.kind {
-            ValueKind::Text => text_op(&text_field(t, self.property), self),
+            ValueKind::Text => text_op(text_field(t, self.property), self),
             ValueKind::MyTag => match self.operator {
                 op::CONTAINS => tags.contains(&self.left),
                 op::NOT_CONTAINS => !tags.contains(&self.left),
@@ -528,22 +528,22 @@ fn number_op(v: i64, c: &Compiled) -> bool {
 }
 
 /// The RowDataTrack string each text property reads (`db::operate`).
-fn text_field(t: &Track, property: &str) -> String {
+fn text_field<'a>(t: &'a Track, property: &str) -> &'a str {
     match property {
-        "name" => t.title.clone(),
-        "fileName" => t.file_name.clone(),
-        "comments" => t.comment.clone(),
-        "mixName" => t.mix_name.clone(),
-        "artist" => t.artist.clone(),
-        "remixedBy" => t.remixer.clone(),
-        "originalArtist" => t.original_artist.clone(),
-        "producer" => t.composer.clone(),
-        "album" => t.album.clone(),
-        "genre" => t.genre.clone(),
-        "label" => t.label.clone(),
-        "key" => t.key.clone(),
-        "albumArtist" => t.album_artist.clone(),
-        _ => String::new(),
+        "name" => &t.title,
+        "fileName" => &t.file_name,
+        "comments" => &t.comment,
+        "mixName" => &t.mix_name,
+        "artist" => &t.artist,
+        "remixedBy" => &t.remixer,
+        "originalArtist" => &t.original_artist,
+        "producer" => &t.composer,
+        "album" => &t.album,
+        "genre" => &t.genre,
+        "label" => &t.label,
+        "key" => &t.key,
+        "albumArtist" => &t.album_artist,
+        _ => "",
     }
 }
 
@@ -578,6 +578,11 @@ fn text_op(field: &str, c: &Compiled) -> bool {
 pub fn fold(s: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     use unicode_normalization::char::is_combining_mark;
+    // ASCII has no decompositions or combining marks: only the case changes. Most tags are
+    // ASCII, and a smart list folds a field of every track.
+    if s.is_ascii() {
+        return s.to_ascii_lowercase();
+    }
     let mut out = String::with_capacity(s.len());
     for c in s.nfkd().filter(|c| !is_combining_mark(*c)) {
         if c == 'ß' || c == 'ẞ' {

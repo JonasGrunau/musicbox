@@ -9,6 +9,8 @@ use mb_core::key::{KeyNotation, display as key_display, wheel_index};
 use mb_core::{LibrarySnapshot, Track};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+use std::sync::Arc;
 use mb_core::{DbId, PlaylistKind, PlaylistNode};
 use mb_library::{Command, TrackEdit};
 
@@ -92,6 +94,7 @@ pub struct State {
     /// Another list is shown: start at its top.
     scroll_to_top: bool,
     lookups: Lookups,
+    thumbs: Thumbs,
 }
 
 /// Per-snapshot lookups, built once per snapshot and reused by every rebuild and frame, so that
@@ -109,8 +112,56 @@ struct Lookups {
     haystack: Vec<String>,
     /// Lower-case sort keys of a text column; built on the first sort by it.
     text_keys: HashMap<Col, Vec<String>>,
-    /// Whether each track's artwork file exists; checked when its row is first shown.
-    artwork: Vec<Option<bool>>,
+    /// Thumbnail URI of each track (`None` without an artwork file); looked up when its row is
+    /// first shown.
+    artwork: Vec<Option<Option<Arc<str>>>>,
+    /// Track indices of each smart list shown so far.
+    smart: HashMap<DbId, SmartRows>,
+}
+
+/// A smart list's tracks and what they were evaluated for: its rules and the local day ("in the
+/// last N days" moves at midnight).
+struct SmartRows {
+    xml: String,
+    day: i64,
+    rows: Vec<usize>,
+}
+
+/// The artwork thumbnails the table has shown, by URI, with the pass they were last shown in.
+/// egui keeps every image it loads (file bytes, decoded pixels and the texture) until it is told
+/// to forget it, so the least recently shown are forgotten once more than [`THUMBS_KEPT`] are kept.
+#[derive(Default)]
+struct Thumbs {
+    shown: HashMap<Arc<str>, u64>,
+}
+
+/// Thumbnails kept loaded: several screens of rows (80 px `_s` files: about 25 kB decoded each).
+const THUMBS_KEPT: usize = 256;
+
+impl Thumbs {
+    fn touch(&mut self, uri: &Arc<str>, pass: u64) {
+        match self.shown.get_mut(&**uri) {
+            Some(last) => *last = pass,
+            None => {
+                self.shown.insert(uri.clone(), pass);
+            }
+        }
+    }
+
+    /// Forgets the least recently shown thumbnails (never one shown in this pass) down to three
+    /// quarters of [`THUMBS_KEPT`], so this runs once per many new rows, not on every one.
+    fn trim(&mut self, ctx: &egui::Context, pass: u64) {
+        if self.shown.len() <= THUMBS_KEPT {
+            return;
+        }
+        let mut old: Vec<(u64, Arc<str>)> = self.shown.iter().filter(|&(_, &last)| last < pass).map(|(uri, &last)| (last, uri.clone())).collect();
+        old.sort_unstable_by_key(|&(last, _)| last);
+        let excess = self.shown.len() - THUMBS_KEPT * 3 / 4;
+        for (_, uri) in old.into_iter().take(excess) {
+            self.shown.remove(&uri);
+            ctx.forget_image(&uri);
+        }
+    }
 }
 
 impl Lookups {
@@ -153,9 +204,32 @@ impl Lookups {
         })
     }
 
-    fn has_artwork(&mut self, index: usize, path: Option<&std::path::Path>) -> bool {
-        let Some(slot) = self.artwork.get_mut(index) else { return false };
-        *slot.get_or_insert_with(|| path.is_some_and(std::path::Path::is_file))
+    /// The `file://` URI of track `index`'s thumbnail: the 80 px `_s` file next to its artwork
+    /// (docs/re/masterdb.md, `ImagePath`) when there is one, else the artwork itself (device
+    /// exports keep only a small one). The files are looked up once per snapshot.
+    fn thumbnail_uri(&mut self, index: usize, path: Option<&Path>) -> Option<&Arc<str>> {
+        let slot = self.artwork.get_mut(index)?;
+        slot.get_or_insert_with(|| {
+            let path = path?;
+            let small = path.file_stem().and_then(|s| s.to_str()).map(|stem| path.with_file_name(format!("{stem}_s.jpg")));
+            let chosen = small.filter(|p| p.is_file()).or_else(|| path.is_file().then(|| path.to_path_buf()))?;
+            Some(Arc::from(format!("file://{}", chosen.display())))
+        })
+        .as_ref()
+    }
+
+    /// Track indices of the smart list `id`. rekordbox stores no entries for smart lists, so they
+    /// are evaluated here, once per snapshot, rules and day rather than on every keystroke or sort.
+    fn smart_rows(&mut self, library: &LibrarySnapshot, id: &DbId) -> &[usize] {
+        let xml = library.smart_lists.get(id).map_or("", String::as_str);
+        let clock = crate::smartlist_ui::local_clock();
+        let day = (clock.unix + clock.utc_offset).div_euclid(86_400);
+        if !self.smart.get(id).is_some_and(|s| s.xml == xml && s.day == day) {
+            let by_id = &self.by_id;
+            let rows = crate::smartlist_ui::evaluate(library, id).unwrap_or_default().iter().filter_map(|id| by_id.get(id).copied()).collect();
+            self.smart.insert(id.clone(), SmartRows { xml: xml.to_owned(), day, rows });
+        }
+        self.smart.get(id).map_or(&[], |s| s.rows.as_slice())
     }
 }
 
@@ -175,6 +249,7 @@ impl Default for State {
             reveal_selected: false,
             scroll_to_top: false,
             lookups: Lookups::default(),
+            thumbs: Thumbs::default(),
         }
     }
 }
@@ -209,15 +284,9 @@ impl State {
         // (track index, position in the list's entries)
         let mut rows: Vec<(usize, Option<usize>)> = match &source.list {
             List::Collection => (0..library.tracks.len()).map(|i| (i, None)).collect(),
-            // Smart lists are evaluated on every rebuild (rekordbox stores no entries for them);
-            // their rows have no entry position, so entry edits do not apply.
+            // Smart list rows have no entry position, so entry edits do not apply.
             List::Playlist(id) if library.smart_lists.contains_key(id) => {
-                let by_id = &self.lookups.by_id;
-                crate::smartlist_ui::evaluate(library, id)
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|id| by_id.get(id).map(|&i| (i, None)))
-                    .collect()
+                self.lookups.smart_rows(library, id).iter().map(|&i| (i, None)).collect()
             }
             List::Playlist(id) | List::History(id) | List::MyTag(id) => {
                 let entries = match &source.list {
@@ -398,6 +467,7 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
     let flexible: f32 = COLUMNS.iter().filter(|(c, ..)| c.shrinks()).map(|(_, _, w)| w).sum();
     let room = ui.available_width() - fixed - spacing - 12.0 - TITLE_COMFORT;
     let scale = (room / flexible).clamp(0.6, 1.0);
+    let pass = ui.ctx().cumulative_pass_nr();
     let reveal = std::mem::take(&mut state.reveal_selected)
         .then(|| state.selected.and_then(|(_, i)| state.rows.iter().position(|&r| r == i)))
         .flatten();
@@ -458,8 +528,11 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                         Col::Rating => stars(ui, track.rating),
                         Col::Color => color_bar(ui, track.color),
                         Col::Artwork => {
-                            let path = track.artwork_path.as_deref();
-                            thumbnail(ui, path.filter(|p| state.lookups.has_artwork(track_index, Some(p))));
+                            let uri = state.lookups.thumbnail_uri(track_index, track.artwork_path.as_deref());
+                            if let Some(uri) = uri {
+                                state.thumbs.touch(uri, pass);
+                            }
+                            thumbnail(ui, uri.map(|u| &**u));
                         }
                         _ => {
                             let color = match col {
@@ -492,25 +565,26 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                     let ids = state.selection.iter().map(|&i| library.tracks[i].id.clone()).collect();
                     egui::DragAndDrop::set_payload(&response.ctx, TrackDrag(ids));
                 }
+                // The menu is drawn every frame while it is open: what it acts on is collected
+                // only when an item is clicked.
                 response.context_menu(|ui| {
                     if editable {
                         row_menu(ui, library, source, state, edit, &mut actions);
                     } else if let LibraryRef::Device(device) = source.library {
-                        let tracks: Vec<_> = state.selection.iter().map(|&i| library.tracks[i].path.clone()).collect();
-                        ui.weak(format!("{} track(s)", tracks.len()));
+                        let tracks = || state.selection.iter().map(|&i| library.tracks[i].path.clone()).collect::<Vec<_>>();
+                        ui.weak(format!("{} track(s)", state.selection.len()));
                         if ui.button("Import to Collection").clicked() {
-                            actions.push(Action::ImportFromDevice { device, playlist: None, tracks: tracks.clone() });
+                            actions.push(Action::ImportFromDevice { device, playlist: None, tracks: tracks() });
                             ui.close();
                         }
                         if ui.button("Remove from device…").clicked() {
-                            actions.push(Action::AskRemoveFromDevice { device, playlists: Vec::new(), tracks });
+                            actions.push(Action::AskRemoveFromDevice { device, playlists: Vec::new(), tracks: tracks() });
                             ui.close();
                         }
                     } else if source.library == LibraryRef::Xml {
-                        let rows: Vec<usize> = state.selection.iter().copied().collect();
-                        ui.weak(format!("{} track(s)", rows.len()));
+                        ui.weak(format!("{} track(s)", state.selection.len()));
                         if ui.button("Import to Collection").clicked() {
-                            actions.push(Action::ImportFromXml { list: None, tracks: rows });
+                            actions.push(Action::ImportFromXml { list: None, tracks: state.selection.iter().copied().collect() });
                             ui.close();
                         }
                     } else {
@@ -519,8 +593,9 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                 });
             });
         });
+    state.thumbs.trim(ui.ctx(), pass);
     if state.rows.is_empty() {
-        let message = if state.search.is_empty() { "No tracks".to_owned() } else { format!("No tracks match \u{201c}{}\u{201d}", state.search) };
+        let message =if state.search.is_empty() { "No tracks".to_owned() } else { format!("No tracks match \u{201c}{}\u{201d}", state.search) };
         let rect = egui::Rect::from_min_size(egui::pos2(ui.max_rect().left(), header_top + header_height + 40.0), egui::vec2(ui.max_rect().width(), 20.0));
         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, message, egui::FontId::proportional(13.0), theme::TEXT_MUTED);
     }
@@ -560,16 +635,17 @@ fn selected_ids(state: &State, library: &LibrarySnapshot) -> Vec<DbId> {
     state.selection.iter().map(|&i| library.tracks[i].id.clone()).collect()
 }
 
-/// Write actions for the selected rows (local library, editing on).
+/// Write actions for the selected rows (local library, editing on). Drawn every frame while the
+/// menu is open, so the selection's IDs are collected only for a clicked item.
 fn row_menu(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state: &State, edit: &EditCtx, actions: &mut Vec<Action>) {
-    let ids = selected_ids(state, library);
-    ui.weak(format!("{} track(s)", ids.len()));
+    let ids = || selected_ids(state, library);
+    ui.weak(format!("{} track(s)", state.selection.len()));
     ui.menu_button("Add to playlist", |ui| {
         let mut any = false;
         for p in edit.playlists.iter().filter(|p| p.kind == PlaylistKind::Playlist) {
             any = true;
             if ui.button(&p.name).clicked() {
-                actions.push(Action::Run(Command::AddTracks { playlist: p.id.clone(), content_ids: ids.clone(), position: None }));
+                actions.push(Action::Run(Command::AddTracks { playlist: p.id.clone(), content_ids: ids(), position: None }));
                 ui.close();
             }
         }
@@ -597,8 +673,8 @@ fn row_menu(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
         for stars in 0..=5u8 {
             let label = if stars == 0 { "None".to_owned() } else { "★".repeat(stars as usize).replace('★', "*") };
             if ui.button(label).clicked() {
-                for id in &ids {
-                    actions.push(Action::Run(Command::EditTrack { id: id.clone(), edit: TrackEdit::Rating(stars) }));
+                for id in ids() {
+                    actions.push(Action::Run(Command::EditTrack { id, edit: TrackEdit::Rating(stars) }));
                 }
                 ui.close();
             }
@@ -607,30 +683,31 @@ fn row_menu(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
     ui.menu_button("Colour", |ui| {
         for (slot, name) in [(0u8, "None"), (1, "Pink"), (2, "Red"), (3, "Orange"), (4, "Yellow"), (5, "Green"), (6, "Aqua"), (7, "Blue"), (8, "Purple")] {
             if ui.button(name).clicked() {
-                for id in &ids {
-                    actions.push(Action::Run(Command::EditTrack { id: id.clone(), edit: TrackEdit::Color(slot) }));
+                for id in ids() {
+                    actions.push(Action::Run(Command::EditTrack { id, edit: TrackEdit::Color(slot) }));
                 }
                 ui.close();
             }
         }
     });
     if ui.button("Analyze Track").clicked() {
-        actions.push(Action::AnalyzeTracks(ids.clone()));
+        actions.push(Action::AnalyzeTracks(ids()));
         ui.close();
     }
     // rekordbox's "Analysis Lock On/Off": locked tracks are not analysed and their grid stays.
-    let locked = |want: bool| ids.iter().any(|id| library.tracks.iter().any(|t| &t.id == id && (t.analysed & 0x80 != 0) == want));
+    // The selection holds track indices, so this reads the selected tracks directly.
+    let locked = |want: bool| state.selection.iter().any(|&i| library.tracks.get(i).is_some_and(|t| (t.analysed & 0x80 != 0) == want));
     if locked(false) && ui.button("Analysis Lock On").clicked() {
-        actions.push(Action::Run(Command::SetAnalysisLock { ids: ids.clone(), locked: true }));
+        actions.push(Action::Run(Command::SetAnalysisLock { ids: ids(), locked: true }));
         ui.close();
     }
     if locked(true) && ui.button("Analysis Lock Off").clicked() {
-        actions.push(Action::Run(Command::SetAnalysisLock { ids: ids.clone(), locked: false }));
+        actions.push(Action::Run(Command::SetAnalysisLock { ids: ids(), locked: false }));
         ui.close();
     }
     ui.separator();
     if ui.button("Remove from Collection…").clicked() {
-        actions.push(Action::AskRemoveFromCollection(ids));
+        actions.push(Action::AskRemoveFromCollection(ids()));
         ui.close();
     }
 }
@@ -685,12 +762,12 @@ fn color_bar(ui: &mut egui::Ui, color: Option<u8>) {
     }
 }
 
-/// The track's small artwork (`_s`, 80 px) when the file exists, else nothing.
-fn thumbnail(ui: &mut egui::Ui, path: Option<&std::path::Path>) {
+/// The track's small artwork ([`Lookups::thumbnail_uri`]) when there is a file, else nothing.
+fn thumbnail(ui: &mut egui::Ui, uri: Option<&str>) {
     let size = egui::vec2(18.0, 18.0);
-    match path {
-        Some(p) => {
-            ui.add(egui::Image::new(format!("file://{}", p.display())).fit_to_exact_size(size).corner_radius(2.0).show_loading_spinner(false));
+    match uri {
+        Some(uri) => {
+            ui.add(egui::Image::new(uri).fit_to_exact_size(size).corner_radius(2.0).show_loading_spinner(false));
         }
         None => {
             ui.allocate_exact_size(size, egui::Sense::hover());

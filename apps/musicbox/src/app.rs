@@ -1,15 +1,18 @@
 use crate::actions::Action;
 use crate::devices::{DeviceState, Devices};
-use crate::editor::{Editor, Reply, Request};
+use crate::editor::{DeviceNote, Editor, Guard, Reply, Request};
 use crate::device_remove::{self, RemoveJob};
 use crate::export::{self, ExportJob};
-use crate::library::{LoadResult, spawn_load};
+use crate::library::Loader;
+use crate::mysettings_ui::MySettingsDialog;
 use crate::{Args, browser, cue_panel, deck, icons, theme, tree, waveform};
 use mb_library::{Command, NodeKind};
-use mb_core::{DbId, LibrarySnapshot};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use mb_core::{DbId, LibrarySnapshot, Track};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Which library a list belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,14 +67,144 @@ enum Dialog {
     /// replace lists with the same name.
     ConfirmXmlImport { import: Box<mb_library::XmlImport>, existing: usize, same_name: Vec<String> },
     /// A device's My Settings.
-    MySettings(Box<crate::mysettings_ui::MySettingsDialog>),
+    MySettings(Box<MySettingsDialog>),
 }
+
+/// Waveforms, grid and cues from the analysis files of recently selected tracks, read on worker
+/// threads (a track's `.EXT` and `.2EX` are a few hundred KB). After an edit the cached ones are
+/// checked against their files and read again when they changed (grid edits and analysis
+/// rewrite them).
+struct WaveCache {
+    /// By `.DAT` path; `None` waves: the files could not be read (not analysed).
+    ready: HashMap<PathBuf, (Option<waveform::TrackWaves>, FileStamp)>,
+    /// Paths in `ready`, most recently used last.
+    order: VecDeque<PathBuf>,
+    loading: HashSet<PathBuf>,
+    tx: std::sync::mpsc::Sender<WaveLoad>,
+    rx: Receiver<WaveLoad>,
+}
+
+/// Modification time and size of a track's `.DAT`, `.EXT` and `.2EX`.
+type FileStamp = [Option<(SystemTime, u64)>; 3];
+
+/// A finished read: `refresh` replaces a cached entry only (it was read again after an edit).
+struct WaveLoad {
+    path: PathBuf,
+    waves: Option<waveform::TrackWaves>,
+    stamp: FileStamp,
+    refresh: bool,
+}
+
+impl WaveCache {
+    const KEEP: usize = 12;
+
+    fn new() -> Self {
+        let (tx, rx) = channel();
+        Self { ready: HashMap::new(), order: VecDeque::new(), loading: HashSet::new(), tx, rx }
+    }
+
+    fn stamp(dat: &Path) -> FileStamp {
+        ["DAT", "EXT", "2EX"].map(|ext| {
+            std::fs::metadata(dat.with_extension(ext)).ok().map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
+        })
+    }
+
+    /// Starts reading `dat` unless it is cached or being read; a cached one becomes the most
+    /// recently used.
+    fn request(&mut self, dat: &Path, ctx: &egui::Context) {
+        if self.ready.contains_key(dat) {
+            if self.order.back().is_none_or(|p| p != dat) {
+                self.order.retain(|p| p != dat);
+                self.order.push_back(dat.to_path_buf());
+            }
+            return;
+        }
+        if !self.loading.insert(dat.to_path_buf()) {
+            return;
+        }
+        let (tx, ctx, path) = (self.tx.clone(), ctx.clone(), dat.to_path_buf());
+        std::thread::spawn(move || {
+            // Stamped before reading: a file rewritten meanwhile is read again on the next check.
+            let stamp = Self::stamp(&path);
+            let waves = waveform::load(&path);
+            let _ = tx.send(WaveLoad { path, waves, stamp, refresh: false });
+            ctx.request_repaint();
+        });
+    }
+
+    /// `None` while `dat` is being read; then the waves, `None` inside when not analysed.
+    fn get(&self, dat: &Path) -> Option<Option<&waveform::TrackWaves>> {
+        self.ready.get(dat).map(|(w, _)| w.as_ref())
+    }
+
+    /// Takes finished reads; the least recently used beyond [`Self::KEEP`] are dropped.
+    fn poll(&mut self) {
+        while let Ok(load) = self.rx.try_recv() {
+            if load.refresh {
+                if let Some(entry) = self.ready.get_mut(&load.path) {
+                    *entry = (load.waves, load.stamp);
+                }
+                continue;
+            }
+            self.loading.remove(&load.path);
+            self.order.retain(|p| *p != load.path);
+            self.order.push_back(load.path.clone());
+            self.ready.insert(load.path, (load.waves, load.stamp));
+        }
+        while self.order.len() > Self::KEEP {
+            if let Some(old) = self.order.pop_front() {
+                self.ready.remove(&old);
+            }
+        }
+    }
+
+    /// Reads the cached tracks again whose files changed (on a worker).
+    fn refresh(&self, ctx: &egui::Context) {
+        let cached: Vec<(PathBuf, FileStamp)> = self.ready.iter().map(|(p, (_, s))| (p.clone(), *s)).collect();
+        if cached.is_empty() {
+            return;
+        }
+        let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            for (path, old) in cached {
+                let stamp = Self::stamp(&path);
+                if stamp != old {
+                    let waves = waveform::load(&path);
+                    let _ = tx.send(WaveLoad { path, waves, stamp, refresh: true });
+                    ctx.request_repaint();
+                }
+            }
+        });
+    }
+}
+
+/// The preview player being opened on a worker (opening reads the file, an MP3 whole, and
+/// starts an output stream), with what to do once it is open: the latest request wins.
+struct PendingPlayer {
+    path: PathBuf,
+    rx: Receiver<Result<mb_player::Player, String>>,
+    play: bool,
+    seek_ms: Option<f64>,
+}
+
+/// A finished My Settings write: the dialog (shown again when it failed) and the files written.
+type MySettingsSaved = (Box<MySettingsDialog>, Result<usize, String>);
+
+/// While analyses run, every finished track is an edit: the library is reloaded at most this
+/// often (otherwise a reload follows each edit at once).
+const RELOAD_GAP: Duration = Duration::from_secs(2);
 
 pub struct App {
     args: Args,
-    loading: Option<Receiver<LoadResult>>,
+    loader: Loader,
+    /// A load is running (first load or reload).
+    loading: bool,
+    /// An edit changed the library since the running or last load started.
+    reload_wanted: bool,
+    last_reload: Option<Instant>,
     error: Option<String>,
-    pub library: LibrarySnapshot,
+    /// Shared with background jobs (XML export); a reload replaces it.
+    pub library: Arc<LibrarySnapshot>,
     /// master.db path and passphrase of the loaded local library (for the editor).
     local_db: Option<(PathBuf, String)>,
     /// Source-library details for USB exports.
@@ -82,26 +215,36 @@ pub struct App {
     dialog: Option<Dialog>,
     /// Last editor message (status bar).
     edit_status: Option<String>,
-    last_guard_check: Option<std::time::Instant>,
-    /// The running background check for rekordbox processes.
-    guard_check: Option<Receiver<Vec<String>>>,
+    /// The rekordbox process check: watched while editing, asked once before editing starts.
+    guard: Guard,
+    /// Editing starts once the check with this ID finds no rekordbox.
+    start_editing: Option<u64>,
+    /// Editors turned off that still run their queued commands (or close the connection);
+    /// polled until their thread ends, joined when the app ends.
+    finishing: Vec<Editor>,
+    /// Editing was turned on again while a previous editor was finishing: starts after it.
+    resume_editing: bool,
+    /// A device's My Settings being written (on a worker, after the rekordbox check).
+    mysettings_save: Option<Receiver<MySettingsSaved>>,
     ctx: egui::Context,
     pub devices: Devices,
     pub source: Source,
     pub browser: browser::State,
-    waves: HashMap<PathBuf, Option<waveform::TrackWaves>>,
+    waves: WaveCache,
+    /// The deck showed the cue and grid controls: kept while the next track's files are read, so
+    /// the deck does not change height for a frame.
+    deck_controls: bool,
     /// Zoomed waveforms built from the audio of the selected tracks.
     zoom_views: waveform::ZoomViews,
     /// Preview player for one track (path of the open file).
     player: Option<(PathBuf, mb_player::Player)>,
+    pending_player: Option<PendingPlayer>,
     wave_style: waveform::Style,
     /// Cues of the local library by content ID (`djmdCue`, loaded with the snapshot).
     cues: HashMap<DbId, Vec<mb_library::Cue>>,
     deck_edit: cue_panel::State,
     /// Local track to select again once a reloaded snapshot is shown (edits keep the deck).
     reselect: Option<DbId>,
-    /// Device of the running "Import to Collection" / "Import Histories" (root, may write).
-    device_import: Option<(PathBuf, bool)>,
     /// What the stick-side part of the last device import did (joined into the status line).
     device_import_note: Option<String>,
     /// Why the last analysis skipped a pass (vocal), shown with the next status message.
@@ -136,15 +279,18 @@ impl App {
         let devices = Devices::new(args.devices.clone(), !args.no_volume_scan);
         let ui_ctx = ctx.clone();
         Self {
-            loading: Some(spawn_load(ctx, args.clone())),
+            guard: Guard::start(&ctx),
+            loader: Loader::start(ctx, args.clone()),
+            loading: true,
+            reload_wanted: false,
+            last_reload: None,
             args,
             error: None,
-            library: LibrarySnapshot::default(),
+            library: Arc::default(),
             local_db: None,
             export_source: None,
             export: None,
             remove: None,
-            device_import: None,
             device_import_note: None,
             analysis_note: None,
             xml: None,
@@ -153,15 +299,19 @@ impl App {
             editor: None,
             dialog: None,
             edit_status: None,
-            last_guard_check: None,
-            guard_check: None,
+            start_editing: None,
+            finishing: Vec::new(),
+            resume_editing: false,
+            mysettings_save: None,
             ctx: ui_ctx,
             devices,
             source: Source { library: LibraryRef::Local, list: List::Collection },
             browser: browser::State::default(),
-            waves: HashMap::new(),
+            waves: WaveCache::new(),
+            deck_controls: false,
             zoom_views: waveform::ZoomViews::default(),
             player: None,
+            pending_player: None,
             wave_style: waveform::Style::Rgb,
             cues: HashMap::new(),
             deck_edit: cue_panel::State::default(),
@@ -247,65 +397,68 @@ impl App {
     }
 
     fn poll_loading(&mut self) {
-        let Some(rx) = &self.loading else { return };
-        if let Ok(result) = rx.try_recv() {
-            self.loading = None;
-            match result {
-                Ok(loaded) => {
-                    self.reselect = self
-                        .browser
-                        .selected
-                        .filter(|(library, _)| *library == LibraryRef::Local)
-                        .and_then(|(_, i)| self.library.tracks.get(i))
-                        .map(|t| t.id.clone());
-                    self.library = loaded.snapshot;
-                    self.cues = loaded.cues;
-                    // Key column like rekordbox: preferences ShowOriginalKey / KeyStringSetting.
-                    let pref = |name| mb_usb::settings::preference(&loaded.settings_root, name);
-                    self.browser.key_notation = mb_core::key::KeyNotation::from_preferences(
-                        pref("ShowOriginalKey").map(|v| v.trim() != "0"),
-                        pref("KeyStringSetting").and_then(|v| v.trim().parse().ok()),
-                    );
-                    // Analysis preferences: `AutoGain` and `enableKeyAnalysis` (default on),
-                    // `trackAnalysisSettingsSongStruct`, `trackAnalysisMode`, `HighPrecisionBeatAnalyze` with
-                    // `trackHiPrecisionBeatAnalysisMode`, `trackAnalysisSettingsVocalDetect`,
-                    // `TrackAnalysisSettingsEmbedding` (default on), the CUE analysis preferences
-                    // (`DetectCue`, `AutoDetectCue`, …) and `cue_personal_trend.json`, `AutoAnalysis`.
-                    self.analysis_settings = mb_library::AnalysisSettings {
-                        auto_gain: pref("AutoGain").is_none_or(|v| v.trim() != "0"),
-                        phrase: pref("trackAnalysisSettingsSongStruct").is_some_and(|v| v.trim() == "1"),
-                        key: pref("enableKeyAnalysis").is_none_or(|v| v.trim() != "0"),
-                        high_precision: mb_library::AnalysisSettings::high_precision_from(
-                            pref("HighPrecisionBeatAnalyze").as_deref(),
-                            pref("trackHiPrecisionBeatAnalysisMode").as_deref(),
-                        ),
-                        dynamic: mb_library::AnalysisSettings::dynamic_from(pref("trackAnalysisMode").as_deref()),
-                        vocal: pref("trackAnalysisSettingsVocalDetect").is_some_and(|v| v.trim() == "1"),
-                        embedding: pref("TrackAnalysisSettingsEmbedding").is_none_or(|v| v.trim() != "0"),
-                        cue: mb_library::CueAnalysisSettings::from_prefs(|n| mb_usb::settings::preference(&loaded.settings_root, n)),
-                        // Auto CUE's personal tendency, read only; an unreadable file counts as none
-                        cue_trend: mb_library::cue_analysis::read_trend(&loaded.settings_root).ok().flatten().map(std::sync::Arc::new),
-                    };
-                    self.auto_analysis = pref("AutoAnalysis").is_some_and(|v| v.trim() == "1");
-                    self.export_source = Some(export::Source {
-                        db_path: loaded.db_path.clone(),
-                        passphrase: loaded.passphrase.clone(),
-                        analysis_root: loaded.analysis_root,
-                        settings_root: loaded.settings_root,
-                        lang_path: loaded.lang_path,
-                    });
-                    if self.xml.is_none()
-                        && let Some(path) = self.export_source.as_ref().and_then(|s| crate::xml_bridge::bridge_file(&s.settings_root))
-                    {
-                        self.open_xml(path);
-                    }
-                    self.local_db = Some((loaded.db_path, loaded.passphrase));
-                    self.browser.invalidate();
-                    self.queue_unanalysed();
-                }
-                Err(e) => self.error = Some(e),
-            }
+        if !self.loading {
+            return;
         }
+        let Some(result) = self.loader.poll() else { return };
+        self.loading = false;
+        match result {
+            Ok(loaded) => {
+                self.reselect = self
+                    .browser
+                    .selected
+                    .filter(|(library, _)| *library == LibraryRef::Local)
+                    .and_then(|(_, i)| self.library.tracks.get(i))
+                    .map(|t| t.id.clone());
+                // The old snapshot is freed on a worker: at 50 000 tracks that is about a million
+                // allocations.
+                let old = (
+                    std::mem::replace(&mut self.library, Arc::new(loaded.snapshot)),
+                    std::mem::replace(&mut self.cues, loaded.cues),
+                );
+                std::thread::spawn(move || drop(old));
+                // Key column and analysis like rekordbox's preferences (`library::Preferences`).
+                self.browser.key_notation = loaded.prefs.key_notation;
+                self.analysis_settings = loaded.prefs.analysis;
+                self.auto_analysis = loaded.prefs.auto_analysis;
+                self.export_source = Some(export::Source {
+                    db_path: loaded.db_path.clone(),
+                    passphrase: loaded.passphrase.clone(),
+                    analysis_root: loaded.analysis_root,
+                    settings_root: loaded.settings_root,
+                    lang_path: loaded.lang_path,
+                });
+                if self.xml.is_none()
+                    && self.xml_loading.is_none()
+                    && let Some(path) = loaded.prefs.bridge_xml
+                {
+                    self.open_xml(path);
+                }
+                self.local_db = Some((loaded.db_path, loaded.passphrase));
+                self.browser.invalidate();
+                self.queue_unanalysed();
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// Starts a reload an edit asked for, unless one is running (it runs again afterwards).
+    /// While analyses run, reloads are at least [`RELOAD_GAP`] apart.
+    fn reload_if_wanted(&mut self, ctx: &egui::Context) {
+        if !self.reload_wanted || self.loading {
+            return;
+        }
+        if self.analysis.as_ref().is_some_and(|q| q.busy())
+            && let Some(wait) = self.last_reload.and_then(|t| RELOAD_GAP.checked_sub(t.elapsed()))
+            && !wait.is_zero()
+        {
+            ctx.request_repaint_after(wait);
+            return;
+        }
+        self.reload_wanted = false;
+        self.last_reload = Some(Instant::now());
+        self.loading = true;
+        self.loader.reload();
     }
 
     /// The player area: the zoomed waveform, artwork, title, readouts and the overview, and for
@@ -318,9 +471,13 @@ impl App {
         if let Some(t) = &track {
             self.deck_edit.follow(&t.id, t.bpm());
         }
-        let waves = track.as_ref().and_then(|t| t.analysis_path.as_ref()).and_then(|path| {
-            self.waves.entry(path.clone()).or_insert_with(|| waveform::load(path)).as_ref()
-        });
+        let dat = track.as_ref().and_then(|t| t.analysis_path.as_deref());
+        if let Some(dat) = dat {
+            self.waves.request(dat, ui.ctx());
+        }
+        // While the files are read the deck stays empty (not "Not analysed").
+        let reading = dat.is_some_and(|dat| self.waves.get(dat).is_none());
+        let waves = dat.and_then(|dat| self.waves.get(dat)).flatten();
         // Built from the audio for tracks with analysis files (the strip needs their grid).
         if let (Some(t), Some(_)) = (&track, waves) {
             self.zoom_views.update(&t.path, ui.ctx());
@@ -354,7 +511,7 @@ impl App {
 
         match (&track, waves) {
             (Some(_), Some(w)) => jump = waveform::show_detail(ui, w, view, &marks, position, 4_000.0, deck::DETAIL_HEIGHT, *wave_style),
-            (Some(_), None) => deck::empty_well(ui, deck::DETAIL_HEIGHT, "Not analysed"),
+            (Some(_), None) => deck::empty_well(ui, deck::DETAIL_HEIGHT, if reading { "" } else { "Not analysed" }),
             (None, _) => deck::empty_well(ui, deck::DETAIL_HEIGHT, ""),
         }
         ui.add_space(deck::PAD);
@@ -409,23 +566,63 @@ impl App {
         actions
     }
 
-    /// Opens the preview player for `path` if needed, then toggles playback and/or seeks.
-    fn preview(&mut self, path: &std::path::Path, toggle: bool, seek_ms: Option<f64>) {
-        if self.player.as_ref().is_none_or(|(p, _)| p != path) {
-            match mb_player::Player::open(path) {
-                Ok(player) => self.player = Some((path.to_path_buf(), player)),
-                Err(e) => {
-                    self.edit_status = Some(format!("Cannot play {}: {e}", path.display()));
-                    self.player = None;
-                    return;
-                }
+    /// Toggles playback and/or seeks (which plays) the preview player for `path`, opening it on
+    /// a worker first if needed. The previous track's player stops at once.
+    fn preview(&mut self, path: &Path, toggle: bool, seek_ms: Option<f64>) {
+        if let Some((p, player)) = &self.player
+            && p == path
+        {
+            match seek_ms {
+                Some(ms) => player.play_from_ms(ms),
+                None if toggle => player.toggle(),
+                None => {}
             }
+            return;
         }
-        let Some((_, player)) = &self.player else { return };
-        match seek_ms {
-            Some(ms) => player.play_from_ms(ms),
-            None if toggle => player.toggle(),
-            None => {}
+        if let Some(pending) = &mut self.pending_player
+            && pending.path == path
+        {
+            // Asked again before it opened.
+            match seek_ms {
+                Some(ms) => (pending.play, pending.seek_ms) = (true, Some(ms)),
+                None if toggle => pending.play = !pending.play,
+                None => {}
+            }
+            return;
+        }
+        if let Some(old) = self.player.take() {
+            // Stopping joins its decode thread and closes the output stream.
+            std::thread::spawn(move || drop(old));
+        }
+        let (tx, rx) = channel();
+        let (ctx, file) = (self.ctx.clone(), path.to_path_buf());
+        std::thread::spawn(move || {
+            let _ = tx.send(mb_player::Player::open(&file).map_err(|e| e.to_string()));
+            ctx.request_repaint();
+        });
+        self.pending_player = Some(PendingPlayer { path: path.to_path_buf(), rx, play: toggle || seek_ms.is_some(), seek_ms });
+    }
+
+    /// Takes the preview player once it is open and does what was asked meanwhile.
+    fn poll_player(&mut self) {
+        let Some(pending) = &self.pending_player else { return };
+        let result = match pending.rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("the player could not be opened".into()),
+        };
+        let Some(pending) = self.pending_player.take() else { return };
+        match result {
+            Ok(player) => {
+                match (pending.play, pending.seek_ms) {
+                    (true, Some(ms)) => player.play_from_ms(ms),
+                    (true, None) => player.play(),
+                    (false, Some(ms)) => player.seek_ms(ms),
+                    (false, None) => {}
+                }
+                self.player = Some((pending.path, player));
+            }
+            Err(e) => self.edit_status = Some(format!("Cannot play {}: {e}", pending.path.display())),
         }
     }
 
@@ -475,7 +672,7 @@ impl App {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 3.5, color);
             };
-            if self.loading.is_some() {
+            if self.loading {
                 ui.add(egui::Spinner::new().size(12.0));
                 ui.label(egui::RichText::new("Loading library…").small().color(theme::TEXT_DIM));
             } else if let Some(e) = &self.error {
@@ -512,8 +709,19 @@ impl App {
                     }
                     let (text, fraction) = match &job_state.progress {
                         Some(p) => (
-                            format!("Exporting to {}: {}/{} {}", job_state.device_name, p.tracks_done, p.tracks_total, p.current.as_deref().unwrap_or("")),
-                            Some(p.tracks_done as f32 / p.tracks_total.max(1) as f32),
+                            match p.phase {
+                                mb_usb::Phase::Databases | mb_usb::Phase::Finish => {
+                                    format!("Exporting to {}: writing the databases", job_state.device_name)
+                                }
+                                _ => format!("Exporting to {}: {}/{} {}", job_state.device_name, p.tracks_done, p.tracks_total, p.current.as_deref().unwrap_or("")),
+                            },
+                            // The bar follows the audio copied (what takes the time, and smooth
+                            // within long files); the tracks when there is no audio to copy.
+                            Some(if p.bytes_total > 0 {
+                                p.bytes_done as f32 / p.bytes_total as f32
+                            } else {
+                                p.tracks_done as f32 / p.tracks_total.max(1) as f32
+                            }),
                         ),
                         None => (format!("Exporting to {}…", job_state.device_name), None),
                     };
@@ -539,11 +747,22 @@ impl App {
         self.zoom_views.building()
     }
 
-    /// The selected collection track has analysis files to edit cues and grid on.
+    /// The selected collection track has analysis files to edit cues and grid on. While they are
+    /// read, the answer for the previous track stands.
     fn waves_ready(&mut self) -> bool {
-        let Some((LibraryRef::Local, i)) = self.browser.selected else { return false };
-        let Some(path) = self.library.tracks.get(i).and_then(|t| t.analysis_path.clone()) else { return false };
-        self.waves.entry(path.clone()).or_insert_with(|| waveform::load(&path)).is_some()
+        let dat = match self.browser.selected {
+            Some((LibraryRef::Local, i)) => self.library.tracks.get(i).and_then(|t| t.analysis_path.clone()),
+            _ => None,
+        };
+        let Some(dat) = dat else {
+            self.deck_controls = false;
+            return false;
+        };
+        self.waves.request(&dat, &self.ctx);
+        if let Some(waves) = self.waves.get(&dat) {
+            self.deck_controls = waves.is_some();
+        }
+        self.deck_controls
     }
 
     fn editing(&self) -> bool {
@@ -556,52 +775,98 @@ impl App {
         let state = match &self.editor {
             Some(e) if !e.ready => deck::EditState::Starting,
             Some(_) => deck::EditState::Editing,
+            None if self.start_editing.is_some() || self.resume_editing => deck::EditState::Starting,
+            None if self.finishing.iter().any(|e| e.pending > 0) => deck::EditState::Saving,
             None => deck::EditState::ReadOnly,
         };
         let response = deck::editing_switch(ui, state).on_hover_text("Editing writes to the library; it backs the library up first");
         if response.clicked() {
-            if self.editor.is_none() {
-                let running = mb_masterdb::running_rekordbox();
-                if !running.is_empty() {
-                    self.edit_status = Some(format!("Quit {} first", running.join(", ")));
-                } else if let Some((db, passphrase)) = &self.local_db {
-                    let analysis_root = self.export_source.as_ref().map(|s| s.analysis_root.clone());
-                    self.editor = Some(Editor::start(ui.ctx(), db, passphrase, self.args.backup_root.clone(), analysis_root));
-                    self.edit_status = Some("Backing up the library…".into());
-                }
-            } else {
-                self.editor = None;
+            if self.start_editing.is_some() || self.resume_editing {
+                self.start_editing = None;
+                self.resume_editing = false;
                 self.edit_status = Some("Editing off".into());
+            } else if self.editor.is_none() {
+                // Editing starts in `poll_editor` once the process list (read on the guard
+                // thread) shows no rekordbox.
+                self.start_editing = Some(self.guard.check());
+            } else {
+                let pending = self.editor.as_ref().map_or(0, |e| e.pending);
+                self.stop_editor();
+                self.edit_status = Some(if pending > 0 { format!("Editing off; saving {pending} edit(s)…") } else { "Editing off".into() });
             }
         }
         response.rect
     }
 
+    /// Turns editing off: no new edits are taken; the ones already queued are still saved.
+    fn stop_editor(&mut self) {
+        if let Some(mut editor) = self.editor.take() {
+            editor.finish();
+            self.finishing.push(editor);
+        }
+    }
+
+    /// Opens the write connection (which backs the library up first).
+    fn start_editor(&mut self) {
+        if let Some((db, passphrase)) = &self.local_db {
+            let analysis_root = self.export_source.as_ref().map(|s| s.analysis_root.clone());
+            self.editor = Some(Editor::start(&self.ctx, db, passphrase, self.args.backup_root.clone(), analysis_root));
+            self.edit_status = Some("Backing up the library…".into());
+        }
+    }
+
     /// Editor replies; also locks editing again as soon as rekordbox starts.
     fn poll_editor(&mut self, ctx: &egui::Context) {
-        // The process list is read on a worker thread (it takes tens of milliseconds), every 2 s.
-        if self.editor.is_some() && self.guard_check.is_none() && self.last_guard_check.is_none_or(|t| t.elapsed().as_secs() >= 2) {
-            self.last_guard_check = Some(std::time::Instant::now());
-            let (tx, rx) = std::sync::mpsc::channel();
-            let repaint = ctx.clone();
-            std::thread::spawn(move || {
-                let _ = tx.send(mb_masterdb::running_rekordbox());
-                repaint.request_repaint();
-            });
-            self.guard_check = Some(rx);
-            ctx.request_repaint_after(std::time::Duration::from_secs(2));
-        }
-        if let Some(running) = self.guard_check.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.guard_check = None;
-            if self.editor.is_some() && !running.is_empty() {
-                self.editor = None;
+        // The process list is read on the guard thread (it takes tens of milliseconds): every 2 s
+        // while editing, and once when editing is asked for.
+        if let Some((check, running)) = self.guard.poll() {
+            if let Some(asked) = self.start_editing
+                && check >= asked
+            {
+                self.start_editing = None;
+                if !running.is_empty() {
+                    self.edit_status = Some(format!("Quit {} first", running.join(", ")));
+                } else if self.finishing.is_empty() {
+                    self.start_editor();
+                } else {
+                    // One writer at a time: the previous editor saves its queue first.
+                    self.resume_editing = true;
+                }
+            } else if !running.is_empty() && (self.editor.is_some() || !self.finishing.is_empty()) {
+                // Nothing may write master.db while rekordbox runs: queued edits are dropped
+                // (the editor reports how many).
+                self.stop_editor();
+                for editor in &mut self.finishing {
+                    editor.abort();
+                }
+                self.resume_editing = false;
                 self.edit_status = Some(format!("{} started; editing turned off", running.join(", ")));
-                return;
             }
         }
-        let Some(editor) = &mut self.editor else { return };
+        self.guard.watch(self.editor.is_some() || !self.finishing.is_empty());
+
+        // Editors being turned off: their last replies (saved edits reload the library), then
+        // their thread is joined.
+        let mut replies = Vec::new();
+        let mut i = 0;
+        while i < self.finishing.len() {
+            let done = self.finishing[i].finished();
+            replies.extend(self.finishing[i].poll().into_iter().filter(|r| !matches!(r, Reply::Ready { .. })));
+            if done {
+                self.finishing.remove(i).join();
+            } else {
+                i += 1;
+            }
+        }
+        if self.resume_editing && self.finishing.is_empty() {
+            self.resume_editing = false;
+            self.start_editor();
+        }
+        if let Some(editor) = &mut self.editor {
+            replies.extend(editor.poll());
+        }
         let mut reload = false;
-        for reply in editor.poll() {
+        for reply in replies {
             match reply {
                 Reply::Ready { backup } => {
                     self.edit_status = Some(format!("Editing on — backup in {}", backup.display()));
@@ -609,39 +874,30 @@ impl App {
                 }
                 Reply::Failed(e) => {
                     self.edit_status = Some(e);
-                    self.editor = None;
-                    return;
+                    self.stop_editor();
+                }
+                Reply::Skipped(n) => {
+                    let status = self.edit_status.take().unwrap_or_default();
+                    self.edit_status = Some(format!("{status}; {n} edit(s) not saved").trim_start_matches("; ").to_owned());
                 }
                 Reply::Done { message, changed } => {
                     let notes: Vec<String> = [self.device_import_note.take(), self.analysis_note.take()].into_iter().flatten().collect();
                     self.edit_status = Some(if notes.is_empty() { message } else { format!("{message}; {}", notes.join("; ")) });
                     reload |= changed;
                 }
-                Reply::DeviceEffect(effect) => {
-                    if let Some((root, writable)) = self.device_import.take() {
-                        self.device_import_note = Some(if !writable {
-                            "device is protected, nothing written to it".into()
-                        } else {
-                            match crate::device_import::apply_to_device(&root, &effect) {
-                                Ok(Some(n)) => {
-                                    self.devices.reload(ctx, &root);
-                                    n
-                                }
-                                Ok(None) => String::new(),
-                                Err(e) => format!("device not updated: {e}"),
-                            }
-                        })
-                        .filter(|n| !n.is_empty());
+                Reply::DeviceEffect(DeviceNote { note, reload }) => {
+                    // The editor thread already wrote the stick (`device_import::follow_up`).
+                    if let Some(root) = reload {
+                        self.devices.reload(ctx, &root);
                     }
+                    self.device_import_note = note;
                 }
             }
         }
         if reload {
-            // Grid edits rewrite the analysis files.
-            self.waves.clear();
-        }
-        if reload && self.loading.is_none() {
-            self.loading = Some(spawn_load(ctx.clone(), self.args.clone()));
+            // Grid edits and analysis rewrite the analysis files.
+            self.waves.refresh(ctx);
+            self.reload_wanted = true;
         }
     }
 
@@ -734,14 +990,10 @@ impl App {
         let Some(copy_to) = self.args.import_folder.clone().or_else(mb_library::device_import::default_copy_folder) else {
             return;
         };
-        match crate::device_import::import_command(&target.root, playlist.as_deref(), &tracks, copy_to) {
-            Ok(command) => {
-                self.device_import = Some((target.root.clone(), target.write_refusal.is_none()));
-                self.edit_status = Some(format!("Importing from {}…", target.name));
-                self.run(command);
-            }
-            Err(e) => self.edit_status = Some(format!("Import failed: {e}")),
-        }
+        // export.pdb is read on the editor thread (`device_import::import_request`).
+        self.edit_status = Some(format!("Importing from {}…", target.name));
+        let request = crate::device_import::import_request(target.root.clone(), target.write_refusal.is_none(), playlist, tracks, copy_to);
+        self.request(request);
     }
 
     fn import_histories(&mut self, device: usize) {
@@ -750,13 +1002,8 @@ impl App {
             self.edit_status = Some("Turn on editing first".into());
             return;
         }
-        match crate::device_import::histories_command(&target.root) {
-            Ok(command) => {
-                self.device_import = Some((target.root.clone(), target.write_refusal.is_none()));
-                self.run(command);
-            }
-            Err(e) => self.edit_status = Some(format!("History import: {e}")),
-        }
+        let request = crate::device_import::histories_request(target.root.clone(), target.write_refusal.is_none());
+        self.request(request);
     }
 
     /// Parses a rekordbox.xml in the background; it then shows as "rekordbox xml".
@@ -853,7 +1100,8 @@ impl App {
     }
 
     /// Queues collection tracks for musicbox's analysis (`analyse-track.md`). Locked tracks
-    /// (`Analysed` bit 0x80) and missing files are skipped. `explicit`: the user asked (messages).
+    /// (`Analysed` bit 0x80) are skipped here, missing files by the workers. `explicit`: the user
+    /// asked (messages).
     fn analyze(&mut self, ids: &[DbId], explicit: bool) {
         if !self.editing() {
             if explicit {
@@ -861,10 +1109,16 @@ impl App {
             }
             return;
         }
+        // One pass over the collection, however many tracks are asked for.
+        let wanted: HashSet<&DbId> = ids.iter().collect();
+        let mut by_id: HashMap<&DbId, &Track> = HashMap::with_capacity(wanted.len());
+        for t in self.library.tracks.iter().filter(|t| wanted.contains(&t.id)) {
+            by_id.entry(&t.id).or_insert(t);
+        }
         let jobs: Vec<crate::analysis_jobs::Job> = ids
             .iter()
-            .filter_map(|id| self.library.tracks.iter().find(|t| t.id == *id))
-            .filter(|t| t.analysed & 0x80 == 0 && t.path.is_file())
+            .filter_map(|id| by_id.get(id).copied())
+            .filter(|t| t.analysed & 0x80 == 0)
             .map(|t| crate::analysis_jobs::Job {
                 content: t.id.clone(),
                 audio: t.path.clone(),
@@ -876,11 +1130,12 @@ impl App {
                 title: t.title.clone(),
                 stored_dat: t.analysis_path.clone(),
                 stored_bpm: t.bpm_x100.map(i64::from),
+                explicit,
             })
             .collect();
         if jobs.is_empty() {
             if explicit {
-                self.edit_status = Some("Nothing to analyse (locked or missing files)".into());
+                self.edit_status = Some("Nothing to analyse (locked tracks)".into());
             }
             return;
         }
@@ -934,6 +1189,7 @@ impl App {
                     }
                     self.run(Command::ApplyAnalysis { content: f.content, analysis })
                 }
+                Err(e) if e == crate::analysis_jobs::MISSING_FILE => self.edit_status = Some(format!("Not analysed {}: {e}", f.title)),
                 Err(e) => self.edit_status = Some(format!("Analysis of {} failed: {e}", f.title)),
             }
         }
@@ -1048,7 +1304,7 @@ impl App {
                 Some(Dialog::XmlExport { path }) => {
                     if let Some(source) = &self.export_source {
                         let path = PathBuf::from(path.trim());
-                        self.xml_export = Some(crate::xml_bridge::XmlExportJob::start(&self.ctx, source, self.library.clone(), path));
+                        self.xml_export = Some(crate::xml_bridge::XmlExportJob::start(&self.ctx, source, Arc::clone(&self.library), path));
                     }
                     return;
                 }
@@ -1061,13 +1317,15 @@ impl App {
                     if dialog.read_only.is_some() || dialog.settings.changes().is_empty() {
                         return;
                     }
-                    match dialog.save() {
-                        Ok(n) => self.edit_status = Some(format!("My Settings: wrote {n} file(s) to {}", dialog.name)),
-                        Err(e) => {
-                            self.edit_status = Some(format!("My Settings not saved: {e}"));
-                            self.dialog = Some(Dialog::MySettings(dialog));
-                        }
-                    }
+                    // On a worker: `save` checks the process list first (tens of milliseconds).
+                    let (tx, rx) = channel();
+                    let ctx = self.ctx.clone();
+                    std::thread::spawn(move || {
+                        let result = dialog.save();
+                        let _ = tx.send((dialog, result));
+                        ctx.request_repaint();
+                    });
+                    self.mysettings_save = Some(rx);
                     return;
                 }
                 None => return,
@@ -1075,6 +1333,21 @@ impl App {
             self.run(command);
         } else if cancel {
             self.dialog = None;
+        }
+    }
+
+    /// A finished My Settings write; a failed one opens the dialog again.
+    fn poll_mysettings(&mut self) {
+        let Some((dialog, result)) = self.mysettings_save.as_ref().and_then(|rx| rx.try_recv().ok()) else { return };
+        self.mysettings_save = None;
+        match result {
+            Ok(n) => self.edit_status = Some(format!("My Settings: wrote {n} file(s) to {}", dialog.name)),
+            Err(e) => {
+                self.edit_status = Some(format!("My Settings not saved: {e}"));
+                if self.dialog.is_none() {
+                    self.dialog = Some(Dialog::MySettings(dialog));
+                }
+            }
         }
     }
 
@@ -1109,6 +1382,17 @@ impl App {
     }
 }
 
+impl Drop for App {
+    /// Waits for the editors to save their queued edits and close master.db, so the process
+    /// never exits while a connection closes.
+    fn drop(&mut self) {
+        self.stop_editor();
+        for editor in self.finishing.drain(..) {
+            editor.join();
+        }
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_loading();
@@ -1121,6 +1405,10 @@ impl eframe::App for App {
 
         let ctx = ui.ctx().clone();
         self.poll_editor(&ctx);
+        self.reload_if_wanted(&ctx);
+        self.waves.poll();
+        self.poll_player();
+        self.poll_mysettings();
         self.poll_export();
         self.poll_remove();
         self.poll_xml();
@@ -1147,7 +1435,7 @@ impl eframe::App for App {
             });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG_PANEL)).show(ui, |ui| {
             let library = match self.source.library {
-                LibraryRef::Local => &self.library,
+                LibraryRef::Local => &*self.library,
                 LibraryRef::Device(i) => self.devices.list.get(i).and_then(|d| d.snapshot()).unwrap_or(&EMPTY),
                 LibraryRef::Xml => self.xml.as_ref().map_or(&*EMPTY, |x| &x.snapshot),
             };

@@ -21,12 +21,13 @@ pub struct XmlLibrary {
 }
 
 /// The file rekordbox's bridge shows (preference `bridgeImportedLibraryFile`), if the tree shows
-/// it (preference `showRbXml` = 1; *hypothesis* from the name) and it exists.
-pub fn bridge_file(settings_root: &Path) -> Option<PathBuf> {
-    if mb_usb::settings::preference(settings_root, "showRbXml")?.trim() != "1" {
+/// it (preference `showRbXml` = 1; *hypothesis* from the name) and it exists. `pref` looks up a
+/// preference (`library::Preferences`).
+pub fn bridge_file(pref: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    if pref("showRbXml")?.trim() != "1" {
         return None;
     }
-    let path = PathBuf::from(mb_usb::settings::preference(settings_root, "bridgeImportedLibraryFile")?);
+    let path = PathBuf::from(pref("bridgeImportedLibraryFile")?);
     path.is_file().then_some(path)
 }
 
@@ -180,7 +181,8 @@ pub struct XmlExportJob {
 }
 
 impl XmlExportJob {
-    pub fn start(ctx: &egui::Context, source: &crate::export::Source, snapshot: LibrarySnapshot, path: PathBuf) -> Self {
+    /// `snapshot` is shared with the app (no copy of the library on the UI thread).
+    pub fn start(ctx: &egui::Context, source: &crate::export::Source, snapshot: std::sync::Arc<LibrarySnapshot>, path: PathBuf) -> Self {
         let (tx, rx) = channel();
         let (db, pass, settings, out) = (source.db_path.clone(), source.passphrase.clone(), source.settings_root.clone(), path.clone());
         let ctx = ctx.clone();

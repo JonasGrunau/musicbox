@@ -100,10 +100,11 @@ impl MySettingsDialog {
         }
     }
 
-    /// Writes the changed files; returns how many.
+    /// Writes the changed files; returns how many. The app runs it on a worker: it reads the
+    /// process list and checks the volume again (the stick may have been swapped).
     pub fn save(&self) -> Result<usize, String> {
-        if let Some(reason) = &self.read_only {
-            return Err(reason.clone());
+        if let Some(reason) = self.read_only.clone().or_else(|| crate::protect::write_refusal(&self.root)) {
+            return Err(reason);
         }
         let running = mb_masterdb::running_rekordbox();
         if !running.is_empty() {

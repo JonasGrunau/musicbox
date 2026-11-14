@@ -17,7 +17,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 pub struct TrackWaves {
@@ -31,6 +31,49 @@ pub struct TrackWaves {
     pub grid: Vec<Beat>,
     /// Cues stored in the .EXT (device tracks; collection cues live in the database).
     pub cues: Vec<CueMark>,
+    /// Tells these waves apart in the overview cache ([`show_overview`]).
+    serial: u64,
+}
+
+/// Serial numbers of loaded [`TrackWaves`].
+static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
+
+/// The overview's waveform as last tessellated, for one track, rect, style and scale. One is
+/// kept (egui temp data): the deck shows one overview.
+#[derive(Clone)]
+struct OverviewMesh {
+    key: OverviewKey,
+    mesh: Arc<egui::Mesh>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct OverviewKey {
+    serial: u64,
+    rect: egui::Rect,
+    style: Style,
+    pixels_per_point: f32,
+}
+
+/// Waveform columns as one mesh: each filled rect is tessellated exactly as egui tessellates
+/// `Painter::rect_filled` at the end of the frame (same options and scale, so the same pixels),
+/// but the painter gets one shape instead of thousands.
+struct Bars {
+    tessellator: egui::epaint::Tessellator,
+    mesh: egui::Mesh,
+}
+
+impl Bars {
+    fn new(ctx: &egui::Context, clip: egui::Rect) -> Self {
+        let options = ctx.tessellation_options(|o| *o);
+        // The font texture size and prepared discs are only used for text and circles.
+        let mut tessellator = egui::epaint::Tessellator::new(ctx.pixels_per_point(), options, [1, 1], Vec::new());
+        tessellator.set_clip_rect(clip);
+        Self { tessellator, mesh: egui::Mesh::default() }
+    }
+
+    fn add(&mut self, rect: egui::Rect, color: egui::Color32) {
+        self.tessellator.tessellate_rect(&egui::epaint::RectShape::filled(rect, 0.0, color), &mut self.mesh);
+    }
 }
 
 #[derive(Clone)]
@@ -130,7 +173,8 @@ pub fn load(dat: &Path) -> Option<TrackWaves> {
     for list in ext.cue_lists_ext() {
         push_cues(&mut cues, &list);
     }
-    Some(TrackWaves { color, three_band, scroll, detail_bands, grid, cues })
+    let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed);
+    Some(TrackWaves { color, three_band, scroll, detail_bands, grid, cues, serial })
 }
 
 /// Zoomed waveforms built from the audio, by audio file. The selected track's view is built on a
@@ -253,38 +297,20 @@ pub fn show_overview(
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 3.0, crate::theme::BG_WELL);
-    let mid = rect.center().y;
-    let half = rect.height() / 2.0 - 2.0;
-
-    let column = |i: usize, n: usize, height: f32, color: egui::Color32| {
-        let x0 = rect.left() + rect.width() * i as f32 / n as f32;
-        let x1 = rect.left() + rect.width() * (i + 1) as f32 / n as f32;
-        let h = (height * half).max(0.5);
-        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, mid - h), egui::pos2(x1.max(x0 + 1.0), mid + h)), 0.0, color);
+    // The waveform does not change while the track plays: it is tessellated once per rect, style
+    // and scale, and only the playhead and cues are drawn anew.
+    let key = OverviewKey { serial: waves.serial, rect, style, pixels_per_point: ui.ctx().pixels_per_point() };
+    let id = egui::Id::new("overview-mesh");
+    let mesh = match ui.data(|d| d.get_temp::<OverviewMesh>(id)).filter(|c| c.key == key) {
+        Some(cached) => cached.mesh,
+        None => {
+            let mesh = Arc::new(overview_bars(ui.ctx(), waves, rect, style));
+            ui.data_mut(|d| d.insert_temp(id, OverviewMesh { key, mesh: mesh.clone() }));
+            mesh
+        }
     };
-
-    match (style, &waves.three_band, &waves.color) {
-        (Style::ThreeBand, Some(bands), _) => {
-            let n = bands.len();
-            let peak = bands.data.iter().flat_map(|c| c.iter().copied()).max().unwrap_or(1).max(1) as f32;
-            // Draw low, then mid, then high on top, each scaled to its own height.
-            for (band, colour) in BAND_COLORS.iter().enumerate() {
-                for i in 0..n {
-                    let v = bands.data[i][band] as f32 / peak;
-                    column(i, n, v, *colour);
-                }
-            }
-        }
-        (_, _, Some(preview)) => {
-            let n = preview.len();
-            let peak = preview.max_height().max(1) as f32;
-            for i in 0..n {
-                if let Some(([r, g, b], h)) = preview.rgb_column(i) {
-                    column(i, n, h as f32 / peak, egui::Color32::from_rgb(r, g, b));
-                }
-            }
-        }
-        _ => {}
+    if !mesh.is_empty() {
+        painter.add(egui::Shape::Mesh(mesh));
     }
 
     if let (Some(ms), true) = (playhead_ms, duration_ms > 0) {
@@ -321,6 +347,44 @@ pub fn show_overview(
     clicked
 }
 
+/// The overview's columns: PWV6 bands (low, mid, high on top) in the 3-band style when the track
+/// has them, else the PWV4 colour preview.
+fn overview_bars(ctx: &egui::Context, waves: &TrackWaves, rect: egui::Rect, style: Style) -> egui::Mesh {
+    let mid = rect.center().y;
+    let half = rect.height() / 2.0 - 2.0;
+    let mut bars = Bars::new(ctx, rect);
+    let mut column = |i: usize, n: usize, height: f32, color: egui::Color32| {
+        let x0 = rect.left() + rect.width() * i as f32 / n as f32;
+        let x1 = rect.left() + rect.width() * (i + 1) as f32 / n as f32;
+        let h = (height * half).max(0.5);
+        bars.add(egui::Rect::from_min_max(egui::pos2(x0, mid - h), egui::pos2(x1.max(x0 + 1.0), mid + h)), color);
+    };
+    match (style, &waves.three_band, &waves.color) {
+        (Style::ThreeBand, Some(bands), _) => {
+            let n = bands.len();
+            let peak = bands.data.iter().flat_map(|c| c.iter().copied()).max().unwrap_or(1).max(1) as f32;
+            // Draw low, then mid, then high on top, each scaled to its own height.
+            for (band, colour) in BAND_COLORS.iter().enumerate() {
+                for i in 0..n {
+                    let v = bands.data[i][band] as f32 / peak;
+                    column(i, n, v, *colour);
+                }
+            }
+        }
+        (_, _, Some(preview)) => {
+            let n = preview.len();
+            let peak = preview.max_height().max(1) as f32;
+            for i in 0..n {
+                if let Some(([r, g, b], h)) = preview.rgb_column(i) {
+                    column(i, n, h as f32 / peak, egui::Color32::from_rgb(r, g, b));
+                }
+            }
+        }
+        _ => {}
+    }
+    bars.mesh
+}
+
 /// Zoomed strip around `center_ms` (± `half_span_ms`): the waveform (`view` when built, else the
 /// stored waves), beat grid (downbeats brighter), cue markers with loop spans, and the position
 /// line in the middle. A click returns the clicked position in ms.
@@ -351,9 +415,11 @@ pub fn show_detail(
         let last = (((start + span) * per_ms).ceil().max(0.0) as usize).min(len);
         (per_ms, first, last)
     };
-    let bar = |x0: f32, x1: f32, h: f32, color: egui::Color32| {
+    // Up to one bar per physical pixel (thousands), drawn as one mesh.
+    let mut bars = Bars::new(ui.ctx(), painter.clip_rect());
+    let mut bar = |x0: f32, x1: f32, h: f32, color: egui::Color32| {
         let h = h.max(0.5);
-        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x0, mid - h), egui::pos2(x1, mid + h)), 0.0, color);
+        bars.add(egui::Rect::from_min_max(egui::pos2(x0, mid - h), egui::pos2(x1, mid + h)), color);
     };
     match (view.filter(|_| style == Style::Rgb), &waves.detail_bands, &waves.scroll) {
         (Some(view), _, _) => {
@@ -413,6 +479,9 @@ pub fn show_detail(
             }
         }
         (None, None, None) => {}
+    }
+    if !bars.mesh.is_empty() {
+        painter.add(egui::Shape::mesh(bars.mesh));
     }
     for beat in &waves.grid {
         let ms = f64::from(beat.time_ms);

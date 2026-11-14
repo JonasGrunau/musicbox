@@ -57,10 +57,12 @@ pub fn volume_uuid(mount: &Path) -> Option<String> {
 /// Why writing to `mount` is refused, or `None` when it is allowed. Directories that are not a
 /// mounted volume (fixture copies) have no UUID and are allowed.
 pub fn write_refusal(mount: &Path) -> Option<String> {
-    if !mount.starts_with("/Volumes") {
+    // A symlink (or `..`) into /Volumes counts as the volume it points at.
+    let resolved = mount.canonicalize().unwrap_or_else(|_| mount.to_path_buf());
+    if !resolved.starts_with("/Volumes") {
         return None;
     }
-    match volume_uuid(mount) {
+    match volume_uuid(&resolved) {
         Some(uuid) if protected_uuids().contains(&uuid) => Some(format!("{} is write-protected (volume {uuid})", mount.display())),
         Some(_) => None,
         None => Some(format!("cannot identify volume {}; refusing to write", mount.display())),
@@ -79,5 +81,17 @@ mod tests {
     #[test]
     fn non_volume_dirs_are_allowed() {
         assert_eq!(write_refusal(Path::new("/tmp/some-fixture-copy")), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn links_into_volumes_are_checked() {
+        let link = std::env::temp_dir().join(format!("mb-protect-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/Volumes", &link).unwrap();
+        // `/Volumes` itself is no volume: refused, like any unidentified one.
+        let refusal = write_refusal(&link);
+        let _ = std::fs::remove_file(&link);
+        assert!(refusal.is_some());
     }
 }

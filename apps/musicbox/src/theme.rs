@@ -162,15 +162,30 @@ fn visuals() -> Visuals {
     v
 }
 
+/// The CJK fallback font. It is as large as SF (7.8 MB), so it is read on a worker and added
+/// when it arrives (within the first frames).
+const HIRAGINO: &str = "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc";
+
 /// The system UI font (SF Pro, a variable font) at text optical size in three weights, with
 /// Hiragino as the CJK fallback; egui's bundled fonts stay behind them for symbols. Elsewhere,
 /// or when the files are missing, egui's defaults remain.
 fn install_fonts(ctx: &Context) {
-    let mut fonts = egui::FontDefinitions::default();
     let Some(sf) = system_font("/System/Library/Fonts/SFNS.ttf") else {
-        ctx.set_fonts(fonts);
+        ctx.set_fonts(egui::FontDefinitions::default());
         return;
     };
+    ctx.set_fonts(font_definitions(sf, None));
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        if let Some(cjk) = system_font(HIRAGINO) {
+            ctx.set_fonts(font_definitions(sf, Some(cjk)));
+            ctx.request_repaint();
+        }
+    });
+}
+
+fn font_definitions(sf: &'static [u8], cjk: Option<&'static [u8]>) -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
     let face = |weight: f32| {
         let tweak = FontTweak { coords: VariationCoords::new([(b"wght", weight), (b"opsz", 17.0)]), ..Default::default() };
         Arc::new(FontData { font: std::borrow::Cow::Borrowed(sf), index: 0, tweak })
@@ -179,7 +194,7 @@ fn install_fonts(ctx: &Context) {
     fonts.font_data.insert("sf-medium".into(), face(510.0));
     fonts.font_data.insert("sf-semibold".into(), face(620.0));
     let mut fallbacks = Vec::new();
-    if let Some(cjk) = system_font("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc") {
+    if let Some(cjk) = cjk {
         fonts.font_data.insert("hiragino".into(), Arc::new(FontData::from_static(cjk)));
         fallbacks.push("hiragino".to_owned());
     }
@@ -192,19 +207,26 @@ fn install_fonts(ctx: &Context) {
         fonts.font_data.insert("sf-mono".into(), Arc::new(FontData::from_static(mono)));
         fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "sf-mono".into());
     }
-    ctx.set_fonts(fonts);
+    fonts
 }
 
 /// A system font file, read once per process and kept for its lifetime (the faces borrow it).
+/// The file is read outside the lock, so reading Hiragino on a worker blocks no other font.
 fn system_font(path: &'static str) -> Option<&'static [u8]> {
     /// (path, contents or `None` when unreadable)
     type Loaded = (&'static str, Option<&'static [u8]>);
     static CACHE: std::sync::Mutex<Vec<Loaded>> = std::sync::Mutex::new(Vec::new());
-    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock = || CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, bytes)) = lock().iter().find(|(p, _)| *p == path) {
+        return *bytes;
+    }
+    let read = std::fs::read(path).ok();
+    let mut cache = lock();
+    // Another thread may have read it meanwhile; keep the first copy.
     if let Some((_, bytes)) = cache.iter().find(|(p, _)| *p == path) {
         return *bytes;
     }
-    let bytes = std::fs::read(path).ok().map(|b| &*Box::leak(b.into_boxed_slice()));
+    let bytes = read.map(|b| &*Box::leak(b.into_boxed_slice()));
     cache.push((path, bytes));
     bytes
 }

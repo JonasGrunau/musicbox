@@ -9,6 +9,8 @@ use crate::icons::{self, Icon};
 use crate::theme;
 use mb_core::{DbId, LibrarySnapshot, PlaylistKind, PlaylistNode};
 use mb_library::{Command, NodeKind};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -233,6 +235,14 @@ impl Section {
         }
     }
 
+    /// `list` is this section's list `id` (without building one to compare).
+    fn is(self, list: &List, id: &DbId) -> bool {
+        match (self, list) {
+            (Self::Playlists, List::Playlist(l)) | (Self::Histories, List::History(l)) | (Self::MyTags, List::MyTag(l)) => l == id,
+            _ => false,
+        }
+    }
+
     fn icon(self) -> Icon {
         match self {
             Self::Playlists => Icon::Playlist,
@@ -289,9 +299,60 @@ fn library_lists(ui: &mut egui::Ui, label: &str, ctx: &mut Ctx) {
             });
         }
         if open {
-            children(ui, section, None, ctx.depth + 1, ctx);
+            let index = child_index(ui, egui::Id::new(("tree-children", section.title(), ctx.library_ref)), section.nodes(ctx.library));
+            children(ui, section, &index, None, ctx.depth + 1, ctx);
         }
     }
+}
+
+/// The children of each node of one list tree, in `seq` order: built once per snapshot rather
+/// than by filtering and sorting all nodes for every open folder in every frame.
+struct ChildIndex {
+    /// Address and length of the node slice it was built for. A changed library is a new
+    /// snapshot (the app reloads it), so its nodes live elsewhere.
+    built_for: (usize, usize),
+    roots: Vec<usize>,
+    /// By node index.
+    children: Vec<Vec<usize>>,
+}
+
+impl ChildIndex {
+    fn of(&self, parent: Option<usize>) -> &[usize] {
+        match parent {
+            None => &self.roots,
+            Some(i) => self.children.get(i).map_or(&[], Vec::as_slice),
+        }
+    }
+}
+
+/// The [`ChildIndex`] of `nodes`, kept in egui's temp data under `id`.
+fn child_index(ui: &egui::Ui, id: egui::Id, nodes: &[PlaylistNode]) -> Arc<ChildIndex> {
+    let key = (nodes.as_ptr() as usize, nodes.len());
+    if let Some(index) = ui.data(|d| d.get_temp::<Arc<ChildIndex>>(id)).filter(|i| i.built_for == key) {
+        return index;
+    }
+    let by_id: HashMap<&DbId, usize> = nodes.iter().enumerate().map(|(i, n)| (&n.id, i)).collect();
+    let mut roots = Vec::new();
+    let mut children = vec![Vec::new(); nodes.len()];
+    for (i, n) in nodes.iter().enumerate() {
+        match &n.parent {
+            None => roots.push(i),
+            // A node whose parent is missing is not shown, as before.
+            Some(p) => {
+                if let Some(&parent) = by_id.get(p) {
+                    children[parent].push(i);
+                }
+            }
+        }
+    }
+    // Stable: siblings with the same `seq` keep their order in `nodes`.
+    roots.sort_by_key(|&i| nodes[i].seq);
+    for list in &mut children {
+        list.sort_by_key(|&i| nodes[i].seq);
+    }
+    let index = Arc::new(ChildIndex { built_for: key, roots, children });
+    ui.data_mut(|d| d.insert_temp(id, index.clone()));
+    index
 }
 
 fn create_menu(ui: &mut egui::Ui, parent: Option<&DbId>, actions: &mut Vec<Action>) {
@@ -351,15 +412,11 @@ fn device_menu(ui: &mut egui::Ui, import_from: usize, writable: Option<usize>, p
     }
 }
 
-fn sorted_children<'a>(nodes: &'a [PlaylistNode], parent: Option<&DbId>) -> Vec<&'a PlaylistNode> {
-    let mut out: Vec<_> = nodes.iter().filter(|n| n.parent.as_ref() == parent).collect();
-    out.sort_by_key(|n| n.seq);
-    out
-}
-
-fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, depth: usize, ctx: &mut Ctx) {
+fn children(ui: &mut egui::Ui, section: Section, index: &ChildIndex, parent: Option<usize>, depth: usize, ctx: &mut Ctx) {
     let editable = ctx.editing && section == Section::Playlists;
-    for node in sorted_children(section.nodes(ctx.library), parent) {
+    let nodes = section.nodes(ctx.library);
+    for &i in index.of(parent) {
+        let Some(node) = nodes.get(i) else { continue };
         match node.kind {
             PlaylistKind::Folder => {
                 let id = egui::Id::new((section.title(), ctx.library_ref, &node.id.0));
@@ -374,25 +431,25 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, depth: u
                 } else if ctx.library_ref == LibraryRef::Xml {
                     header.context_menu(|ui| xml_menu(ui, node, ctx.actions));
                 } else if let Some(device) = ctx.device.filter(|_| section == Section::Playlists) {
-                    let path = name_path(section.nodes(ctx.library), node);
                     let import_from = ctx.import_from.unwrap_or(device);
-                    header.context_menu(|ui| device_menu(ui, import_from, Some(device), path, false, ctx.actions));
+                    // The name path only while the menu is open, not for every row and frame.
+                    header.context_menu(|ui| device_menu(ui, import_from, Some(device), name_path(nodes, node), false, ctx.actions));
                 }
                 if open {
-                    children(ui, section, Some(&node.id), depth + 1, ctx);
+                    children(ui, section, index, Some(i), depth + 1, ctx);
                 }
             }
             PlaylistKind::Playlist | PlaylistKind::Smart => {
-                let this = Source { library: ctx.library_ref, list: section.list(node.id.clone()) };
                 let icon = match (section, node.kind) {
                     (_, PlaylistKind::Smart) => Icon::Smart,
                     (Section::Playlists, _) => Icon::Playlist,
                     (other, _) => other.icon(),
                 };
                 let count = section.count(ctx.library, &node.id);
-                let response = Row { depth, icon, label: &node.name, selected: *ctx.source == this, open: None, count }.show(ui);
+                let selected = ctx.source.library == ctx.library_ref && section.is(&ctx.source.list, &node.id);
+                let response = Row { depth, icon, label: &node.name, selected, open: None, count }.show(ui);
                 if response.clicked() {
-                    *ctx.source = this;
+                    *ctx.source = Source { library: ctx.library_ref, list: section.list(node.id.clone()) };
                 }
                 // Smart lists export their current tracks as a plain device playlist.
                 let exportable = ctx.library_ref == LibraryRef::Local && section == Section::Playlists;
@@ -427,9 +484,8 @@ fn children(ui: &mut egui::Ui, section: Section, parent: Option<&DbId>, depth: u
                 } else if ctx.library_ref == LibraryRef::Xml {
                     response.context_menu(|ui| xml_menu(ui, node, ctx.actions));
                 } else if let Some(import_from) = ctx.import_from.filter(|_| section == Section::Playlists) {
-                    let path = name_path(section.nodes(ctx.library), node);
                     let writable = ctx.device;
-                    response.context_menu(|ui| device_menu(ui, import_from, writable, path, true, ctx.actions));
+                    response.context_menu(|ui| device_menu(ui, import_from, writable, name_path(nodes, node), true, ctx.actions));
                 }
                 if editable && node.kind == PlaylistKind::Playlist {
                     if response.dnd_hover_payload::<TrackDrag>().is_some() {

@@ -1,10 +1,13 @@
 //! "Import to Collection" and "Import Histories" for a device (`docs/re/ops/import-device.md`).
-//! The commands run on the editor thread like every library write; the stick-side follow-ups
-//! (new master IDs on the device rows, `ImportedHistory.xml`) are applied here afterwards, and
-//! only to devices musicbox may write to.
+//! The commands run on the editor thread like every library write, and so does everything that
+//! touches the stick: reading export.pdb to build the command, and the stick-side follow-ups
+//! (new master IDs on the device rows, `ImportedHistory.xml`) afterwards, only on devices
+//! musicbox may write to.
 
-use mb_library::{Command, DeviceHistory, DeviceImport, ImportedHistory, LocalTime};
+use crate::editor::{DeviceNote, Request};
+use mb_library::{Command, DeviceHistory, DeviceImport, Effect, ImportedHistory, LocalTime};
 use mb_pdb::{ExportDb, Pdb};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 fn rekordbox_dir(root: &Path) -> PathBuf {
@@ -38,9 +41,15 @@ pub fn import_command(root: &Path, playlist: Option<&[String]>, tracks: &[PathBu
             (entries.iter().map(|e| e.track_id).collect(), path.last().cloned())
         }
         None => {
-            let mut ids: Vec<u32> = all.values().filter(|t| tracks.contains(&t.audio)).map(|t| t.device_id).collect();
-            ids.sort_by_key(|id| tracks.iter().position(|p| *p == all[id].audio));
-            (ids, None)
+            // In the order of `tracks` (first occurrence of a path).
+            let mut order: HashMap<&Path, usize> = HashMap::with_capacity(tracks.len());
+            for (i, p) in tracks.iter().enumerate() {
+                order.entry(p.as_path()).or_insert(i);
+            }
+            let mut ids: Vec<(usize, u32)> =
+                all.values().filter_map(|t| order.get(t.audio.as_path()).map(|&i| (i, t.device_id))).collect();
+            ids.sort_by_key(|&(i, _)| i);
+            (ids.into_iter().map(|(_, id)| id).collect(), None)
         }
     };
     if ids.is_empty() {
@@ -48,6 +57,39 @@ pub fn import_command(root: &Path, playlist: Option<&[String]>, tracks: &[PathBu
     }
     let tracks = ids.iter().filter_map(|id| all.get(id).cloned()).collect();
     Ok(Command::ImportFromDevice { import: DeviceImport { tracks, copy_to, playlist: name } })
+}
+
+/// The editor request for "Import to Collection" from the device at `root` (`writable`: not a
+/// protected volume).
+pub fn import_request(root: PathBuf, writable: bool, playlist: Option<Vec<String>>, tracks: Vec<PathBuf>, copy_to: PathBuf) -> Request {
+    let device = root.clone();
+    Request::Device {
+        build: Box::new(move || import_command(&device, playlist.as_deref(), &tracks, copy_to).map_err(|e| format!("Import failed: {e}"))),
+        after: follow_up(root, writable),
+    }
+}
+
+/// The editor request for "Import Histories" from the device at `root`.
+pub fn histories_request(root: PathBuf, writable: bool) -> Request {
+    let device = root.clone();
+    Request::Device {
+        build: Box::new(move || histories_command(&device).map_err(|e| format!("History import: {e}"))),
+        after: follow_up(root, writable),
+    }
+}
+
+fn follow_up(root: PathBuf, writable: bool) -> Box<dyn FnOnce(&Effect) -> DeviceNote + Send> {
+    Box::new(move |effect| {
+        // Checked again before writing, like exports (the stick may have been swapped).
+        if !writable || crate::protect::write_refusal(&root).is_some() {
+            return DeviceNote { note: Some("device is protected, nothing written to it".into()), reload: None };
+        }
+        match apply_to_device(&root, effect) {
+            Ok(Some(note)) => DeviceNote { note: Some(note), reload: Some(root) },
+            Ok(None) => DeviceNote::default(),
+            Err(e) => DeviceNote { note: Some(format!("device not updated: {e}")), reload: None },
+        }
+    })
 }
 
 /// The history import command: every export.pdb history not yet in `ImportedHistory.xml`.

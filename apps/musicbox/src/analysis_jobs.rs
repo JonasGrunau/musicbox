@@ -5,7 +5,7 @@
 
 use mb_core::DbId;
 use mb_library::{AnalysisSettings, TrackAnalysis, analyse_track_with, stored_grid};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
@@ -22,7 +22,12 @@ pub struct Job {
     /// high precision finds no beats.
     pub stored_dat: Option<PathBuf>,
     pub stored_bpm: Option<i64>,
+    /// The user asked for it: a missing audio file is reported (automatic jobs skip it quietly).
+    pub explicit: bool,
 }
+
+/// The result of a job whose audio file is missing (checked by the worker, not the UI thread).
+pub const MISSING_FILE: &str = "the audio file is missing";
 
 /// A finished analysis.
 pub struct Finished {
@@ -44,11 +49,44 @@ pub struct Progress {
 struct State {
     queue: VecDeque<Job>,
     running: Vec<(DbId, String)>,
+    /// Tracks queued or running (`queue` and `running` by ID), so queueing a whole collection
+    /// stays linear.
+    known: HashSet<DbId>,
     done: usize,
     total: usize,
     /// Bumped by `cancel`: results of an older generation are dropped.
     generation: u64,
     shutdown: bool,
+}
+
+impl State {
+    /// Queues `job` unless its track is already queued or running.
+    fn push(&mut self, job: Job) -> bool {
+        if !self.known.insert(job.content.clone()) {
+            return false;
+        }
+        self.queue.push_back(job);
+        self.total += 1;
+        true
+    }
+
+    /// Drops the queue; running jobs stay known until they finish.
+    fn clear_queue(&mut self) {
+        for job in self.queue.drain(..) {
+            self.known.remove(&job.content);
+        }
+    }
+
+    fn prioritize(&mut self, content: &DbId) {
+        if !self.known.contains(content) || self.queue.front().is_some_and(|j| j.content == *content) {
+            return;
+        }
+        if let Some(i) = self.queue.iter().position(|j| j.content == *content)
+            && let Some(job) = self.queue.remove(i)
+        {
+            self.queue.push_front(job);
+        }
+    }
 }
 
 type Shared = Arc<(Mutex<State>, Condvar)>;
@@ -82,34 +120,28 @@ impl AnalysisQueue {
         let mut s = lock.lock().unwrap();
         let mut added = 0;
         for job in jobs {
-            let known = s.queue.iter().any(|j| j.content == job.content) || s.running.iter().any(|(id, _)| *id == job.content);
-            if !known {
-                s.queue.push_back(job);
-                s.total += 1;
-                added += 1;
-            }
+            added += usize::from(s.push(job));
         }
         cv.notify_all();
         added
     }
 
-    /// Moves a queued track to the front (the selected track goes first).
+    /// Moves a queued track to the front (the selected track goes first). Called every frame:
+    /// cheap when the track is not queued or already first.
     pub fn prioritize(&self, content: &DbId) {
-        let (lock, _) = &*self.shared;
-        let mut s = lock.lock().unwrap();
-        if let Some(i) = s.queue.iter().position(|j| j.content == *content)
-            && i > 0
-            && let Some(job) = s.queue.remove(i)
-        {
-            s.queue.push_front(job);
-        }
+        self.shared.0.lock().unwrap().prioritize(content);
+    }
+
+    /// Analyses are queued or running.
+    pub fn busy(&self) -> bool {
+        !self.shared.0.lock().unwrap().known.is_empty()
     }
 
     /// Drops the queue; running analyses finish, but their results are discarded.
     pub fn cancel(&self) {
         let (lock, _) = &*self.shared;
         let mut s = lock.lock().unwrap();
-        s.queue.clear();
+        s.clear_queue();
         s.generation += 1;
         s.done = 0;
         s.total = 0;
@@ -139,7 +171,7 @@ impl Drop for AnalysisQueue {
         let (lock, cv) = &*self.shared;
         let mut s = lock.lock().unwrap();
         s.shutdown = true;
-        s.queue.clear();
+        s.clear_queue();
         cv.notify_all();
     }
 }
@@ -160,19 +192,94 @@ fn worker(shared: &Shared, tx: &Sender<(u64, Finished)>, ctx: &egui::Context, se
                 s = cv.wait(s).unwrap();
             }
         };
-        let stored = settings.high_precision.and(job.stored_dat.as_deref()).and_then(|dat| stored_grid(dat, job.stored_bpm));
-        let result =
-            analyse_track_with(&job.audio, &job.file_name, &settings, stored.as_ref()).map(Box::new).map_err(|e| e.to_string());
+        // Missing files are skipped (the app used to check them on the UI thread, one stat per
+        // track of the collection); only explicit jobs report them.
+        let present = job.audio.is_file();
+        let result = if present {
+            let stored = settings.high_precision.and(job.stored_dat.as_deref()).and_then(|dat| stored_grid(dat, job.stored_bpm));
+            analyse_track_with(&job.audio, &job.file_name, &settings, stored.as_ref()).map(Box::new).map_err(|e| e.to_string())
+        } else {
+            Err(MISSING_FILE.to_owned())
+        };
         {
             let mut s = lock.lock().unwrap();
             if let Some(i) = s.running.iter().position(|(id, _)| *id == job.content) {
                 s.running.remove(i);
             }
+            s.known.remove(&job.content);
             if s.generation == generation {
                 s.done += 1;
             }
         }
-        let _ = tx.send((generation, Finished { content: job.content, title: job.title, result }));
+        if present || job.explicit {
+            let _ = tx.send((generation, Finished { content: job.content, title: job.title, result }));
+        }
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(id: &str) -> Job {
+        Job {
+            content: DbId(id.into()),
+            audio: PathBuf::from(format!("/nonexistent/{id}.mp3")),
+            file_name: format!("{id}.mp3"),
+            title: id.into(),
+            stored_dat: None,
+            stored_bpm: None,
+            explicit: false,
+        }
+    }
+
+    #[test]
+    fn queued_and_running_tracks_are_not_queued_twice() {
+        let mut s = State::default();
+        assert!(s.push(job("1")));
+        assert!(s.push(job("2")));
+        assert!(!s.push(job("1")), "already queued");
+        // "1" starts running, as a worker takes it.
+        let running = s.queue.pop_front().unwrap();
+        s.running.push((running.content.clone(), running.title));
+        assert!(!s.push(job("1")), "running");
+        assert_eq!((s.queue.len(), s.total), (1, 2));
+        // Cancelling drops the queue but not the running track.
+        s.clear_queue();
+        assert!(s.push(job("2")));
+        assert!(!s.push(job("1")));
+    }
+
+    #[test]
+    fn prioritize_moves_a_queued_track_first() {
+        let mut s = State::default();
+        for id in ["1", "2", "3"] {
+            s.push(job(id));
+        }
+        s.prioritize(&DbId("3".into()));
+        s.prioritize(&DbId("9".into()));
+        let order: Vec<&str> = s.queue.iter().map(|j| j.content.0.as_str()).collect();
+        assert_eq!(order, ["3", "1", "2"]);
+    }
+
+    #[test]
+    fn missing_files_finish_quietly_unless_asked_for() {
+        let ctx = egui::Context::default();
+        let queue = AnalysisQueue::new(&ctx, AnalysisSettings::default(), 1);
+        let asked = Job { explicit: true, ..job("asked") };
+        assert_eq!(queue.enqueue(vec![job("auto"), asked, job("auto")]), 2);
+        let start = std::time::Instant::now();
+        let mut finished = Vec::new();
+        while queue.busy() || finished.is_empty() {
+            assert!(start.elapsed().as_secs() < 10, "queue did not drain");
+            finished.extend(queue.poll());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        finished.extend(queue.poll());
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].content, DbId("asked".into()));
+        assert_eq!(finished[0].result.as_ref().err().map(String::as_str), Some(MISSING_FILE));
     }
 }

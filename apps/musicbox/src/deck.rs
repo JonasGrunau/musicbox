@@ -7,6 +7,8 @@ use crate::theme;
 use crate::waveform;
 use mb_core::Track;
 use mb_core::key::{KeyNotation, display as key_display};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Height of the zoomed waveform strip.
 pub const DETAIL_HEIGHT: f32 = 64.0;
@@ -24,17 +26,39 @@ pub fn height(controls: bool) -> f32 {
     if controls { base + 2.0 * CONTROL_HEIGHT + 6.0 + PAD } else { base }
 }
 
+/// The artwork the deck shows: the track's artwork path and the chosen image's URI. Kept in egui's
+/// temp data so the files are looked up when the track changes, not every frame.
+#[derive(Clone, Default)]
+struct DeckArtwork {
+    source: Option<PathBuf>,
+    uri: Option<Arc<str>>,
+}
+
 /// Track artwork, preferring the 240 px `_m` variant that rekordbox writes next to the small one.
-pub fn artwork(ui: &mut egui::Ui, path: Option<&std::path::Path>, size: f32) {
-    let larger = path.map(|p| {
-        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-        p.with_file_name(format!("{stem}_m.jpg"))
+/// The previous track's image is forgotten (egui keeps loaded images until told otherwise).
+pub fn artwork(ui: &mut egui::Ui, path: Option<&Path>, size: f32) {
+    let id = egui::Id::new("deck-artwork");
+    let cached = ui.data_mut(|d| {
+        let shown = d.get_temp_mut_or_default::<DeckArtwork>(id);
+        (shown.source.as_deref() == path).then(|| shown.uri.clone())
     });
-    let chosen = larger.filter(|p| p.is_file()).or_else(|| path.map(|p| p.to_path_buf())).filter(|p| p.is_file());
+    let uri = cached.unwrap_or_else(|| {
+        let larger = path.map(|p| {
+            let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            p.with_file_name(format!("{stem}_m.jpg"))
+        });
+        let chosen = larger.filter(|p| p.is_file()).or_else(|| path.map(Path::to_path_buf)).filter(|p| p.is_file());
+        let uri: Option<Arc<str>> = chosen.map(|p| Arc::from(format!("file://{}", p.display())));
+        let previous = ui.data_mut(|d| std::mem::replace(d.get_temp_mut_or_default::<DeckArtwork>(id), DeckArtwork { source: path.map(Path::to_path_buf), uri: uri.clone() }).uri);
+        if let Some(previous) = previous.filter(|p| Some(p) != uri.as_ref()) {
+            ui.ctx().forget_image(&previous);
+        }
+        uri
+    });
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    match chosen {
-        Some(p) => {
-            egui::Image::new(format!("file://{}", p.display())).corner_radius(4.0).paint_at(ui, rect);
+    match uri {
+        Some(uri) => {
+            egui::Image::new(&*uri).corner_radius(4.0).paint_at(ui, rect);
         }
         None => {
             ui.painter().rect_filled(rect, 4.0, theme::BG_RAISED);
@@ -151,6 +175,8 @@ pub fn empty_well(ui: &mut egui::Ui, height: f32, note: &str) {
 /// State of the editing switch in the top bar.
 pub enum EditState {
     ReadOnly,
+    /// Turned off, still saving the edits queued before.
+    Saving,
     Starting,
     Editing,
 }
@@ -159,6 +185,7 @@ pub enum EditState {
 pub fn editing_switch(ui: &mut egui::Ui, state: EditState) -> egui::Response {
     let (label, icon, on) = match state {
         EditState::ReadOnly => ("Read-only", Icon::Lock, false),
+        EditState::Saving => ("Read-only (saving…)", Icon::Lock, false),
         EditState::Starting => ("Editing (starting…)", Icon::Unlock, true),
         EditState::Editing => ("Editing", Icon::Unlock, true),
     };
