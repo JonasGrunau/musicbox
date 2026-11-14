@@ -1,8 +1,9 @@
 //! Left-hand tree: per library (local, then each device) the collection, playlists, histories
 //! and My Tags. When editing is on, the local playlists get context menus and accept dropped
-//! tracks.
+//! tracks. Local tracks (from the table) and local lists (from this tree) dropped on a device
+//! are exported to it.
 
-use crate::actions::{Action, TrackDrag};
+use crate::actions::{Action, ExportItem, PlaylistDrag, TrackDrag};
 use crate::app::{LibraryRef, List, Source};
 use crate::devices::{DeviceState, Devices};
 use crate::icons::{self, Icon};
@@ -44,6 +45,7 @@ pub fn show(
                 Some(reason) => response.on_hover_text(reason),
                 None => response,
             };
+            export_drop(ui, &response, i, device.write_refusal.is_none(), &mut actions);
             if response.clicked() {
                 open = !open;
                 ui.data_mut(|d| d.insert_temp(id, open));
@@ -115,7 +117,51 @@ pub fn show(
         }
         ui.add_space(8.0);
     });
+    if let Some(drag) = egui::DragAndDrop::payload::<PlaylistDrag>(ui.ctx()) {
+        egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("list-drag"), egui::PopupAnchor::Pointer)
+            .show(|ui| ui.label(&drag.name));
+    }
     actions
+}
+
+/// A device row, or its "All Tracks", as a drop target. Tracks dragged from the local table go
+/// to the device without a playlist; a local list dragged from the tree is exported with its
+/// tracks, like "Export to". A drop on a device musicbox may not write to still becomes an
+/// export action, so that `App::start_export` shows the reason.
+fn export_drop(ui: &egui::Ui, response: &egui::Response, device: usize, writable: bool, actions: &mut Vec<Action>) {
+    // `dnd_release_payload` takes the payload even when it is of another type: look first.
+    let tracks = response.dnd_hover_payload::<TrackDrag>().is_some();
+    if !tracks && response.dnd_hover_payload::<PlaylistDrag>().is_none() {
+        return;
+    }
+    if writable {
+        drop_highlight(ui, response.rect);
+    }
+    let item = if tracks {
+        response.dnd_release_payload::<TrackDrag>().map(|d| ExportItem::Tracks(d.0.clone()))
+    } else {
+        response.dnd_release_payload::<PlaylistDrag>().map(|d| ExportItem::Playlist(d.id.clone()))
+    };
+    if let Some(item) = item {
+        actions.push(Action::Export { item, device });
+    }
+}
+
+/// The accent edge around a row that takes what is being dragged.
+fn drop_highlight(ui: &egui::Ui, rect: egui::Rect) {
+    ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.5, crate::theme::ACCENT), egui::StrokeKind::Inside);
+}
+
+/// Local playlists, intelligent playlists and folders can be dragged onto a device (export).
+fn list_drag(response: egui::Response, ctx: &Ctx, section: Section, node: &PlaylistNode) -> egui::Response {
+    if ctx.library_ref != LibraryRef::Local || section != Section::Playlists {
+        return response;
+    }
+    let response = response.interact(egui::Sense::drag());
+    if response.drag_started() {
+        egui::DragAndDrop::set_payload(&response.ctx, PlaylistDrag { id: node.id.clone(), name: node.name.clone() });
+    }
+    response
 }
 
 /// Horizontal step per tree level.
@@ -273,8 +319,13 @@ impl Section {
 fn library_lists(ui: &mut egui::Ui, label: &str, ctx: &mut Ctx) {
     let collection = Source { library: ctx.library_ref, list: List::Collection };
     let row = Row { depth: ctx.depth, icon: Icon::Collection, label, selected: *ctx.source == collection, open: None, count: Some(ctx.library.tracks.len()) };
-    if row.show(ui).clicked() {
+    let response = row.show(ui);
+    if response.clicked() {
         *ctx.source = collection;
+    }
+    // A device's "All Tracks" takes exports like the device row.
+    if let Some(device) = ctx.import_from {
+        export_drop(ui, &response, device, ctx.device.is_some(), ctx.actions);
     }
     for section in [Section::Playlists, Section::Histories, Section::MyTags] {
         let editable = ctx.editing && section == Section::Playlists;
@@ -422,6 +473,7 @@ fn children(ui: &mut egui::Ui, section: Section, index: &ChildIndex, parent: Opt
                 let id = egui::Id::new((section.title(), ctx.library_ref, &node.id.0));
                 let mut open = ui.data_mut(|d| *d.get_temp_mut_or(id, false));
                 let header = Row { depth, icon: Icon::Folder, label: &node.name, selected: false, open: Some(open), count: None }.show(ui);
+                let header = list_drag(header, ctx, section, node);
                 if header.clicked() {
                     open = !open;
                     ui.data_mut(|d| d.insert_temp(id, open));
@@ -448,6 +500,7 @@ fn children(ui: &mut egui::Ui, section: Section, index: &ChildIndex, parent: Opt
                 let count = section.count(ctx.library, &node.id);
                 let selected = ctx.source.library == ctx.library_ref && section.is(&ctx.source.list, &node.id);
                 let response = Row { depth, icon, label: &node.name, selected, open: None, count }.show(ui);
+                let response = list_drag(response, ctx, section, node);
                 if response.clicked() {
                     *ctx.source = Source { library: ctx.library_ref, list: section.list(node.id.clone()) };
                 }
@@ -467,7 +520,7 @@ fn children(ui: &mut egui::Ui, section: Section, index: &ChildIndex, parent: Opt
                                     None => button,
                                 };
                                 if button.clicked() {
-                                    ctx.actions.push(Action::Export { playlist: node.id.clone(), device: *index });
+                                    ctx.actions.push(Action::Export { item: ExportItem::Playlist(node.id.clone()), device: *index });
                                     ui.close();
                                 }
                             }
@@ -489,12 +542,7 @@ fn children(ui: &mut egui::Ui, section: Section, index: &ChildIndex, parent: Opt
                 }
                 if editable && node.kind == PlaylistKind::Playlist {
                     if response.dnd_hover_payload::<TrackDrag>().is_some() {
-                        ui.painter().rect_stroke(
-                            response.rect,
-                            2.0,
-                            egui::Stroke::new(1.5, crate::theme::ACCENT),
-                            egui::StrokeKind::Inside,
-                        );
+                        drop_highlight(ui, response.rect);
                     }
                     if let Some(drag) = response.dnd_release_payload::<TrackDrag>() {
                         ctx.actions.push(Action::Run(Command::AddTracks {

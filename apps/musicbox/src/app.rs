@@ -922,7 +922,7 @@ impl App {
                     self.dialog = editor.map(|e| Dialog::Smart(Box::new(e)));
                 }
                 Action::AskRemoveFromCollection(ids) => self.dialog = Some(Dialog::ConfirmRemove { ids }),
-                Action::Export { playlist, device } => self.start_export(playlist, device),
+                Action::Export { item, device } => self.start_export(item, device),
                 Action::AskRemoveFromDevice { device, playlists, tracks } => self.ask_remove_from_device(device, playlists, tracks),
                 Action::ImportFromDevice { device, playlist, tracks } => self.import_from_device(device, playlist, tracks),
                 Action::ImportHistories { device } => self.import_histories(device),
@@ -949,7 +949,7 @@ impl App {
         }
     }
 
-    fn start_export(&mut self, playlist: DbId, device: usize) {
+    fn start_export(&mut self, item: crate::actions::ExportItem, device: usize) {
         if self.export.is_some() {
             self.edit_status = Some("An export is already running".into());
             return;
@@ -961,7 +961,7 @@ impl App {
             self.edit_status = Some(reason.clone());
             return;
         }
-        self.export = Some(ExportJob::start(&self.ctx, source, playlist, target.root.clone(), target.name.clone()));
+        self.export = Some(ExportJob::start(&self.ctx, source, item, target.root.clone(), target.name.clone()));
     }
 
     fn ask_remove_from_device(&mut self, device: usize, playlists: Vec<Vec<String>>, tracks: Vec<PathBuf>) {

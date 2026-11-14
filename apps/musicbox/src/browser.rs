@@ -558,7 +558,9 @@ pub fn show(ui: &mut egui::Ui, library: &LibrarySnapshot, source: &Source, state
                     click_row(state, display_index, track_index, mods, response.secondary_clicked());
                     state.selected = Some((source.library, track_index));
                 }
-                if editable && response.drag_started() {
+                // Local tracks drag onto a local playlist (editing on) or a device (export,
+                // which leaves the library as it is, so editing may be off).
+                if source.library == LibraryRef::Local && response.drag_started() {
                     if !is_selected {
                         click_row(state, display_index, track_index, egui::Modifiers::NONE, false);
                     }

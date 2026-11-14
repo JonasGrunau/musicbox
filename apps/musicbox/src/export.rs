@@ -2,7 +2,7 @@
 //! progress and cancellation. Refuses protected volumes and runs only while rekordbox is closed
 //! (rekordbox rewrites every stick it sees).
 
-use mb_core::DbId;
+use crate::actions::ExportItem;
 use mb_usb::source::LibraryDir;
 use mb_usb::{CancelToken, DeviceState, ExportOptions, PlanOptions, Progress, SelectionItem, SourceLibrary};
 use std::path::PathBuf;
@@ -38,12 +38,16 @@ fn log_dir() -> Option<PathBuf> {
 }
 
 impl ExportJob {
-    pub fn start(ctx: &egui::Context, source: Source, playlist: DbId, device_root: PathBuf, device_name: String) -> Self {
+    pub fn start(ctx: &egui::Context, source: Source, item: ExportItem, device_root: PathBuf, device_name: String) -> Self {
         let (tx, rx) = channel();
         let cancel = CancelToken::new();
         let (ctx, root, token) = (ctx.clone(), device_root.clone(), cancel.clone());
+        let selection = vec![match item {
+            ExportItem::Playlist(id) => SelectionItem::Playlist(id.0),
+            ExportItem::Tracks(ids) => SelectionItem::Tracks(ids.into_iter().map(|id| id.0).collect()),
+        }];
         std::thread::spawn(move || {
-            let result = run(&source, &playlist, &root, &token, &mut |p| {
+            let result = run(&source, selection, &root, &token, &mut |p| {
                 let _ = tx.send(Msg::Progress(p.clone()));
                 ctx.request_repaint();
             });
@@ -74,7 +78,13 @@ fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
     h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
 }
 
-fn run(source: &Source, playlist: &DbId, root: &std::path::Path, cancel: &CancelToken, progress: &mut dyn FnMut(&Progress)) -> Result<String, String> {
+fn run(
+    source: &Source,
+    selection: Vec<SelectionItem>,
+    root: &std::path::Path,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(&Progress),
+) -> Result<String, String> {
     // The stick side (the protection check runs `diskutil`; the load reads the whole stick) and
     // the library side are independent: both run at once. Nothing is written before both
     // checks have passed.
@@ -88,8 +98,7 @@ fn run(source: &Source, playlist: &DbId, root: &std::path::Path, cancel: &Cancel
             }
             let library = LibraryDir::open_paths(&source.db_path, &source.passphrase, source.analysis_root.clone(), source.settings_root.clone())
                 .map_err(|e| e.to_string())?;
-            let selection = vec![SelectionItem::Playlist(playlist.0.clone())];
-            let src = SourceLibrary::load(library.connection(), &library.analysis_root, &selection).map_err(|e| e.to_string())?;
+            let src =SourceLibrary::load(library.connection(), &library.analysis_root, &selection).map_err(|e| e.to_string())?;
             Ok((library, selection, src))
         })();
         (join(refusal), join(device), local)

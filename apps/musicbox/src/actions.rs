@@ -3,9 +3,25 @@
 use mb_core::DbId;
 use mb_library::{Command, NodeKind};
 
-/// Payload while tracks are dragged from the table.
+/// Payload while local collection tracks are dragged from the table.
 #[derive(Clone)]
 pub struct TrackDrag(pub Vec<DbId>);
+
+/// Payload while a local playlist, intelligent playlist or folder is dragged from the tree.
+#[derive(Clone)]
+pub struct PlaylistDrag {
+    pub id: DbId,
+    pub name: String,
+}
+
+/// What an export writes to a device.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExportItem {
+    /// A local playlist, intelligent playlist or folder, with everything in it.
+    Playlist(DbId),
+    /// Collection tracks, written to the device without a playlist (rekordbox's `export_track`).
+    Tracks(Vec<DbId>),
+}
 
 pub enum Action {
     Run(Command),
@@ -17,8 +33,8 @@ pub enum Action {
     /// Opens the intelligent playlist editor: a new list under `parent`, or the list `id`.
     AskSmartList { parent: Option<DbId>, id: Option<DbId> },
     AskRemoveFromCollection(Vec<DbId>),
-    /// Export a local playlist to the device at this index of `Devices::list`.
-    Export { playlist: DbId, device: usize },
+    /// Export local lists or tracks to the device at this index of `Devices::list`.
+    Export { item: ExportItem, device: usize },
     CancelExport,
     /// Confirm, then remove lists (name paths from the top level) and/or tracks (absolute
     /// paths) from the device at this index of `Devices::list`.
