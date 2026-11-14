@@ -13,8 +13,8 @@ Newest entry first. Each entry records what changed, what is verified, and the n
 | Fixed on the way | A segfault at exit in the test binaries (the editor thread closed its SQLCipher connection while the process exited); `App` now joins it. `protect.rs` follows symlinks before checking for `/Volumes` |
 | Tests | `cargo test` for musicbox, mb-usb, mb-devlib, mb-core, mb-library, mb-player, mb-masterdb, mb-pdb: all pass, oracle export included; clippy clean; `perf_lists` numbers in `design.md` |
 | Not done | Patching the snapshot in place after an edit (each edit still reloads, now cheaper) and keeping the multi-selection over a reload; one long-lived audio output stream; planner lookups are linear scans (under 0.5 s even at 2 000 tracks onto 20 000) |
-| Open question | rekordbox leaves no `._` files, presumably because the system installer writes its bundle without `com.apple.provenance`. An installer-built musicbox (`.pkg`) might avoid the companions and about half the file-system work per track; untested |
-| Next | Time rekordbox's own export of the same 30 tracks onto RBTEST for comparison |
+| Installer package | An app installed by the system installer is not tagged with `com.apple.provenance`, so what it writes to FAT gets no `._` companions (checked with a test app installed by `sudo installer`; rekordbox's bundle carries no tag either). The export example installed that way: 157 tracks with 1 KiB audio on a FAT32 image in 1.3–1.4 s instead of 4.9–5.3 s. `tools/bundle/bundle.sh --pkg` builds `target/bundle/musicbox.pkg` (payload without attributes, installs `/Applications/musicbox.app`) |
+| Next | Install musicbox from the package and time a 30-track export onto RBTEST (expected well under the 65 s of a tagged build); time rekordbox's own export of the same tracks |
 
 ## 2026-10-15 — zoomed waveform without gaps
 | Part | State |
